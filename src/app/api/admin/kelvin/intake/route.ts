@@ -37,7 +37,7 @@ export async function GET(request: Request) {
   if (!readIntakeConfig(intakeEnv()).configured) return NextResponse.json({ configured: false });
   const supabase = getSupabaseServerClient();
   if (!supabase) return NextResponse.json({ configured: false });
-  const contract = await supabase.rpc('kelvin_intake_receipt_contract_v2');
+  const contract = await supabase.rpc('kelvin_intake_receipt_contract_v3');
   return NextResponse.json({ configured: !contract.error && contract.data === 'ok' });
 }
 
@@ -94,7 +94,7 @@ export async function POST(request: Request) {
     },
     contract: async () => {
       if (!supabase) return false;
-      const result = await supabase.rpc('kelvin_intake_receipt_contract_v2');
+      const result = await supabase.rpc('kelvin_intake_receipt_contract_v3');
       return !result.error && result.data === 'ok';
     },
   });
