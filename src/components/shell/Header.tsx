@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Menu, ShoppingBag } from 'lucide-react';
-import { PRIMARY_NAV, UTILITY_LEFT } from '@/lib/nav';
+import { PRIMARY_NAV, UTILITY_LEFT, UTILITY_RIGHT } from '@/lib/nav';
 import { useReservation } from '@/components/reserve/ReservationProvider';
 import { Wordmark } from './Wordmark';
 import { MobileMenu } from './MobileMenu';
@@ -59,6 +59,16 @@ export function Header() {
               <Wordmark />
             </div>
             <ul className="flex items-center justify-end gap-6">
+              {UTILITY_RIGHT.map((link) => (
+                <li key={link.href}>
+                  <Link
+                    href={link.href}
+                    className="cedar-underline text-caption uppercase tracking-eyebrow text-tertiary"
+                  >
+                    {link.label}
+                  </Link>
+                </li>
+              ))}
               <li>
                 <Link
                   href="/reserve"
@@ -106,6 +116,16 @@ export function Header() {
             <Menu size={20} strokeWidth={1.5} aria-hidden="true" />
           </button>
           <Wordmark />
+          <div className="flex items-center gap-3">
+            {UTILITY_RIGHT.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                className="cedar-underline text-caption uppercase tracking-eyebrow text-tertiary"
+              >
+                {link.label}
+              </Link>
+            ))}
           <Link
             href="/reserve"
             aria-label={`Reservations, ${reserveCount} items`}
@@ -116,6 +136,7 @@ export function Header() {
               ({reserveCount})
             </span>
           </Link>
+          </div>
         </div>
       </div>
 

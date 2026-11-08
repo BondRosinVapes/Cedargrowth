@@ -7,6 +7,10 @@ export type CrmBrand = (typeof CRM_BRANDS)[number];
 
 export const CRM_ROUTE = '/admin/crm';
 export const CRM_HREF = 'https://cedargrowth.vercel.app/admin/crm';
+export const SALES_SIGNIN_PATH = '/sales/signin';
+export const SALES_SIGNIN_HREF = 'https://cedargrowth.vercel.app/sales/signin';
+export const SALES_AT_COOKIE = 'sales-at';
+export const SALES_RT_COOKIE = 'sales-rt';
 export const WHOLESALE_ROUTE = '/manufacturing';
 export const WHOLESALE_LEGACY_PATH = '/wholesale';
 export const WHOLESALE_BRAND: CrmBrand = 'cedargrowth';
@@ -78,12 +82,18 @@ export function sameContact(
   return a.id === b.id;
 }
 
+export type DeskRole = 'owner' | 'administrator' | 'salesperson';
+export type MembershipRole = 'administrator' | 'salesperson';
+
+export type DeskGrant = { brand: CrmBrand; role: DeskRole };
+
 export type Authz =
-  | { ok: true; email: string; brand: CrmBrand }
+  | { ok: true; actorId: string; brand: CrmBrand; role: DeskRole }
   | { ok: false; status: number; reason: string };
 
 export function authorizeCrmRequest(input: {
-  adminEmail: string | null;
+  actorId: string | null;
+  grants: readonly DeskGrant[];
   method: string;
   requestOrigin: string;
   headerOrigin: string | null;
@@ -91,7 +101,8 @@ export function authorizeCrmRequest(input: {
   headerFetchSite: string | null;
   brandRaw: string | null;
 }): Authz {
-  if (!input.adminEmail) return { ok: false, status: 404, reason: 'Not found' };
+  if (!input.actorId) return { ok: false, status: 404, reason: 'Not found' };
+  if (input.grants.length === 0) return { ok: false, status: 403, reason: 'Sales access is not provisioned.' };
   if (input.headerMarker !== '1') return { ok: false, status: 403, reason: 'Request was rejected.' };
   if (!input.headerOrigin) return { ok: false, status: 403, reason: 'Request was rejected.' };
   let origin: URL;
@@ -111,7 +122,94 @@ export function authorizeCrmRequest(input: {
   if (!input.brandRaw) return { ok: false, status: 400, reason: 'Brand is required.' };
   const brand = parseBrand(input.brandRaw);
   if (!brand) return { ok: false, status: 400, reason: 'Brand is not recognized.' };
-  return { ok: true, email: input.adminEmail, brand };
+  const grant = input.grants.find((item) => item.brand === brand);
+  if (!grant) return { ok: false, status: 403, reason: 'This brand is not assigned.' };
+  return { ok: true, actorId: input.actorId, brand, role: grant.role };
+}
+
+export function canExport(role: DeskRole): boolean {
+  return role === 'owner' || role === 'administrator';
+}
+
+export type MembershipRow = {
+  authUserId: string;
+  brand: string;
+  deskRole: string;
+  revokedAt: string | null;
+};
+
+export function parseMembershipRole(value: string): MembershipRole | null {
+  if (value === 'salesperson' || value === 'administrator') return value;
+  return null;
+}
+
+export function activeSalesBrands(authUserId: string, rows: readonly MembershipRow[]): CrmBrand[] {
+  return deskGrantsFor(authUserId, rows).map((grant) => grant.brand);
+}
+
+export function deskGrantsFor(authUserId: string, rows: readonly MembershipRow[]): DeskGrant[] {
+  const grants: DeskGrant[] = [];
+  for (const row of rows) {
+    if (row.authUserId !== authUserId || row.revokedAt) continue;
+    const brand = parseBrand(row.brand);
+    const role = parseMembershipRole(row.deskRole);
+    if (!brand || !role) continue;
+    const existing = grants.find((grant) => grant.brand === brand);
+    if (!existing) grants.push({ brand, role });
+    else if (existing.role === 'salesperson' && role === 'administrator') existing.role = 'administrator';
+  }
+  return grants;
+}
+
+export type DeskDecision =
+  | { ok: true; actorId: string; source: 'kelvin_owner' | 'membership'; grants: DeskGrant[]; brand: CrmBrand }
+  | { ok: false; reason: 'no_session' | 'not_provisioned' | 'brand_denied' };
+
+// A verified KELVIN owner session is the existing admin path. It is not a
+// membership row and it is not implied by a Practice label or user_metadata.
+export function decideDeskAccess(input: {
+  kelvinOwner: boolean;
+  kelvinActorId: string | null;
+  salesUserId: string | null;
+  memberships: readonly MembershipRow[];
+  requestedBrand: string | null;
+  practiceRole?: string | null;
+  userMetadataRole?: string | null;
+}): DeskDecision {
+  void input.practiceRole;
+  void input.userMetadataRole;
+  if (input.kelvinOwner) {
+    const grants: DeskGrant[] = CRM_BRANDS.map((brand) => ({ brand, role: 'owner' }));
+    const requested = input.requestedBrand === null ? grants[0].brand : parseBrand(input.requestedBrand);
+    if (!requested || !grants.some((grant) => grant.brand === requested)) return { ok: false, reason: 'brand_denied' };
+    return { ok: true, actorId: input.kelvinActorId || 'kelvin-owner', source: 'kelvin_owner', grants, brand: requested };
+  }
+  if (!input.salesUserId) return { ok: false, reason: 'no_session' };
+  const grants = deskGrantsFor(input.salesUserId, input.memberships);
+  if (grants.length === 0) return { ok: false, reason: 'not_provisioned' };
+  if (input.requestedBrand === null) return { ok: true, actorId: input.salesUserId, source: 'membership', grants, brand: grants[0].brand };
+  const brand = parseBrand(input.requestedBrand);
+  if (!brand || !grants.some((grant) => grant.brand === brand)) return { ok: false, reason: 'brand_denied' };
+  return { ok: true, actorId: input.salesUserId, source: 'membership', grants, brand };
+}
+
+export function safeSalesReturnPath(value: unknown): string {
+  if (typeof value !== 'string') return CRM_ROUTE;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.includes('\\') || trimmed.includes('://')) {
+    return CRM_ROUTE;
+  }
+  const path = trimmed.split('?')[0].split('#')[0];
+  if (path === CRM_ROUTE || path.startsWith(`${CRM_ROUTE}/`) || path === WHOLESALE_ROUTE) return path;
+  return CRM_ROUTE;
+}
+
+export function pruneSigninAttempts(stamps: readonly number[], now: number, windowMs: number): number[] {
+  return stamps.filter((stamp) => now - stamp < windowMs && stamp <= now);
+}
+
+export function signinRateAllowed(stamps: readonly number[], limit: number): boolean {
+  return stamps.length < limit;
 }
 
 export function resolveAssignee(_requested: unknown, sessionEmail: string): string {

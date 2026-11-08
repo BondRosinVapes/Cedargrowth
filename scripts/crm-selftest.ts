@@ -8,6 +8,8 @@ import {
   alertDedupeKey,
   assertPersistable,
   authorizeCrmRequest,
+  canExport,
+  decideDeskAccess,
   CANIX_NOT_CONNECTED,
   containsConfidenceClaim,
   createCanixAdapter,
@@ -61,19 +63,82 @@ assert(mixed.ok === false, 'mixed brand rows fail closed');
 assert(sameContact({ id: '1', email: 'a@b.co' }, { id: '2', email: 'a@b.co' }) === false, 'same email is not the same contact');
 
 const origin = 'https://cedargrowth.vercel.app';
+const ownerGrants = [
+  { brand: 'cedargrowth' as const, role: 'owner' as const },
+  { brand: 'bond' as const, role: 'owner' as const },
+];
+const salesGrant = [{ brand: 'cedargrowth' as const, role: 'salesperson' as const }];
 assert(authorizeCrmRequest({
-  adminEmail: null, method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: 'cedargrowth',
+  actorId: null, grants: ownerGrants, method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: 'cedargrowth',
 }).status === 404, 'anonymous CRM request is not found');
 assert(authorizeCrmRequest({
-  adminEmail: 'gary@cedargrowthco.com', method: 'POST', requestOrigin: origin, headerOrigin: 'https://evil.example', headerMarker: '1', headerFetchSite: 'cross-site', brandRaw: 'cedargrowth',
+  actorId: 'owner', grants: ownerGrants, method: 'POST', requestOrigin: origin, headerOrigin: 'https://evil.example', headerMarker: '1', headerFetchSite: 'cross-site', brandRaw: 'cedargrowth',
 }).status === 403, 'cross-origin mutation is rejected');
 assert(authorizeCrmRequest({
-  adminEmail: 'gary@cedargrowthco.com', method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: null,
+  actorId: 'owner', grants: ownerGrants, method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: null,
 }).status === 400, 'missing brand is rejected');
 const bondOk = authorizeCrmRequest({
-  adminEmail: 'gary@cedargrowthco.com', method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: 'bond',
+  actorId: 'owner', grants: ownerGrants, method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: 'bond',
 });
-assert(bondOk.ok === true && bondOk.brand === 'bond', 'CRM desk can name Bond explicitly');
+assert(bondOk.ok === true && bondOk.brand === 'bond' && bondOk.role === 'owner', 'KELVIN owner can name Bond');
+const salesBond = authorizeCrmRequest({
+  actorId: 'sales-1', grants: salesGrant, method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: 'bond',
+});
+assert(salesBond.ok === false && salesBond.status === 403, 'a CedarGrowth salesperson cannot read Bond');
+assert(canExport('salesperson') === false && canExport('administrator') === true && canExport('owner') === true, 'export stays with administrator and owner');
+
+const ownerDesk = decideDeskAccess({
+  kelvinOwner: true,
+  kelvinActorId: 'gary@cedargrowthco.com',
+  salesUserId: null,
+  memberships: [],
+  requestedBrand: 'bond',
+  practiceRole: 'OWNER',
+  userMetadataRole: 'salesperson',
+});
+assert(ownerDesk.ok === true && ownerDesk.source === 'kelvin_owner' && ownerDesk.grants.length === 2, 'verified KELVIN owner keeps both brands without a membership row');
+const emailAlone = decideDeskAccess({
+  kelvinOwner: false,
+  kelvinActorId: 'gary@cedargrowthco.com',
+  salesUserId: null,
+  memberships: [],
+  requestedBrand: 'cedargrowth',
+  practiceRole: 'OWNER',
+});
+assert(emailAlone.ok === false && emailAlone.reason === 'no_session', 'an owner email or Practice OWNER label is not a session');
+const salesDesk = decideDeskAccess({
+  kelvinOwner: false,
+  kelvinActorId: null,
+  salesUserId: 'user-a',
+  memberships: [{ authUserId: 'user-a', brand: 'cedargrowth', deskRole: 'salesperson', revokedAt: null }],
+  requestedBrand: 'cedargrowth',
+});
+assert(salesDesk.ok === true && salesDesk.grants[0].role === 'salesperson', 'explicit salesperson membership is brand scoped');
+const adminDesk = decideDeskAccess({
+  kelvinOwner: false,
+  kelvinActorId: null,
+  salesUserId: 'user-b',
+  memberships: [{ authUserId: 'user-b', brand: 'bond', deskRole: 'administrator', revokedAt: null }],
+  requestedBrand: 'cedargrowth',
+});
+assert(adminDesk.ok === false && adminDesk.reason === 'brand_denied', 'a Bond administrator is not a CedarGrowth administrator');
+const revoked = decideDeskAccess({
+  kelvinOwner: false,
+  kelvinActorId: null,
+  salesUserId: 'user-a',
+  memberships: [{ authUserId: 'user-a', brand: 'cedargrowth', deskRole: 'salesperson', revokedAt: '2026-11-01T00:00:00Z' }],
+  requestedBrand: null,
+});
+assert(revoked.ok === false && revoked.reason === 'not_provisioned', 'revoked membership does not grant access');
+const fakeOwner = decideDeskAccess({
+  kelvinOwner: false,
+  kelvinActorId: null,
+  salesUserId: 'user-c',
+  memberships: [{ authUserId: 'user-c', brand: 'cedargrowth', deskRole: 'owner', revokedAt: null }],
+  requestedBrand: null,
+  userMetadataRole: 'administrator',
+});
+assert(fakeOwner.ok === false, 'a membership cannot self-assign the KELVIN owner role');
 assert(resolveAssignee('other@example.com', 'gary@cedargrowthco.com') === 'gary@cedargrowthco.com', 'assignee is the signed-in admin');
 assert(dollarsToCents('12.5') === 1250, 'forecast dollars convert to cents');
 assert(dollarsToCents('-1') === 'invalid', 'negative forecast is rejected');
@@ -265,7 +330,7 @@ assert(handlers.includes('prepareReorderAlert') === false, 'HTTP handlers do not
 const wholesale = readFileSync('src/components/crm/WholesaleInsights.tsx', 'utf8');
 assert(wholesale.includes('getCrmStore') && wholesale.includes('localStorage') === false, 'wholesale view uses the CRM store');
 const middleware = readFileSync('src/middleware.ts', 'utf8');
-assert(middleware.includes("'/admin/crm'") && middleware.includes("'/manufacturing'"), 'middleware covers the desk and the wholesale page');
+assert(middleware.includes("'/admin/crm'") && middleware.includes('kelvinEmail') && middleware.includes('SALES_AT_COOKIE'), 'middleware keeps the KELVIN owner path and the sales cookie');
 assert(readFileSync('vercel.json', 'utf8').includes('crons') === false, 'no scheduled job was added');
 
 if (failures > 0) {

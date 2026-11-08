@@ -1,6 +1,4 @@
 import Link from 'next/link';
-import { isAdmin } from '@/lib/kelvinAuth';
-import { currentAdmin } from '@/lib/kelvinSession';
 import {
   CRM_ROUTE,
   projectWholesaleInsights,
@@ -9,14 +7,15 @@ import {
   WHOLESALE_ROUTE,
 } from '@/lib/crm/engine';
 import { loadBrandSnapshot, staffAudience } from '@/lib/crm/handlers';
+import { resolveDeskAccess } from '@/lib/crm/salesSession';
 import { getCrmStore } from '@/lib/crm/store';
 
 // Staff-only reading of the same CRM intelligence records. Public and retailer
 // sessions render nothing. Bond is not queried. Notes are not rendered.
 
 export async function WholesaleInsights() {
-  const email = await currentAdmin();
-  const audience = staffAudience(email, isAdmin(email));
+  const access = await resolveDeskAccess();
+  const audience = staffAudience(access.grants.some((grant) => grant.brand === WHOLESALE_BRAND));
   if (audience.kind !== 'staff') return null;
 
   const snapshot = await loadBrandSnapshot(getCrmStore(), WHOLESALE_BRAND, new Date().toISOString().slice(0, 10));
