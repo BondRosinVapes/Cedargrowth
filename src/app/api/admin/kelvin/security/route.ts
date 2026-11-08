@@ -31,7 +31,7 @@ export async function GET() {
     rules: ru.data || [],
     waivers: wa.data || [],
     audit: (au.data || []).map((a) => ({ time: a.time, actor: a.actor, action: a.action, target: a.target })),
-    prechecks: pc.data || [],
+    prechecks: pc.error ? null : (pc.data || []),
     vendors: (ve.data || []).map((v) => ({ id: v.id, name: v.name, type: v.type, posture: v.posture, lastReview: v.last_review })),
   });
 }

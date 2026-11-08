@@ -1,9 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
-  AGENTS,
   CANON,
+  ROSTER,
   QUEUE_DRAFTS,
   QUEUE_RCS,
   RELEASE_CHAIN,
@@ -25,17 +25,60 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
   const [canonVer, setCanonVer] = useState(0);
   const [canonQuery, setCanonQuery] = useState('');
   const [dir, setDir] = useState('');
-  const [target, setTarget] = useState('MERIDIAN routes');
+  const [target, setTarget] = useState('MERIDIAN');
   const [priority, setPriority] = useState('normal');
   const [due, setDue] = useState('');
+  const [intakeReady, setIntakeReady] = useState<boolean | null>(null);
+  const [proposal, setProposal] = useState('');
+  const [proposalAgent, setProposalAgent] = useState('MERIDIAN');
+  const [intakePhase, setIntakePhase] = useState<'idle' | 'pending' | 'unconfigured' | 'accepted' | 'rejected' | 'error' | 'invalid'>('idle');
+  const [intakeFresh, setIntakeFresh] = useState(false);
+  const [intakeTask, setIntakeTask] = useState('');
+
+  useEffect(() => {
+    if (view !== 'steering') return;
+    let active = true;
+    fetch('/api/admin/kelvin/intake')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (active) setIntakeReady(!!(d && d.configured === true)); })
+      .catch(() => { if (active) setIntakeReady(false); });
+    return () => { active = false; };
+  }, [view]);
+
+  async function propose(e: React.FormEvent) {
+    e.preventDefault();
+    if (intakePhase === 'pending') return;
+    const taskId = crypto.randomUUID();
+    setIntakeTask(taskId);
+    setIntakePhase('pending');
+    try {
+      const res = await fetch('/api/admin/kelvin/intake', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agent: proposalAgent, taskId, note: proposal }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const state = data && typeof data.state === 'string' ? data.state : 'error';
+      setIntakeFresh(data.fresh === true);
+      if (state === 'accepted' || state === 'pending' || state === 'rejected' || state === 'unconfigured' || state === 'invalid' || state === 'error') {
+        setIntakePhase(state);
+      } else {
+        setIntakePhase('error');
+      }
+    } catch {
+      setIntakePhase('error');
+    }
+  }
 
   if (view === 'queue') {
     return (
+      <>
+      <p className="lead">Prototype queue. A step is not a gate pass. LITMUS, SENTINEL, and VERNIER have no evidence on file.</p>
       <div className="two-col">
         <div className="col">
           <h2>Release candidates</h2>
           {QUEUE_RCS.map((rc) => (
-            <div className="item" key={rc.id} tabIndex={0} role="button" style={{ cursor: 'pointer' }} onClick={() => flash(`Opened ${rc.id}. Detail panel is wired on the queue build.`)}>
+            <div className="item" key={rc.id} tabIndex={0} role="button" style={{ cursor: 'pointer' }} onClick={() => flash(`Opened ${rc.id}. No detail panel is attached.`)}>
               <h3 className="mono" style={{ fontSize: 15 }}>{rc.id}</h3>
               <div className="body" style={{ marginBottom: 10 }}>{rc.title}</div>
               <div className="stepper">
@@ -53,7 +96,7 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
         <div className="col">
           <h2>Editorial drafts</h2>
           {QUEUE_DRAFTS.map((d) => (
-            <div className="item" key={d.id} tabIndex={0} role="button" style={{ cursor: 'pointer' }} onClick={() => flash(`Opened ${d.id}. Detail panel is wired on the queue build.`)}>
+            <div className="item" key={d.id} tabIndex={0} role="button" style={{ cursor: 'pointer' }} onClick={() => flash(`Opened ${d.id}. No detail panel is attached.`)}>
               <h3 className="mono" style={{ fontSize: 15 }}>{d.id}</h3>
               <div className="body" style={{ marginBottom: 10 }}>{d.title}</div>
               <div className="from mono"><span className="sq attention" /> {d.blocker}</div>
@@ -61,23 +104,24 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
           ))}
         </div>
       </div>
+      </>
     );
   }
 
   if (view === 'steering') {
-    const targets = ['MERIDIAN routes', ...AGENTS.map((a) => a.id)];
+    const targets = ROSTER.filter((a) => a.kind === 'agent').map((a) => a.id);
     function submit(e: React.FormEvent) {
       e.preventDefault();
       const text = dir.trim();
       if (!text) { flash('Directive text is required.'); return; }
       const words = text.split(/\s+/).slice(0, 8).join(' ');
-      addEvent({ agent: 'MERIDIAN', time: now(), type: 'DECISION', summary: `Directive received: ${words}`, sub: `Routed by MERIDIAN to ${target}. Priority ${priority}.` });
+      addEvent({ agent: 'KELVIN', time: now(), type: 'DECISION', summary: `Directive recorded: ${words}`, sub: `Held in KELVIN against ${target}. Priority ${priority}. Not delivered. Routing acknowledgement is not confirmed.` });
       setDir(''); setDue('');
-      flash('Directive filed.');
+      flash('Directive recorded. Not delivered.');
     }
     return (
       <>
-        <p className="lead">File a directive. MERIDIAN routes it to the named agent or holds it on the reference line, then writes a decision event to the feed.</p>
+        <p className="lead">Record a directive in KELVIN. This form does not send it. The proposal under it is the only intake, and it stays unconfigured until the server settings are present.</p>
         <form className="form-grid" onSubmit={submit}>
           <div className="field"><label>Directive</label><textarea rows={4} value={dir} onChange={(e) => setDir(e.target.value)} placeholder="State the directive in plain language." /></div>
           <div className="row2">
@@ -86,6 +130,25 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
           </div>
           <div className="field" style={{ maxWidth: 300 }}><label>Due date</label><input type="date" value={due} onChange={(e) => setDue(e.target.value)} /></div>
           <div className="actions"><button className="btn solid" type="submit">File directive</button></div>
+        </form>
+        <form className="form-grid" style={{ marginTop: 28 }} onSubmit={propose}>
+          <p className="lead">
+            {intakeReady === null
+              ? 'Checking intake.'
+              : intakeReady
+                ? 'Intake is configured. A proposal can be accepted, which only means a run started. The result stays in the bot chat. This page does not show completion.'
+                : 'Intake unconfigured. No proposal is sent.'}
+          </p>
+          <div className="field"><label>Proposal</label><textarea rows={4} value={proposal} onChange={(e) => setProposal(e.target.value)} placeholder="State the task. Do not include access codes or genetic results." /></div>
+          <div className="field"><label>Named role</label><select value={proposalAgent} onChange={(e) => setProposalAgent(e.target.value)}>{ROSTER.map((a) => <option key={a.id}>{a.id}</option>)}</select></div>
+          <div className="actions"><button className="btn solid" type="submit" disabled={intakePhase === 'pending'}>{intakePhase === 'pending' ? 'Sending proposal' : 'Propose task'}</button></div>
+          {intakePhase === 'accepted' && intakeFresh ? <p className="lead">Accepted. Task {intakeTask}. A run started. Not finished, and not a gate pass.</p> : null}
+          {intakePhase === 'accepted' && !intakeFresh ? <p className="lead">This task id is already accepted. Not sent again.</p> : null}
+          {intakePhase === 'pending' ? <p className="lead">This task id is pending. Not sent again.</p> : null}
+          {intakePhase === 'rejected' ? <p className="lead">This task id was not accepted. Not sent again.</p> : null}
+          {intakePhase === 'unconfigured' ? <p className="lead">Intake unconfigured. Nothing was sent.</p> : null}
+          {intakePhase === 'error' ? <p className="lead">Not accepted. Nothing was retried.</p> : null}
+          {intakePhase === 'invalid' ? <p className="lead">The proposal was refused. Nothing was sent.</p> : null}
         </form>
       </>
     );
@@ -98,13 +161,13 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
     };
     const apply = async (id: string) => {
       await tuningMutate(id, 'apply');
-      addEvent({ agent: 'VERNIER', time: now(), type: 'TUNING', summary: 'Applied: tertiary text contrast', sub: 'Owner applied the proposal. Six components retuned to AA.' });
-      flash('Applied. Rollback available.');
+      addEvent({ agent: 'KELVIN', time: now(), type: 'TUNING', summary: `Console mark applied: ${id}`, sub: 'Recorded in KELVIN. No release artifact changed and no bot was notified.' });
+      flash('Marked in the console. Nothing was retuned.');
     };
     const rollback = async (id: string) => {
       await tuningMutate(id, 'rollback');
-      addEvent({ agent: 'VERNIER', time: now(), type: 'TUNING', summary: 'Rolled back: tertiary text contrast', sub: 'Owner reverted the proposal to proposed state.' });
-      flash('Rolled back.');
+      addEvent({ agent: 'KELVIN', time: now(), type: 'TUNING', summary: `Console mark returned: ${id}`, sub: 'Recorded in KELVIN. No release artifact changed and no bot was notified.' });
+      flash('Mark returned in the console.');
     };
     const reject = async (id: string) => {
       const note = (rejectNote[id] || '').trim();
@@ -114,7 +177,7 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
     };
     return (
       <>
-        <p className="lead">Tuning proposals from VERNIER and the fleet. Applying a proposal writes a tuning event and reveals a rollback control. Rejecting requires a note.</p>
+        <p className="lead">Tuning lines stored in the console. Marking one applied changes that record only. It does not retune the site and it does not reach VERNIER. Rejecting requires a note.</p>
         {tuning.map((t) => (
           <div className="item" key={t.id}>
             <h3>{t.title}</h3>

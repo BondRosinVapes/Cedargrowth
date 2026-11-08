@@ -182,6 +182,7 @@
 .kelvin-root .card { background: var(--k-parchment); padding: 20px; }
 .kelvin-root .card h3 { font-family: var(--k-font-mono); font-size: 15px; letter-spacing: 0.04em; display: flex; align-items: center; justify-content: space-between; margin: 0; }
 .kelvin-root .card .fn { color: var(--k-tertiary); font-size: 12px; margin: 4px 0 14px; }
+.kelvin-root .card .botid { font-family: var(--k-font-mono); font-size: 12px; line-height: 1.5; color: var(--k-secondary); word-break: break-all; margin-bottom: 14px; }
 .kelvin-root .card .task { color: var(--k-secondary); font-size: 13px; margin-bottom: 14px; }
 .kelvin-root .card .stat-row { display: flex; gap: 20px; border-top: 1px solid var(--k-hairline); padding-top: 12px; font-family: var(--k-font-mono); font-size: 12px; color: var(--k-tertiary); }
 .kelvin-root .card .stat-row b { color: var(--k-primary); font-weight: 500; }

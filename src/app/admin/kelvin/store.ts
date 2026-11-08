@@ -34,6 +34,35 @@ export type Agent = {
   recs: string[];
 };
 
+// Stable teammate ids supplied by the parent mapping. They are inert metadata,
+// not credentials and not links. link stays null until a documented web URL
+// exists. Chat-app addresses are not web URLs and are not stored here.
+export type RosterKind = 'console' | 'agent';
+
+export type RosterSlot = {
+  id: string;
+  fn: string;
+  kind: RosterKind;
+  botId: string;
+  link: null;
+};
+
+export const ROSTER: RosterSlot[] = [
+  { id: 'KELVIN', fn: 'Command center', kind: 'console', botId: '51a4ca96-7378-472e-aeba-f893300e52ca', link: null },
+  { id: 'MERIDIAN', fn: 'Orchestration, routing, daily audit', kind: 'agent', botId: '81e152c2-da8d-4d32-9c40-44f78a7a2871', link: null },
+  { id: 'FOUNDRY', fn: 'Engineering and tooling', kind: 'agent', botId: '70bf0894-1c5a-4a64-be22-945115264b89', link: null },
+  { id: 'CODEX', fn: 'Knowledge and canon custody', kind: 'agent', botId: '86d0a7ae-4c2d-4f82-8056-9635d78c3c0b', link: null },
+  { id: 'LITMUS', fn: 'Quality assurance, first gate', kind: 'agent', botId: 'f80c8591-b83e-42b5-bc1b-b945923776fb', link: null },
+  { id: 'VERNIER', fn: 'Release management and tuning', kind: 'agent', botId: '2673912e-4d22-4894-8925-ecd45c398839', link: null },
+  { id: 'SENTINEL', fn: 'Security, compliance, clearance', kind: 'agent', botId: '1df84ae6-c757-469f-bc84-5a9999aa62d5', link: null },
+  { id: 'APERTURE', fn: 'Content and editorial', kind: 'agent', botId: '0b681449-ce0c-4b1f-889e-d81448f95e01', link: null },
+  { id: 'APEX', fn: 'Training records, drift detection, assignment', kind: 'agent', botId: 'af6b28c8-870e-4c9c-b962-69a552314eb5', link: null },
+];
+
+export function rosterHasTransport(slots: readonly RosterSlot[] = ROSTER): boolean {
+  return slots.some((slot) => slot.link !== null);
+}
+
 export type ReviewItem = {
   id: string;
   from: string;
@@ -119,7 +148,7 @@ export const SEED_EVENTS: KEvent[] = [
 
 export const SEED_REVIEW: ReviewItem[] = [
   { id: 'rv-1', from: 'VERNIER . TUNING', title: 'Raise tertiary text contrast to AA', body: 'Tertiary ink fails AA at body sizes on the parchment chrome. Proposal raises it and restates the token. Affects six components. No layout change.', status: 'open' },
-  { id: 'rv-2', from: 'SENTINEL . CLEARANCE', title: 'Endorsement of rc-004 for release', body: 'rc-004 passed the first gate and the security review with zero findings. SENTINEL endorses. Owner approval opens the release gate.', status: 'open' },
+  { id: 'rv-2', from: 'SENTINEL . CLEARANCE', title: 'Endorsement of rc-004 for release', body: 'Prototype review line. No first gate and no security review are on file. Owner approval here does not open a release gate.', status: 'open' },
   { id: 'rv-3', from: 'CODEX . KNOWLEDGE', title: 'Approve terpene index v2 for canon', body: 'Fourteen entries, nine citations, one citation still thin on limonene. Approval versions the canon and publishes to the transparency source.', status: 'open' },
 ];
 
@@ -132,12 +161,12 @@ export type CanonDoc = { id: string; title: string; versions: CanonVersion[] };
 export const RELEASE_CHAIN = ['LITMUS', 'SENTINEL', 'VERNIER', 'Owner'];
 
 export const QUEUE_RCS: QueueRc[] = [
-  { id: 'rc-003', title: 'Home surface rhythm and hero copy', stage: 2, note: 'Held at the release gate on the contrast tuning decision.' },
-  { id: 'rc-004', title: 'Reservation flow and confirmation copy', stage: 3, note: 'Endorsed by SENTINEL. At owner review.' },
+  { id: 'rc-003', title: 'Home surface rhythm and hero copy', stage: -1, note: 'Prototype line. No LITMUS, SENTINEL, or VERNIER evidence is on file.' },
+  { id: 'rc-004', title: 'Reservation flow and confirmation copy', stage: -1, note: 'Prototype line. No gate has been passed.' },
 ];
 export const QUEUE_DRAFTS: QueueDraft[] = [
-  { id: 'dr-11', title: 'Cold cure, dried and washed', blocker: 'Held by APERTURE for a SENTINEL originality check.' },
-  { id: 'dr-12', title: 'The thirteen traits, plain language', blocker: 'Blocked on trait matrix v2 sign off from CODEX.' },
+  { id: 'dr-11', title: 'Cold cure, dried and washed', blocker: 'Prototype line. No originality check is on file.' },
+  { id: 'dr-12', title: 'The thirteen traits, plain language', blocker: 'Prototype line. No canon sign off is on file.' },
 ];
 
 export const SEED_TUNING: TuningItem[] = [

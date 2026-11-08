@@ -14,11 +14,17 @@ export type Vendor = { id: string; name: string; type: string; posture: string; 
 
 export type SecurityData = {
   monitors: Monitor[]; findings: Finding[]; incidents: Incident[]; rules: Rule[];
-  waivers: Waiver[]; audit: AuditRow[]; prechecks: Precheck[]; vendors: Vendor[];
+  waivers: Waiver[]; audit: AuditRow[]; prechecks: Precheck[] | null; vendors: Vendor[];
 };
 
-export function releaseGate(prechecks: Precheck[]): { ok: boolean; reason?: string } {
-  const fails = prechecks.filter((p) => p.state === 'Fail');
-  if (fails.length) return { ok: false, reason: `${fails.length} precheck item${fails.length > 1 ? 's' : ''} failing. SENTINEL cannot clear the release until they pass.` };
-  return { ok: true };
+export function decideReleaseClearance(input: { error: boolean; rows: { state: string }[] | null }): { ok: false; reason: string } {
+  if (input.error || !input.rows) return { ok: false, reason: 'Release evidence is unavailable. Nothing was cleared.' };
+  if (input.rows.length === 0) return { ok: false, reason: 'No precheck evidence is on file. Nothing was cleared.' };
+  const fails = input.rows.filter((row) => row.state === 'Fail').length;
+  if (fails) return { ok: false, reason: `${fails} precheck item${fails > 1 ? 's' : ''} failing. Nothing was cleared.` };
+  return { ok: false, reason: 'Stored precheck marks are not a SENTINEL or VERNIER pass. Nothing was cleared.' };
+}
+
+export function releaseGate(prechecks: Precheck[] | null): { ok: false; reason: string } {
+  return decideReleaseClearance({ error: !prechecks, rows: prechecks });
 }
