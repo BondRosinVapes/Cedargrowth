@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { Newsreader, Inter_Tight, IBM_Plex_Mono } from 'next/font/google';
+import localFont from 'next/font/local';
 import { Shell } from '@/components/shell/Shell';
 import { AgeGate } from '@/components/shell/AgeGate';
 import { ReservationProvider } from '@/components/reserve/ReservationProvider';
@@ -8,26 +8,32 @@ import { isAgeGateEnabled } from '@/lib/flags';
 import '../../tokens.css';
 import './globals.css';
 
-// Three faces, no more (Section 4.2). Each exposes a CSS variable that the
-// Tailwind theme reads through font-display, font-sans, and font-mono.
-const newsreader = Newsreader({
-  subsets: ['latin'],
-  weight: ['400'],
-  style: ['normal', 'italic'],
+// Three faces, no more (Section 4.2). Files live in src/fonts with their OFL
+// texts. next/font/local reads them at build time and does not call Google.
+// Weights and styles match the previous next/font/google calls.
+const newsreader = localFont({
+  src: [
+    { path: '../fonts/newsreader-latin-400.woff2', weight: '400', style: 'normal' },
+    { path: '../fonts/newsreader-latin-400-italic.woff2', weight: '400', style: 'italic' },
+  ],
   variable: '--font-newsreader',
   display: 'swap',
+  adjustFontFallback: false,
 });
 
-const interTight = Inter_Tight({
-  subsets: ['latin'],
-  weight: ['400', '500'],
+const interTight = localFont({
+  src: '../fonts/inter-tight-latin-variable.woff2',
+  weight: '400 500',
+  style: 'normal',
   variable: '--font-inter-tight',
   display: 'swap',
 });
 
-const ibmPlexMono = IBM_Plex_Mono({
-  subsets: ['latin'],
-  weight: ['400', '500'],
+const ibmPlexMono = localFont({
+  src: [
+    { path: '../fonts/ibm-plex-mono-latin-400.woff2', weight: '400', style: 'normal' },
+    { path: '../fonts/ibm-plex-mono-latin-500.woff2', weight: '500', style: 'normal' },
+  ],
   variable: '--font-ibm-plex-mono',
   display: 'swap',
 });
