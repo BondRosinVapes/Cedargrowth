@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
-  CRM_BRANDS,
   brandLabel,
   dollarsToCents,
   formatForecast,
@@ -45,8 +44,16 @@ async function crmFetch(path: string, init?: RequestInit): Promise<{ status: num
   return { status: res.status, body: body as Record<string, unknown> };
 }
 
-export function CrmConsole({ adminEmail }: { adminEmail: string }) {
-  const [brand, setBrand] = useState<CrmBrand>('cedargrowth');
+export function CrmConsole({
+  brands,
+  sessionLabel,
+  roleLabel,
+}: {
+  brands: CrmBrand[];
+  sessionLabel: string;
+  roleLabel: string;
+}) {
+  const [brand, setBrand] = useState<CrmBrand>(brands[0] ?? 'cedargrowth');
   const [wing, setWing] = useState<Wing>('accounts');
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [notice, setNotice] = useState('');
@@ -189,10 +196,10 @@ export function CrmConsole({ adminEmail }: { adminEmail: string }) {
         <p className="font-sans text-eyebrow-m md:text-eyebrow font-medium uppercase text-cedar">Wholesale CRM</p>
         <div className="flex flex-wrap items-end justify-between gap-4">
           <h1 className="font-display text-heading-m-m md:text-heading-m text-primary">{WINGS.find((item) => item.id === wing)?.label}</h1>
-          <p className="font-mono text-specimen text-tertiary">{adminEmail}</p>
+          <p className="font-mono text-specimen text-tertiary">{roleLabel} {sessionLabel}</p>
         </div>
         <div className="flex flex-wrap gap-2" role="group" aria-label="Brand">
-          {CRM_BRANDS.map((item) => (
+          {brands.map((item) => (
             <button
               key={item}
               type="button"

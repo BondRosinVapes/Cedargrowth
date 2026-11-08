@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { X } from 'lucide-react';
-import { PRIMARY_NAV, UTILITY_LEFT } from '@/lib/nav';
+import { PRIMARY_NAV, UTILITY_LEFT, UTILITY_RIGHT } from '@/lib/nav';
 import { Wordmark } from './Wordmark';
 
 // Full height drawer for mobile. Every primary item is a plain link (the mega
@@ -106,6 +106,17 @@ export function MobileMenu({
 
         <ul className="mt-8 flex flex-col gap-3">
           {UTILITY_LEFT.map((link) => (
+            <li key={link.href}>
+              <Link
+                href={link.href}
+                onClick={onClose}
+                className="cedar-underline text-body-m-m uppercase tracking-eyebrow text-tertiary"
+              >
+                {link.label}
+              </Link>
+            </li>
+          ))}
+          {UTILITY_RIGHT.map((link) => (
             <li key={link.href}>
               <Link
                 href={link.href}

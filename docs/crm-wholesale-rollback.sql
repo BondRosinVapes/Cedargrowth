@@ -4,6 +4,7 @@
 -- Does not touch Practice, KELVIN, reservations, auth, or roles.
 -- Run only after Gary approves, and only if those migrations were applied.
 
+drop table if exists public.crm_sales_memberships;
 drop table if exists public.crm_intel_alert_events;
 drop table if exists public.crm_intel_alerts;
 drop table if exists public.crm_intel_recommendations;

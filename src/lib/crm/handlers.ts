@@ -5,6 +5,7 @@ import {
   evaluateDesk,
   formatForecast,
   HOODIE_NOT_CONNECTED,
+  canExport,
   nextAlertState,
   parseAccountWrite,
   parseAlertAction,
@@ -19,6 +20,8 @@ import {
   type AccountStatus,
   type Audience,
   type CrmBrand,
+  type DeskGrant,
+  type DeskRole,
   type DeskEvaluation,
   type InsightSnapshot,
   type TaskStatus,
@@ -28,7 +31,8 @@ import type { CrmStore } from './store';
 export type CrmResult = { status: number; body: Record<string, unknown> };
 
 export type CrmContext = {
-  adminEmail: string | null;
+  actorId: string | null;
+  grants: readonly DeskGrant[];
   request: Request;
   store: CrmStore;
 };
@@ -62,10 +66,11 @@ function storageBody(brand: CrmBrand, state: 'absent' | 'unavailable'): CrmResul
   };
 }
 
-async function gate(ctx: CrmContext, brandRaw: string | null): Promise<{ email: string; brand: CrmBrand } | CrmResult> {
+async function gate(ctx: CrmContext, brandRaw: string | null): Promise<{ actorId: string; brand: CrmBrand; role: DeskRole } | CrmResult> {
   const url = new URL(ctx.request.url);
   const auth = authorizeCrmRequest({
-    adminEmail: ctx.adminEmail,
+    actorId: ctx.actorId,
+    grants: ctx.grants,
     method: ctx.request.method,
     requestOrigin: url.origin,
     headerOrigin: ctx.request.headers.get('origin'),
@@ -77,7 +82,7 @@ async function gate(ctx: CrmContext, brandRaw: string | null): Promise<{ email: 
   return auth;
 }
 
-function isResult(value: { email: string; brand: CrmBrand } | CrmResult): value is CrmResult {
+function isResult(value: { actorId: string; brand: CrmBrand; role: DeskRole } | CrmResult): value is CrmResult {
   return 'status' in value;
 }
 
@@ -134,7 +139,7 @@ export async function handleAccountCollection(ctx: CrmContext, method: 'GET' | '
   if (isResult(auth)) return auth;
   const parsed = parseAccountWrite(record, 'create');
   if (!parsed.ok || !parsed.value.displayName || !parsed.value.status) return { status: 400, body: { ok: false, reason: parsed.ok ? 'Enter an account name.' : parsed.reason } };
-  const created = await ctx.store.createAccount(auth.brand, auth.email, {
+  const created = await ctx.store.createAccount(auth.brand, auth.actorId, {
     displayName: parsed.value.displayName,
     status: parsed.value.status,
     city: parsed.value.city ?? null,
@@ -153,7 +158,7 @@ export async function handleAccountUpdate(ctx: CrmContext, id: string): Promise<
   if (!parseUuid(id)) return { status: 400, body: { ok: false, reason: 'Not found in this brand.' } };
   const parsed = parseAccountWrite(record, 'update');
   if (!parsed.ok) return { status: 400, body: { ok: false, reason: parsed.reason } };
-  const updated = await ctx.store.updateAccount(auth.brand, auth.email, id, parsed.value);
+  const updated = await ctx.store.updateAccount(auth.brand, auth.actorId, id, parsed.value);
   if (updated.state === 'missing') return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   if (updated.state !== 'ok') return storageBody(auth.brand, updated.state === 'rejected' ? 'unavailable' : updated.state);
   return { status: 200, body: { ok: true, configured: true, brand: auth.brand, account: updated.value } };
@@ -181,7 +186,7 @@ export async function handleContactCollection(ctx: CrmContext, method: 'GET' | '
   if (isResult(auth)) return auth;
   const parsed = parseContactWrite(record, 'create');
   if (!parsed.ok || !parsed.value.accountId || !parsed.value.name) return { status: 400, body: { ok: false, reason: parsed.ok ? 'Enter a contact name.' : parsed.reason } };
-  const created = await ctx.store.createContact(auth.brand, auth.email, { ...parsed.value, accountId: parsed.value.accountId, name: parsed.value.name });
+  const created = await ctx.store.createContact(auth.brand, auth.actorId, { ...parsed.value, accountId: parsed.value.accountId, name: parsed.value.name });
   if (created.state === 'rejected') return { status: 400, body: { ok: false, reason: 'The related record is not in this brand.' } };
   if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'missing' ? 'unavailable' : created.state);
   return { status: 201, body: { ok: true, configured: true, brand: auth.brand, contact: created.value } };
@@ -196,7 +201,7 @@ export async function handleContactUpdate(ctx: CrmContext, id: string): Promise<
   if (!parseUuid(id)) return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   const parsed = parseContactWrite(record, 'update');
   if (!parsed.ok) return { status: 400, body: { ok: false, reason: parsed.reason } };
-  const updated = await ctx.store.updateContact(auth.brand, auth.email, id, parsed.value);
+  const updated = await ctx.store.updateContact(auth.brand, auth.actorId, id, parsed.value);
   if (updated.state === 'missing' || updated.state === 'rejected') return { status: updated.state === 'missing' ? 404 : 400, body: { ok: false, reason: 'Not found in this brand.' } };
   if (updated.state !== 'ok') return storageBody(auth.brand, updated.state);
   return { status: 200, body: { ok: true, configured: true, brand: auth.brand, contact: updated.value } };
@@ -220,7 +225,7 @@ export async function handleOpportunityCollection(ctx: CrmContext, method: 'GET'
   if (!parsed.ok || !parsed.value.accountId || !parsed.value.name || !parsed.value.stage) {
     return { status: 400, body: { ok: false, reason: parsed.ok ? 'Enter an opportunity name.' : parsed.reason } };
   }
-  const created = await ctx.store.createOpportunity(auth.brand, auth.email, {
+  const created = await ctx.store.createOpportunity(auth.brand, auth.actorId, {
     ...parsed.value,
     accountId: parsed.value.accountId,
     name: parsed.value.name,
@@ -244,7 +249,7 @@ export async function handleOpportunityUpdate(ctx: CrmContext, id: string): Prom
   if (!parseUuid(id)) return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   const parsed = parseOpportunityWrite(record, 'update');
   if (!parsed.ok) return { status: 400, body: { ok: false, reason: parsed.reason } };
-  const updated = await ctx.store.updateOpportunity(auth.brand, auth.email, id, parsed.value);
+  const updated = await ctx.store.updateOpportunity(auth.brand, auth.actorId, id, parsed.value);
   if (updated.state === 'missing') return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   if (updated.state === 'rejected') return { status: 400, body: { ok: false, reason: 'The related record is not in this brand.' } };
   if (updated.state !== 'ok') return storageBody(auth.brand, updated.state);
@@ -269,7 +274,7 @@ export async function handleTaskCollection(ctx: CrmContext, method: 'GET' | 'POS
   if (isResult(auth)) return auth;
   const parsed = parseTaskWrite(record, 'create');
   if (!parsed.ok || !parsed.value.title || !parsed.value.status) return { status: 400, body: { ok: false, reason: parsed.ok ? 'Enter a task title.' : parsed.reason } };
-  const created = await ctx.store.createTask(auth.brand, auth.email, { ...parsed.value, title: parsed.value.title, status: parsed.value.status });
+  const created = await ctx.store.createTask(auth.brand, auth.actorId, { ...parsed.value, title: parsed.value.title, status: parsed.value.status });
   if (created.state === 'rejected') return { status: 400, body: { ok: false, reason: 'The related record is not in this brand.' } };
   if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'missing' ? 'unavailable' : created.state);
   return { status: 201, body: { ok: true, configured: true, brand: auth.brand, task: created.value } };
@@ -284,7 +289,7 @@ export async function handleTaskUpdate(ctx: CrmContext, id: string): Promise<Crm
   if (!parseUuid(id)) return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   const parsed = parseTaskWrite(record, 'update');
   if (!parsed.ok) return { status: 400, body: { ok: false, reason: parsed.reason } };
-  const updated = await ctx.store.updateTask(auth.brand, auth.email, id, parsed.value);
+  const updated = await ctx.store.updateTask(auth.brand, auth.actorId, id, parsed.value);
   if (updated.state === 'missing') return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   if (updated.state === 'rejected') return { status: 400, body: { ok: false, reason: 'The related record is not in this brand.' } };
   if (updated.state !== 'ok') return storageBody(auth.brand, updated.state);
@@ -315,6 +320,7 @@ export async function handleExport(ctx: CrmContext): Promise<CrmResult> {
   const url = new URL(ctx.request.url);
   const auth = await gate(ctx, url.searchParams.get('brand'));
   if (isResult(auth)) return auth;
+  if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Export is limited to a CRM administrator.' } };
   const rows = await ctx.store.exportBrand(auth.brand);
   if (rows.state !== 'ok') return storageBody(auth.brand, rows.state === 'rejected' || rows.state === 'missing' ? 'unavailable' : rows.state);
   return {
@@ -428,7 +434,7 @@ export async function handleAlerts(ctx: CrmContext, method: 'GET' | 'POST'): Pro
   if (intel.state !== 'ok') return storageBody(auth.brand, intel.state === 'rejected' || intel.state === 'missing' ? 'unavailable' : intel.state);
   const current = intel.value.alerts.find((alert) => alert.id === id && alert.brand === auth.brand);
   if (!current) return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
-  const actor = resolveAssignee(record.assignedTo, auth.email);
+  const actor = resolveAssignee(record.assignedTo, auth.actorId);
   const next = nextAlertState(current, op, actor, new Date().toISOString());
   if (!next.ok) return { status: 400, body: { ok: false, reason: next.reason } };
   const saved = await ctx.store.applyAlert(auth.brand, id, next.alert);
@@ -437,9 +443,8 @@ export async function handleAlerts(ctx: CrmContext, method: 'GET' | 'POST'): Pro
   return { status: 200, body: { ok: true, configured: true, brand: auth.brand, alert: saved.value, alertsActivated: false } };
 }
 
-export function staffAudience(email: string | null, isStaff: boolean): Audience {
-  if (email && isStaff) return { kind: 'staff' };
-  return { kind: 'public' };
+export function staffAudience(hasCedarSalesMembership: boolean): Audience {
+  return hasCedarSalesMembership ? { kind: 'staff' } : { kind: 'public' };
 }
 
 export function wholesaleBrandOnly(brand: string | null): CrmBrand | null {

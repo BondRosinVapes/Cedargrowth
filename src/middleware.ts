@@ -1,24 +1,35 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { KELVIN_COOKIE, readSession } from '@/lib/kelvinAuth';
+import { SALES_AT_COOKIE } from '@/lib/crm/engine';
 
-// Gate for the KELVIN admin console and the internal CRM desk. Both use the
-// existing signed session. Without a session the middleware returns a bare 404,
-// so the route does not announce that it exists. /manufacturing stays public.
-// The login POST and logout live under /api and are not matched here.
+// KELVIN remains a valid owner path into the CRM. A sales cookie is the other
+// door, and the route still checks an explicit membership before any data.
+// /manufacturing stays public.
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
-  const token = req.cookies.get(KELVIN_COOKIE)?.value;
-  const email = await readSession(token, process.env.KELVIN_SESSION_SECRET);
+  const salesCookie = req.cookies.get(SALES_AT_COOKIE)?.value;
+  const kelvinEmail = await readSession(req.cookies.get(KELVIN_COOKIE)?.value, process.env.KELVIN_SESSION_SECRET);
 
-  // The public wholesale page stays public. A signed-in admin response must
-  // not be cached and reused for anyone else. No new permission is introduced.
   if (pathname === '/manufacturing') {
     const res = NextResponse.next();
-    if (email) {
+    if (salesCookie || kelvinEmail) {
       res.headers.set('cache-control', 'private, no-store');
       res.headers.set('vary', 'cookie');
     }
+    return res;
+  }
+
+  if (pathname === '/admin/crm' || pathname.startsWith('/admin/crm/')) {
+    if (!salesCookie && !kelvinEmail) {
+      return new NextResponse('Not found', {
+        status: 404,
+        headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'private, no-store' },
+      });
+    }
+    const res = NextResponse.next();
+    res.headers.set('cache-control', 'private, no-store');
+    res.headers.set('vary', 'cookie');
     return res;
   }
 
@@ -26,7 +37,7 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  if (!email) {
+  if (!kelvinEmail) {
     return new NextResponse('Not found', {
       status: 404,
       headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'private, no-store' },
