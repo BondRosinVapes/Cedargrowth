@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseServerClient } from '@/lib/supabase';
 import { currentAdmin } from '@/lib/kelvinSession';
+import { clientFeedEventAllowed } from '@/lib/kelvinIntake';
 
 // Persists a feed event. Wing actions and directives post here so the feed holds
 // across sessions. The live ticker does not post, so it stays ephemeral. Gated.
@@ -25,6 +26,7 @@ export async function POST(request: Request) {
     sub: typeof b.sub === 'string' ? b.sub : '',
     wing: typeof b.wing === 'string' ? b.wing : null,
   };
+  if (!clientFeedEventAllowed(row)) return NextResponse.json({ ok: false }, { status: 400 });
   const { data } = await supabase.from('kelvin_events').insert(row).select('id').maybeSingle();
   return NextResponse.json({ ok: true, id: data ? Number(data.id) : null });
 }

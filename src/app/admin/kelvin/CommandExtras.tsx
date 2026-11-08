@@ -31,7 +31,8 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
   const [intakeReady, setIntakeReady] = useState<boolean | null>(null);
   const [proposal, setProposal] = useState('');
   const [proposalAgent, setProposalAgent] = useState('MERIDIAN');
-  const [intakePhase, setIntakePhase] = useState<'idle' | 'pending' | 'unconfigured' | 'accepted' | 'duplicate' | 'error' | 'invalid'>('idle');
+  const [intakePhase, setIntakePhase] = useState<'idle' | 'pending' | 'unconfigured' | 'accepted' | 'rejected' | 'error' | 'invalid'>('idle');
+  const [intakeFresh, setIntakeFresh] = useState(false);
   const [intakeTask, setIntakeTask] = useState('');
 
   useEffect(() => {
@@ -58,12 +59,12 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
       });
       const data = await res.json().catch(() => ({}));
       const state = data && typeof data.state === 'string' ? data.state : 'error';
-      if (state === 'accepted' || state === 'duplicate' || state === 'unconfigured' || state === 'invalid' || state === 'error') {
+      setIntakeFresh(data.fresh === true);
+      if (state === 'accepted' || state === 'pending' || state === 'rejected' || state === 'unconfigured' || state === 'invalid' || state === 'error') {
         setIntakePhase(state);
       } else {
         setIntakePhase('error');
       }
-      if (state === 'accepted') await reloadCommand();
     } catch {
       setIntakePhase('error');
     }
@@ -141,8 +142,10 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
           <div className="field"><label>Proposal</label><textarea rows={4} value={proposal} onChange={(e) => setProposal(e.target.value)} placeholder="State the task. Do not include access codes or genetic results." /></div>
           <div className="field"><label>Named role</label><select value={proposalAgent} onChange={(e) => setProposalAgent(e.target.value)}>{ROSTER.map((a) => <option key={a.id}>{a.id}</option>)}</select></div>
           <div className="actions"><button className="btn solid" type="submit" disabled={intakePhase === 'pending'}>{intakePhase === 'pending' ? 'Sending proposal' : 'Propose task'}</button></div>
-          {intakePhase === 'accepted' ? <p className="lead">Accepted. Task {intakeTask}. A run started. Not finished, and not a gate pass.</p> : null}
-          {intakePhase === 'duplicate' ? <p className="lead">Already accepted for task {intakeTask}. Not sent again.</p> : null}
+          {intakePhase === 'accepted' && intakeFresh ? <p className="lead">Accepted. Task {intakeTask}. A run started. Not finished, and not a gate pass.</p> : null}
+          {intakePhase === 'accepted' && !intakeFresh ? <p className="lead">This task id is already accepted. Not sent again.</p> : null}
+          {intakePhase === 'pending' ? <p className="lead">This task id is pending. Not sent again.</p> : null}
+          {intakePhase === 'rejected' ? <p className="lead">This task id was not accepted. Not sent again.</p> : null}
           {intakePhase === 'unconfigured' ? <p className="lead">Intake unconfigured. Nothing was sent.</p> : null}
           {intakePhase === 'error' ? <p className="lead">Not accepted. Nothing was retried.</p> : null}
           {intakePhase === 'invalid' ? <p className="lead">The proposal was refused. Nothing was sent.</p> : null}

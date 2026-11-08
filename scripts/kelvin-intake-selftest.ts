@@ -8,8 +8,9 @@ import {
   readIntakeConfig,
   runIntake,
   validateIntakeBody,
+  clientFeedEventAllowed,
+  type IntakeClaim,
   type IntakePost,
-  type ReceiptState,
 } from '../src/lib/kelvinIntake';
 
 const GOOD_URL = 'https://api2.cursor.sh/automations/webhook/wh_abc12345';
@@ -38,7 +39,11 @@ assert(documentedIntakeUrl('https://api2.cursor.sh/automations/webhook/../admin'
 assert(readIntakeConfig({}).configured === false, 'missing env is unconfigured');
 assert(readIntakeConfig({ url: GOOD_URL }).configured === false, 'missing key is unconfigured');
 assert(readIntakeConfig({ url: 'https://evil.example/hook', key: 'secret' }).configured === false, 'bad url is unconfigured');
-assert(readIntakeConfig({ url: GOOD_URL, key: 'routine-key' }).configured === true, 'valid pair is configured');
+assert(readIntakeConfig({ url: GOOD_URL, key: 'routine-key' }).configured === false, 'url and key without a verified receipt store stay off');
+assert(readIntakeConfig({ url: GOOD_URL, key: 'routine-key', receipts: 'verified' }).configured === true, 'valid pair and verified receipts are configured');
+assert(clientFeedEventAllowed({ wing: 'intake', summary: 'Note' }) === false, 'clients cannot write the intake wing');
+assert(clientFeedEventAllowed({ wing: null, summary: 'Intake accepted' }) === false, 'clients cannot forge an accepted receipt');
+assert(clientFeedEventAllowed({ wing: 'command', summary: 'Directive recorded' }) === true, 'ordinary console notes remain allowed');
 
 assert(!intakeOriginAllowed(null, PAGE), 'missing origin rejected');
 assert(!intakeOriginAllowed('https://evil.example', PAGE), 'cross origin rejected');
@@ -59,8 +64,10 @@ assert(wire.intent === 'propose' && wire.project === 'cedargrowth' && wire.routi
 assert(wire.agentBotId === '81e152c2-da8d-4d32-9c40-44f78a7a2871', 'wire body uses the server roster id');
 assert(!JSON.stringify(wire).includes('cookie') && !JSON.stringify(wire).includes('genetics'), 'wire body has no cookie or genetics');
 
+const READY = { url: GOOD_URL, key: 'routine-key', receipts: 'verified' };
+
 async function main() {
-async function attempt(overrides: Partial<Parameters<typeof runIntake>[0]> = {}, receipt: ReceiptState = 'none') {
+async function attempt(overrides: Partial<Parameters<typeof runIntake>[0]> = {}, claim: () => Promise<IntakeClaim> = async () => ({ won: true })) {
   let posts = 0;
   let postedUrl = '';
   let postedBody = '';
@@ -78,9 +85,8 @@ async function attempt(overrides: Partial<Parameters<typeof runIntake>[0]> = {},
     origin: ORIGIN,
     requestUrl: PAGE,
     rawText: JSON.stringify({ agent: 'FOUNDRY', taskId: TASK, note: 'Inspect the tooling note' }),
-    env: { url: GOOD_URL, key: 'routine-key' },
-    findReceipt: async () => receipt,
-    reserve: async () => { order.push('reserve'); return true; },
+    env: READY,
+    claim: async (value) => { order.push('claim'); return claim(); void value; },
     mark: async () => { order.push('mark'); },
     post,
     ...overrides,
@@ -92,15 +98,22 @@ const accepted = await attempt();
 assert(accepted.result.http === 200 && accepted.result.body.state === 'accepted', '200 from the routine is accepted');
 assert(accepted.posts === 1, 'accepted path posts once');
 assert(accepted.postedUrl === GOOD_URL, 'post target is the documented url');
-assert(accepted.order.join(',') === 'reserve,post,mark', 'reserve happens before the single post');
+assert(accepted.order.join(',') === 'claim,post,mark', 'the unique claim happens before the single post');
+assert(accepted.result.body.fresh === true, 'a new acceptance is marked fresh');
 const sent = JSON.parse(accepted.postedBody) as Record<string, unknown>;
 assert(sent.intent === 'propose' && sent.agent === 'FOUNDRY' && !('key' in sent) && !('cookie' in sent), 'posted json is the proposal only');
 
-const duplicate = await attempt({}, 'accepted');
-assert(duplicate.result.http === 409 && duplicate.result.body.state === 'duplicate' && duplicate.posts === 0, 'duplicate task id is not sent again');
+const already = await attempt({}, async () => ({ won: false, state: 'accepted' }));
+assert(already.result.http === 409 && already.result.body.state === 'accepted' && already.result.body.fresh === false && already.posts === 0, 'an accepted receipt is not sent again');
 
-const unknown = await attempt({}, 'unknown');
-assert(unknown.result.http === 502 && unknown.posts === 0, 'unknown receipt store does not send');
+const pending = await attempt({}, async () => ({ won: false, state: 'reserved' }));
+assert(pending.result.body.state === 'pending' && pending.posts === 0, 'a pending receipt is reported as pending and not sent');
+
+const refused = await attempt({}, async () => ({ won: false, state: 'rejected' }));
+assert(refused.result.body.state === 'rejected' && refused.posts === 0, 'a rejected receipt is reported as rejected and not sent');
+
+const unknown = await attempt({}, async () => ({ won: false, state: 'unavailable' }));
+assert(unknown.result.http === 502 && unknown.posts === 0, 'unavailable receipt store does not send');
 
 const missing = await attempt({ env: {} });
 assert(missing.result.http === 503 && missing.result.body.state === 'unconfigured' && missing.posts === 0, 'disabled when env is absent');
@@ -134,6 +147,47 @@ const thrown = await attempt({
   },
 });
 assert(thrown.result.body.state === 'error' && thrownPosts === 1, 'timeout is an error and is not retried');
+
+const shared = new Map<string, 'reserved' | 'accepted' | 'rejected'>();
+let entered = 0;
+let openGate: () => void = () => {};
+const bothInside = new Promise<void>((resolve) => { openGate = resolve; });
+let releasePost: () => void = () => {};
+const postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+let overlapPosts = 0;
+const overlapPost: IntakePost = async () => {
+  overlapPosts += 1;
+  await postGate;
+  return { status: 200 };
+};
+async function claimShared(): Promise<IntakeClaim> {
+  entered += 1;
+  if (entered === 2) openGate();
+  await bothInside;
+  const current = shared.get(TASK);
+  if (current) {
+    releasePost();
+    return { won: false, state: current };
+  }
+  shared.set(TASK, 'reserved');
+  return { won: true };
+}
+const overlapEnv = {
+  admin: 'gary@cedargrowthco.com',
+  origin: ORIGIN,
+  requestUrl: PAGE,
+  rawText: JSON.stringify({ agent: 'FOUNDRY', taskId: TASK, note: 'Inspect the tooling note' }),
+  env: READY,
+  claim: claimShared,
+  mark: async (_taskId: string, summary: 'Intake accepted' | 'Intake not accepted') => {
+    shared.set(TASK, summary === 'Intake accepted' ? 'accepted' : 'rejected');
+  },
+  post: overlapPost,
+};
+const overlapped = await Promise.all([runIntake(overlapEnv), runIntake(overlapEnv)]);
+const freshWins = overlapped.filter((item) => item.body.state === 'accepted' && item.body.fresh === true);
+const pendingLosses = overlapped.filter((item) => item.body.state === 'pending');
+assert(overlapPosts === 1 && shared.size === 1 && freshWins.length === 1 && pendingLosses.length === 1, 'overlapping claims against one unique store send one post');
 
 if (failures) {
   console.error(`${failures} failed`);

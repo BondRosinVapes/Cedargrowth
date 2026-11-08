@@ -4,10 +4,13 @@ import { currentAdmin } from '@/lib/kelvinSession';
 import {
   INTAKE_KEY_ENV,
   INTAKE_MAX_BODY,
+  INTAKE_RECEIPTS_ENV,
   INTAKE_URL_ENV,
   readIntakeConfig,
   runIntake,
   intakeOriginAllowed,
+  type IntakeClaim,
+  type StoredReceipt,
 } from '@/lib/kelvinIntake';
 
 // One-way proposal intake. Session gated. Reads the routine URL and key from
@@ -20,12 +23,13 @@ function intakeEnv() {
   return {
     url: process.env[INTAKE_URL_ENV],
     key: process.env[INTAKE_KEY_ENV],
+    receipts: process.env[INTAKE_RECEIPTS_ENV],
   };
 }
 
-function clock(): string {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+function storedState(value: unknown): StoredReceipt | null {
+  if (value === 'reserved' || value === 'accepted' || value === 'rejected') return value;
+  return null;
 }
 
 export async function GET(request: Request) {
@@ -54,36 +58,25 @@ export async function POST(request: Request) {
     requestUrl: request.url,
     rawText,
     env: intakeEnv(),
-    findReceipt: async (taskId) => {
-      if (!supabase) return 'unknown';
-      const { data, error } = await supabase
-        .from('kelvin_events')
-        .select('summary')
-        .eq('wing', 'intake')
-        .eq('sub', taskId)
-        .limit(1);
-      if (error) return 'unknown';
-      const summary = data && data[0] ? String(data[0].summary) : '';
-      if (!summary) return 'none';
-      if (summary === 'Intake accepted') return 'accepted';
-      if (summary === 'Intake not accepted') return 'rejected';
-      return 'reserved';
-    },
-    reserve: async (value) => {
-      if (!supabase) return false;
-      const { error } = await supabase.from('kelvin_events').insert({
+    claim: async (value): Promise<IntakeClaim> => {
+      if (!supabase) return { won: false, state: 'unavailable' };
+      const inserted = await supabase.from('kelvin_intake_receipts').insert({
+        task_id: value.taskId,
         agent: value.agent,
-        time: clock(),
-        type: 'DECISION',
-        summary: 'Intake reserved',
-        sub: value.taskId,
-        wing: 'intake',
+        state: 'reserved',
       });
-      return !error;
+      if (!inserted.error) return { won: true };
+      if (inserted.error.code !== '23505') return { won: false, state: 'unavailable' };
+      const existing = await supabase.from('kelvin_intake_receipts').select('state').eq('task_id', value.taskId).maybeSingle();
+      if (existing.error) return { won: false, state: 'unavailable' };
+      const state = storedState(existing.data?.state);
+      if (!state) return { won: false, state: 'unavailable' };
+      return { won: false, state };
     },
     mark: async (taskId, summary) => {
       if (!supabase) return;
-      await supabase.from('kelvin_events').update({ summary }).eq('wing', 'intake').eq('sub', taskId);
+      const state = summary === 'Intake accepted' ? 'accepted' : 'rejected';
+      await supabase.from('kelvin_intake_receipts').update({ state, updated_at: new Date().toISOString() }).eq('task_id', taskId);
     },
   });
 

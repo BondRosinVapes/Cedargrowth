@@ -66,11 +66,6 @@ export default function SecurityWing({ view, addEvent, flash, now }: Props) {
     addEvent({ agent: 'SENTINEL', time: now(), type: 'DECISION', summary: `Waiver ${id} revoked`, sub: 'Accepted risk returned to enforcement.' });
     await load(); flash(`Waiver ${id} revoked.`);
   }
-  async function clearRelease() {
-    const res = await mutate({ op: 'clear-release' });
-    if (res.ok) { addEvent({ agent: 'SENTINEL', time: now(), type: 'GATE', summary: 'Release cleared by SENTINEL', sub: 'Every precheck passing. Passed to VERNIER on the release chain.' }); await load(); flash('Release cleared. Passed to VERNIER.'); }
-    else flash((res.reason as string) || 'Blocked.');
-  }
   async function reviewVendor(id: string) {
     const res = await mutate({ op: 'review-vendor', id });
     addEvent({ agent: 'SENTINEL', time: now(), type: 'AUDIT', summary: `Vendor reviewed: ${res.name || id}`, sub: 'Third party posture updated to Reviewed.' });
@@ -160,13 +155,13 @@ export default function SecurityWing({ view, addEvent, flash, now }: Props) {
     const gate = releaseGate(data.prechecks);
     return (
       <>
-        <p className="lead">Release prechecks stored in the console. A Pass mark here is not release evidence. LITMUS, SENTINEL, and VERNIER stay closed until each gate has its own evidence. A build does not clear while any precheck fails.</p>
+        <p className="lead">Release prechecks stored in the console. A stored mark is not a LITMUS, SENTINEL, or VERNIER pass. Clearing stays closed when evidence is missing, empty, or only a stored mark.</p>
         <div className="detailpanel">
           <h3>Prechecks</h3>
-          {data.prechecks.map((p) => <div className="keyfield" key={p.id}><span className="kf-k" style={{ color: 'var(--k-secondary)' }}>{p.item}</span><span className="kf-v">{stateChip(p.state)}</span></div>)}
+          {(data.prechecks || []).map((p) => <div className="keyfield" key={p.id}><span className="kf-k" style={{ color: 'var(--k-secondary)' }}>{p.item}</span><span className="kf-v">{stateChip(p.state)}</span></div>)}
           <div className="actions" style={{ marginTop: 18 }}>
-            {gate.ok ? <button className="btn solid" onClick={clearRelease}>Clear for release</button> : <button className="btn disabled" onClick={() => flash(gate.reason || 'Blocked.')}>Clear for release</button>}
-            <span className={`gate ${gate.ok ? 'ok' : 'no'}`}><span className={`sq ${gate.ok ? 'pass' : 'fail'}`} />{gate.ok ? 'All prechecks passing' : gate.reason}</span>
+            <button className="btn disabled" type="button" disabled>Clear for release</button>
+            <span className="gate no"><span className="sq fail" />{gate.reason}</span>
           </div>
         </div>
       </>

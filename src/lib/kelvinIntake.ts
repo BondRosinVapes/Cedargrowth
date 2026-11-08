@@ -13,6 +13,7 @@ import { ROSTER } from '../app/admin/kelvin/store';
 
 export const INTAKE_URL_ENV = 'CEDARGROWTH_KELVIN_INTAKE_URL';
 export const INTAKE_KEY_ENV = 'CEDARGROWTH_KELVIN_INTAKE_KEY';
+export const INTAKE_RECEIPTS_ENV = 'CEDARGROWTH_KELVIN_INTAKE_RECEIPTS';
 export const INTAKE_PROJECT = 'cedargrowth';
 export const INTAKE_ROUTINE = 'cedargrowth-kelvin-request-intake';
 export const INTAKE_HOST = 'api2.cursor.sh';
@@ -25,7 +26,7 @@ const WEBHOOK_PATH = /^\/automations\/webhook\/([A-Za-z0-9_-]{8,200})$/;
 const KNOWN_AGENTS = new Set(ROSTER.map((slot) => slot.id));
 const ALLOWED_BODY_KEYS = new Set(['agent', 'taskId', 'note']);
 
-export type IntakeEnv = { url?: string; key?: string };
+export type IntakeEnv = { url?: string; key?: string; receipts?: string };
 
 export type IntakeProposal = {
   agent: string;
@@ -62,7 +63,14 @@ export function readIntakeConfig(env: IntakeEnv): { configured: true; url: strin
   const url = documentedIntakeUrl(env.url);
   const key = typeof env.key === 'string' ? env.key.trim() : '';
   if (!url || !key || key.length > 500 || /[\r\n]/.test(key)) return { configured: false };
+  if (env.receipts !== 'verified') return { configured: false };
   return { configured: true, url, key };
+}
+
+export function clientFeedEventAllowed(row: { wing: string | null; summary: string }): boolean {
+  if (row.wing === 'intake') return false;
+  if (row.summary === 'Intake reserved' || row.summary === 'Intake accepted' || row.summary === 'Intake not accepted') return false;
+  return true;
 }
 
 export function intakeOriginAllowed(originHeader: string | null, requestUrl: string): boolean {
@@ -112,11 +120,20 @@ export function intakeWireBody(value: IntakeProposal): IntakeWireBody {
   };
 }
 
-export type ReceiptState = 'none' | 'reserved' | 'accepted' | 'rejected' | 'unknown';
+export type StoredReceipt = 'reserved' | 'accepted' | 'rejected';
+
+export type IntakeClaim =
+  | { won: true }
+  | { won: false; state: StoredReceipt }
+  | { won: false; state: 'unavailable' };
 
 export type IntakeResult = {
   http: number;
-  body: { state: 'unauthorized' | 'forbidden' | 'invalid' | 'unconfigured' | 'duplicate' | 'accepted' | 'error'; taskId?: string };
+  body: {
+    state: 'unauthorized' | 'forbidden' | 'invalid' | 'unconfigured' | 'pending' | 'accepted' | 'rejected' | 'error';
+    taskId?: string;
+    fresh?: boolean;
+  };
 };
 
 export type IntakePost = (input: { url: string; key: string; body: string; timeoutMs: number }) => Promise<{ status: number }>;
@@ -127,8 +144,7 @@ export async function runIntake(input: {
   requestUrl: string;
   rawText: string;
   env: IntakeEnv;
-  findReceipt: (taskId: string) => Promise<ReceiptState>;
-  reserve: (value: IntakeProposal) => Promise<boolean>;
+  claim: (value: IntakeProposal) => Promise<IntakeClaim>;
   mark: (taskId: string, summary: 'Intake accepted' | 'Intake not accepted') => Promise<void>;
   post?: IntakePost;
 }): Promise<IntakeResult> {
@@ -142,12 +158,13 @@ export async function runIntake(input: {
   const config = readIntakeConfig(input.env);
   if (!config.configured) return { http: 503, body: { state: 'unconfigured', taskId: proposal.value.taskId } };
 
-  const existing = await input.findReceipt(proposal.value.taskId);
-  if (existing === 'unknown') return { http: 502, body: { state: 'error', taskId: proposal.value.taskId } };
-  if (existing !== 'none') return { http: 409, body: { state: 'duplicate', taskId: proposal.value.taskId } };
-
-  const reserved = await input.reserve(proposal.value);
-  if (!reserved) return { http: 502, body: { state: 'error', taskId: proposal.value.taskId } };
+  const claimed = await input.claim(proposal.value);
+  if (!claimed.won) {
+    if (claimed.state === 'unavailable') return { http: 502, body: { state: 'error', taskId: proposal.value.taskId } };
+    if (claimed.state === 'reserved') return { http: 409, body: { state: 'pending', taskId: proposal.value.taskId } };
+    if (claimed.state === 'accepted') return { http: 409, body: { state: 'accepted', fresh: false, taskId: proposal.value.taskId } };
+    return { http: 409, body: { state: 'rejected', taskId: proposal.value.taskId } };
+  }
 
   const wire = intakeWireBody(proposal.value);
   const post = input.post ?? defaultPost;
@@ -169,7 +186,7 @@ export async function runIntake(input: {
     // The webhook was already called once. A failed receipt write must not cause a retry.
   }
   if (status !== 200) return { http: 502, body: { state: 'error', taskId: proposal.value.taskId } };
-  return { http: 200, body: { state: 'accepted', taskId: proposal.value.taskId } };
+  return { http: 200, body: { state: 'accepted', fresh: true, taskId: proposal.value.taskId } };
 }
 
 async function defaultPost(input: { url: string; key: string; body: string; timeoutMs: number }): Promise<{ status: number }> {

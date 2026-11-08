@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseServerClient } from '@/lib/supabase';
 import { currentAdmin } from '@/lib/kelvinSession';
+import { decideReleaseClearance } from '@/app/admin/kelvin/wings/security';
 
 // Security mutations. The release clearance gate is enforced here: clear-release
 // checks the precheck rows and refuses while any fail. All gated.
@@ -47,10 +48,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   }
   if (op === 'clear-release') {
-    const { data } = await supabase.from('kelvin_prechecks').select('state');
-    const fails = (data || []).filter((p) => p.state === 'Fail').length;
-    if (fails) return NextResponse.json({ ok: false, reason: `${fails} precheck item${fails > 1 ? 's' : ''} failing. SENTINEL cannot clear the release until they pass.` });
-    return NextResponse.json({ ok: true });
+    const { data, error } = await supabase.from('kelvin_prechecks').select('state');
+    const decision = decideReleaseClearance({ error: !!error, rows: error ? null : (data || []) });
+    return NextResponse.json(decision);
   }
   if (op === 'review-vendor') {
     const { data } = await supabase.from('kelvin_vendors').update({ posture: 'Reviewed', last_review: hhmm() }).eq('id', id).select('name').maybeSingle();
