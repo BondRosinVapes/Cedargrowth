@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   CANON,
   ROSTER,
@@ -28,6 +28,46 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
   const [target, setTarget] = useState('MERIDIAN');
   const [priority, setPriority] = useState('normal');
   const [due, setDue] = useState('');
+  const [intakeReady, setIntakeReady] = useState<boolean | null>(null);
+  const [proposal, setProposal] = useState('');
+  const [proposalAgent, setProposalAgent] = useState('MERIDIAN');
+  const [intakePhase, setIntakePhase] = useState<'idle' | 'pending' | 'unconfigured' | 'accepted' | 'duplicate' | 'error' | 'invalid'>('idle');
+  const [intakeTask, setIntakeTask] = useState('');
+
+  useEffect(() => {
+    if (view !== 'steering') return;
+    let active = true;
+    fetch('/api/admin/kelvin/intake')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (active) setIntakeReady(!!(d && d.configured === true)); })
+      .catch(() => { if (active) setIntakeReady(false); });
+    return () => { active = false; };
+  }, [view]);
+
+  async function propose(e: React.FormEvent) {
+    e.preventDefault();
+    if (intakePhase === 'pending') return;
+    const taskId = crypto.randomUUID();
+    setIntakeTask(taskId);
+    setIntakePhase('pending');
+    try {
+      const res = await fetch('/api/admin/kelvin/intake', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agent: proposalAgent, taskId, note: proposal }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const state = data && typeof data.state === 'string' ? data.state : 'error';
+      if (state === 'accepted' || state === 'duplicate' || state === 'unconfigured' || state === 'invalid' || state === 'error') {
+        setIntakePhase(state);
+      } else {
+        setIntakePhase('error');
+      }
+      if (state === 'accepted') await reloadCommand();
+    } catch {
+      setIntakePhase('error');
+    }
+  }
 
   if (view === 'queue') {
     return (
@@ -80,7 +120,7 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
     }
     return (
       <>
-        <p className="lead">Record a directive in KELVIN. The named role is a label only. Nothing is delivered, because no agent transport is connected and routing acknowledgement is not confirmed.</p>
+        <p className="lead">Record a directive in KELVIN. This form does not send it. The proposal under it is the only intake, and it stays unconfigured until the server settings are present.</p>
         <form className="form-grid" onSubmit={submit}>
           <div className="field"><label>Directive</label><textarea rows={4} value={dir} onChange={(e) => setDir(e.target.value)} placeholder="State the directive in plain language." /></div>
           <div className="row2">
@@ -89,6 +129,23 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
           </div>
           <div className="field" style={{ maxWidth: 300 }}><label>Due date</label><input type="date" value={due} onChange={(e) => setDue(e.target.value)} /></div>
           <div className="actions"><button className="btn solid" type="submit">File directive</button></div>
+        </form>
+        <form className="form-grid" style={{ marginTop: 28 }} onSubmit={propose}>
+          <p className="lead">
+            {intakeReady === null
+              ? 'Checking intake.'
+              : intakeReady
+                ? 'Intake is configured. A proposal can be accepted, which only means a run started. The result stays in the bot chat. This page does not show completion.'
+                : 'Intake unconfigured. No proposal is sent.'}
+          </p>
+          <div className="field"><label>Proposal</label><textarea rows={4} value={proposal} onChange={(e) => setProposal(e.target.value)} placeholder="State the task. Do not include access codes or genetic results." /></div>
+          <div className="field"><label>Named role</label><select value={proposalAgent} onChange={(e) => setProposalAgent(e.target.value)}>{ROSTER.map((a) => <option key={a.id}>{a.id}</option>)}</select></div>
+          <div className="actions"><button className="btn solid" type="submit" disabled={intakePhase === 'pending'}>{intakePhase === 'pending' ? 'Sending proposal' : 'Propose task'}</button></div>
+          {intakePhase === 'accepted' ? <p className="lead">Accepted. Task {intakeTask}. A run started. Not finished, and not a gate pass.</p> : null}
+          {intakePhase === 'duplicate' ? <p className="lead">Already accepted for task {intakeTask}. Not sent again.</p> : null}
+          {intakePhase === 'unconfigured' ? <p className="lead">Intake unconfigured. Nothing was sent.</p> : null}
+          {intakePhase === 'error' ? <p className="lead">Not accepted. Nothing was retried.</p> : null}
+          {intakePhase === 'invalid' ? <p className="lead">The proposal was refused. Nothing was sent.</p> : null}
         </form>
       </>
     );

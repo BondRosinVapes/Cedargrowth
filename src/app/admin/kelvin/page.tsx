@@ -256,6 +256,13 @@ export default function KelvinConsole() {
   );
 }
 
+function feedMark(event: KEvent): string {
+  if (event.wing !== 'intake') return 'Prototype';
+  if (event.summary === 'Intake accepted') return 'Accepted';
+  if (event.summary === 'Intake reserved') return 'Pending';
+  return 'Not accepted';
+}
+
 function CommandView(props: {
   view: string;
   filtered: KEvent[];
@@ -279,7 +286,7 @@ function CommandView(props: {
     return (
       <>
         <p className="lead">
-          Prototype records from the console store. A gate word in a line is not a pass. No row is authenticated bot telemetry, and the ticker that minted extra lines is off.
+          Rows without an intake mark are prototype copy. An Accepted mark means the intake routine started a run for that task id. It is not a finished result, a gate pass, or live telemetry. The ticker that minted extra lines is off.
         </p>
         <div className="filters" style={{ marginBottom: 16 }}>
           {ROSTER.map((a) => (
@@ -315,7 +322,7 @@ function CommandView(props: {
                     <span className="mono row-type">{e.type}</span>
                   </span>
                   <span className="row-sum">{e.summary}</span>
-                  <span className="chip attention">Prototype</span>
+                  <span className="chip attention">{feedMark(e)}</span>
                 </div>
                 {openRow === e.id ? (
                   <div className="row-detail">
