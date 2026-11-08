@@ -64,12 +64,14 @@ When Figma output needs a tinted color, use `bg-cedar/10` style alpha utilities 
 
 **Wellness "line pigments"** - `rest #3B4457`, `relief #9C5B45`, `focus #A08B3C`, `calm #7C8A72`, `restore #6B5340`. Rule: usable ONLY as a 3px marker or a tinted plate, **never** as a background or button fill. Dynamic pigment classes are pinned in `src/lib/lines.ts` via the `PIGMENT_MARK` map so Tailwind JIT does not purge them - if a Figma import generates pigment classes dynamically, add them to that map or they will not render.
 
-### Typography (three families, via `next/font/google`)
+### Typography (three families, self-hosted)
 | Tailwind | CSS var | Face | Use |
 |---|---|---|---|
 | `font-display` | `--font-newsreader` | Newsreader (serif, 400 + italic) | Display / headings |
 | `font-sans` | `--font-inter-tight` | Inter Tight (400/500) | Default body |
 | `font-mono` | `--font-ibm-plex-mono` | IBM Plex Mono (400/500) | Data / specimen, `tabular-nums` |
+
+Files live in `src/fonts` and load through `next/font/local`. The build does not fetch Google Fonts. Keep the subset files (latin, latin-ext, Vietnamese, and, where that family has them, Cyrillic and Greek). Do not switch these calls back to `next/font/google`.
 
 **Type scale** - desktop is the base key; mobile is a `-m` suffix applied mobile-first. The house pattern is `text-<key>-m md:text-<key>`:
 `display-xl` 76/40 · `display-l` 56/32 · `heading-m` 34/26 · `heading-s` 20/18 · `body-l` 18/17 · `body-m` 16/15 · `eyebrow` 12/11 (0.14em tracking) · `caption` 13/12 · `specimen` 12/11 · `data` 15/14. (Each carries its own line-height/letter-spacing in the config.)

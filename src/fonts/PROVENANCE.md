@@ -1,23 +1,35 @@
 # Font files
 
-These are the latin woff2 files Google Fonts returned for the same CSS requests `next/font/google` made from `src/app/layout.tsx` before this change. They are vendored so `next build` does not fetch Google Fonts. The loader in Next.js 14.2.35 crashes when that response uses an extensionless `/l/font?kit=` URL.
+The build loads these woff2 files with `next/font/local`. It does not call Google Fonts.
 
-No family was substituted. Weights and styles are the ones the layout already requested.
+No family was substituted. Weights and styles are the ones the layout already requested: Newsreader 400 roman and italic, Inter Tight 400 and 500, IBM Plex Mono 400 and 500. `font-display` is `swap`.
 
-| File | Family | Weight | Style | Google Fonts version |
-| --- | --- | --- | --- | --- |
-| newsreader-latin-400.woff2 | Newsreader | 400 | normal | v26 |
-| newsreader-latin-400-italic.woff2 | Newsreader | 400 | italic | v26 |
-| inter-tight-latin-variable.woff2 | Inter Tight | 400 and 500 | normal | v9 |
-| ibm-plex-mono-latin-400.woff2 | IBM Plex Mono | 400 | normal | v20 |
-| ibm-plex-mono-latin-500.woff2 | IBM Plex Mono | 500 | normal | v20 |
+## What this is, and what it is not
 
-Inter Tight's latin response for weight 400 and weight 500 was the same variable file (`wght` 100 to 900, default 400). The layout declares that file as weight `400 500`, which is the range the previous setup requested.
+`src/fonts/observations/` is a CSS response fetched on 8 Nov 2026 from `fonts.googleapis.com` with the Chrome 104 user agent that `next/font/google` sends. The request URLs are the ones `getGoogleFontsUrl` builds for the layout calls:
 
-Licenses, SIL Open Font License 1.1:
+- Inter Tight: `family=Inter+Tight:wght@400;500&display=swap`
+- IBM Plex Mono: `family=IBM+Plex+Mono:wght@400;500&display=swap`
+- Newsreader: `family=Newsreader:ital,wght@0,400;1,400&display=swap`
+
+That response is not a capture of the CSS production served before the self-host change. No earlier Google response was retained. The latin files already in the repo match this observation byte for byte. The other subset files were taken from the same response.
+
+`next/font/google` in Next.js 14.2.35 does not stop at the subset named in the call. `findFontFilesInCss` downloads every file in the CSS. The named subset, latin, is the only one preloaded. The CSS keeps each subset's `unicode-range`, so the browser fetches the other files when the text needs those characters. A latin-only file does not provide that coverage, even when the latin bytes match.
+
+Newsreader's observed subsets are Vietnamese, latin-ext, and latin. IBM Plex Mono adds Cyrillic and Cyrillic Extended. Inter Tight adds those plus Greek and Greek Extended. Those are the subsets in this observation and in Next's font metadata. They are not a claim that every script is covered.
+
+## Fallback metrics
+
+Inter Tight and IBM Plex Mono use the size-adjust values `next/font/google` reads from `capsize-font-metrics.json` on Next.js 14.2.35: Inter Tight 96.39% against Arial, IBM Plex Mono 134.59% against Arial. `next/font/local` would measure the files itself and emit 97.21% and 131.49%. Those measured values are recorded by the regression and are not the faces in `src/app/font-fallback.css`.
+
+Newsreader has no row in that metrics file. The Google loader then emits no size-adjust face. This repo does the same.
+
+## Licenses
+
+SIL Open Font License 1.1:
 
 - `OFL-Newsreader.txt`, copyright 2020 The Newsreader Project Authors
 - `OFL-Inter-Tight.txt`, copyright 2022 The Inter Project Authors
 - `OFL-IBM-Plex-Mono.txt`, copyright 2017 IBM Corp. Reserved Font Name "Plex"
 
-Fetched from the Google Fonts `ofl` tree on 8 Nov 2026. The woff2 bytes were fetched the same day from `fonts.gstatic.com` with the Chrome 104 user agent Next.js sends.
+The additional subset files are the same families and the same licenses. The woff2 bytes were fetched on 8 Nov 2026 from `fonts.gstatic.com`. `observations/manifest.json` records the sha256 of each file.

@@ -1,0 +1,196 @@
+{
+  "observedOn": "2026-11-08",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
+  "historicalProductionCss": "not captured",
+  "urls": {
+    "inter-tight": "https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500&display=swap",
+    "ibm-plex-mono": "https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap",
+    "newsreader": "https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;1,400&display=swap"
+  },
+  "files": [
+    {
+      "family": "inter-tight",
+      "subset": "cyrillic-ext",
+      "file": "inter-tight-cyrillic-ext.woff2",
+      "sha256": "4a89b86d992e34430a1674dd4d300520b6bdbc60d12f3eadcb0075e3baa78be9",
+      "bytes": 26644,
+      "googleFile": "NGSwv5HMAFg6IuGlBNMjxLsK8ahuQ2e8Smg.woff2"
+    },
+    {
+      "family": "inter-tight",
+      "subset": "cyrillic",
+      "file": "inter-tight-cyrillic.woff2",
+      "sha256": "04e865409d6fd36dd9be4bb45a72c437f31f5904158a5609cce9721da0d9a615",
+      "bytes": 17052,
+      "googleFile": "NGSwv5HMAFg6IuGlBNMjxLsD8ahuQ2e8Smg.woff2"
+    },
+    {
+      "family": "inter-tight",
+      "subset": "greek-ext",
+      "file": "inter-tight-greek-ext.woff2",
+      "sha256": "0c930dc2267b2e8b7341715b8548be46cd61125570b4291cd152f60c61758130",
+      "bytes": 11736,
+      "googleFile": "NGSwv5HMAFg6IuGlBNMjxLsL8ahuQ2e8Smg.woff2"
+    },
+    {
+      "family": "inter-tight",
+      "subset": "greek",
+      "file": "inter-tight-greek.woff2",
+      "sha256": "67b5c3cea0f66a940a37e39e5c4ce62ecd1491fbd735d6625f2dfa1545faa674",
+      "bytes": 22212,
+      "googleFile": "NGSwv5HMAFg6IuGlBNMjxLsE8ahuQ2e8Smg.woff2"
+    },
+    {
+      "family": "inter-tight",
+      "subset": "vietnamese",
+      "file": "inter-tight-vietnamese.woff2",
+      "sha256": "c753c7f9f2dc179be947a2d677c2db39da161449d2f3702c711774a9521e493a",
+      "bytes": 10508,
+      "googleFile": "NGSwv5HMAFg6IuGlBNMjxLsI8ahuQ2e8Smg.woff2"
+    },
+    {
+      "family": "inter-tight",
+      "subset": "latin-ext",
+      "file": "inter-tight-latin-ext.woff2",
+      "sha256": "3c299662298bcf2cbf119996f900acce3782695a35e584bc22a566c5d6ea8b48",
+      "bytes": 89820,
+      "googleFile": "NGSwv5HMAFg6IuGlBNMjxLsJ8ahuQ2e8Smg.woff2"
+    },
+    {
+      "family": "inter-tight",
+      "subset": "latin",
+      "file": "inter-tight-latin-variable.woff2",
+      "sha256": "83d548cd73ef2e039167db3adb5ea9d7a7870466ffc8a162c9820bc348938aaf",
+      "bytes": 44916,
+      "googleFile": "NGSwv5HMAFg6IuGlBNMjxLsH8ahuQ2e8.woff2"
+    },
+    {
+      "family": "ibm-plex-mono",
+      "subset": "cyrillic-ext",
+      "file": "ibm-plex-mono-cyrillic-ext-400.woff2",
+      "sha256": "c6f09ee0e0a24b7c85ecb2a601eb99332f65b1f6b37c31e0bbe73fb307625eca",
+      "bytes": 4348,
+      "googleFile": "-F63fjptAgt5VM-kVkqdyU8n1iIq131nj-otFQ.woff2"
+    },
+    {
+      "family": "ibm-plex-mono",
+      "subset": "cyrillic-ext",
+      "file": "ibm-plex-mono-cyrillic-ext-500.woff2",
+      "sha256": "311098be73eac339128f0b5a6e33d72645b6f87488541fdf467c402152d297fd",
+      "bytes": 4336,
+      "googleFile": "-F6qfjptAgt5VM-kVkqdyU8n3twJwl1FgsAXHNlYzg.woff2"
+    },
+    {
+      "family": "ibm-plex-mono",
+      "subset": "cyrillic",
+      "file": "ibm-plex-mono-cyrillic-400.woff2",
+      "sha256": "7b59d6bf7f8b8408ac28f27d01dca9a890abeae77045d343b1d8ccb089a92e54",
+      "bytes": 5476,
+      "googleFile": "-F63fjptAgt5VM-kVkqdyU8n1isq131nj-otFQ.woff2"
+    },
+    {
+      "family": "ibm-plex-mono",
+      "subset": "cyrillic",
+      "file": "ibm-plex-mono-cyrillic-500.woff2",
+      "sha256": "d524dc8ff6dbf7ed69772f3b2ff4affaf5a89b5762b270e36c3f21da0d4e39f5",
+      "bytes": 5500,
+      "googleFile": "-F6qfjptAgt5VM-kVkqdyU8n3twJwlRFgsAXHNlYzg.woff2"
+    },
+    {
+      "family": "ibm-plex-mono",
+      "subset": "vietnamese",
+      "file": "ibm-plex-mono-vietnamese-400.woff2",
+      "sha256": "0a8b854cc18641bd1b8222afa7ec82a75e59bc6501f777744ec87db1b6cd7a2c",
+      "bytes": 4000,
+      "googleFile": "-F63fjptAgt5VM-kVkqdyU8n1iAq131nj-otFQ.woff2"
+    },
+    {
+      "family": "ibm-plex-mono",
+      "subset": "vietnamese",
+      "file": "ibm-plex-mono-vietnamese-500.woff2",
+      "sha256": "b2529fba93fd07a50ffb8fc3d103eb04b0c298d4f6564d2833c44fde286de7e4",
+      "bytes": 4036,
+      "googleFile": "-F6qfjptAgt5VM-kVkqdyU8n3twJwl9FgsAXHNlYzg.woff2"
+    },
+    {
+      "family": "ibm-plex-mono",
+      "subset": "latin-ext",
+      "file": "ibm-plex-mono-latin-ext-400.woff2",
+      "sha256": "f1050dc5317b43434c0aeda599d4624c774ffc162e87a8cf204b949b6a85816d",
+      "bytes": 8860,
+      "googleFile": "-F63fjptAgt5VM-kVkqdyU8n1iEq131nj-otFQ.woff2"
+    },
+    {
+      "family": "ibm-plex-mono",
+      "subset": "latin-ext",
+      "file": "ibm-plex-mono-latin-ext-500.woff2",
+      "sha256": "77f03e26f981c582bdba3a7abed4baa2d3149211c01366bb3ab3ba7622ec4ae5",
+      "bytes": 8848,
+      "googleFile": "-F6qfjptAgt5VM-kVkqdyU8n3twJwl5FgsAXHNlYzg.woff2"
+    },
+    {
+      "family": "ibm-plex-mono",
+      "subset": "latin",
+      "file": "ibm-plex-mono-latin-400.woff2",
+      "sha256": "c36f509c0a8f9f85f29cb44bc8701d8a9e0b14c499e77a884f789ead7093a7ac",
+      "bytes": 10052,
+      "googleFile": "-F63fjptAgt5VM-kVkqdyU8n1i8q131nj-o.woff2"
+    },
+    {
+      "family": "ibm-plex-mono",
+      "subset": "latin",
+      "file": "ibm-plex-mono-latin-500.woff2",
+      "sha256": "a76f53ca6612e7b3828eec2311098675b7f9849ae4169a8bcef6302aec02a6c0",
+      "bytes": 10060,
+      "googleFile": "-F6qfjptAgt5VM-kVkqdyU8n3twJwlBFgsAXHNk.woff2"
+    },
+    {
+      "family": "newsreader",
+      "subset": "vietnamese",
+      "file": "newsreader-vietnamese-400-italic.woff2",
+      "sha256": "b7352f1eb41bd7c0b9e2dbc1161e3927755efddca4c12f1ebe86923070d10f5c",
+      "bytes": 5544,
+      "googleFile": "cY9kfjOCX1hbuyalUrK439vogqC9yFZCYg7oRZaLP4obnf7fTXglsMwoT9ZIFjSShVCjzSZ-Mg.woff2"
+    },
+    {
+      "family": "newsreader",
+      "subset": "vietnamese",
+      "file": "newsreader-vietnamese-400.woff2",
+      "sha256": "47ca1e16520c1ffe5a0097e093909fc86b692d7597ddb623355320e5a7e3bdc2",
+      "bytes": 5476,
+      "googleFile": "cY9qfjOCX1hbuyalUrK49dLac06G1ZGsZBtoBCzBDXXD9JVF438weI_wBOZFHDWwgUii5SY.woff2"
+    },
+    {
+      "family": "newsreader",
+      "subset": "latin-ext",
+      "file": "newsreader-latin-ext-400-italic.woff2",
+      "sha256": "3b8eca75ceca3077c49e46e29f9afb1c91c6e474c2b10d42bec998ce593e2a27",
+      "bytes": 15248,
+      "googleFile": "cY9kfjOCX1hbuyalUrK439vogqC9yFZCYg7oRZaLP4obnf7fTXglsMwoT9ZJFjSShVCjzSZ-Mg.woff2"
+    },
+    {
+      "family": "newsreader",
+      "subset": "latin-ext",
+      "file": "newsreader-latin-ext-400.woff2",
+      "sha256": "e05107669368900035f0701c2745d9d43878ee61f58655ced8d4e34e008cf7e8",
+      "bytes": 14192,
+      "googleFile": "cY9qfjOCX1hbuyalUrK49dLac06G1ZGsZBtoBCzBDXXD9JVF438weI_wBeZFHDWwgUii5SY.woff2"
+    },
+    {
+      "family": "newsreader",
+      "subset": "latin",
+      "file": "newsreader-latin-400-italic.woff2",
+      "sha256": "56febd06c694ba791028f22c659bc1f8c80954732a77db8d708432296268e163",
+      "bytes": 24408,
+      "googleFile": "cY9kfjOCX1hbuyalUrK439vogqC9yFZCYg7oRZaLP4obnf7fTXglsMwoT9ZHFjSShVCjzSY.woff2"
+    },
+    {
+      "family": "newsreader",
+      "subset": "latin",
+      "file": "newsreader-latin-400.woff2",
+      "sha256": "283674309045e326b732488ff07dd9e7799cb1ffc3eeccbeb642c142a13c7131",
+      "bytes": 22504,
+      "googleFile": "cY9qfjOCX1hbuyalUrK49dLac06G1ZGsZBtoBCzBDXXD9JVF438weI_wC-ZFHDWwgUii.woff2"
+    }
+  ]
+}
