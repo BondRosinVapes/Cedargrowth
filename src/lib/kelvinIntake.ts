@@ -150,8 +150,9 @@ export function claimFromWrite(insertErrorCode: string | null, read: { error: bo
   return { won: false, state: 'unavailable' };
 }
 
-export function markFromUpdate(result: { error: boolean; rows: number }): MarkResult {
+export function markFromUpdate(result: { error: boolean; rows: number; durableState?: string | null; expectedState?: string }): MarkResult {
   if (result.error || result.rows !== 1) return 'failed';
+  if (result.expectedState !== undefined && result.durableState !== result.expectedState) return 'failed';
   return 'updated';
 }
 
@@ -225,16 +226,26 @@ export async function runIntake(input: {
   return { http, body: { ...outcome, taskId: proposal.value.taskId } };
 }
 
-async function defaultPost(input: { url: string; key: string; body: string; timeoutMs: number }): Promise<{ status: number }> {
-  const response = await fetch(input.url, {
-    method: 'POST',
-    redirect: 'error',
-    signal: AbortSignal.timeout(input.timeoutMs),
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${input.key}`,
+export function intakeFetchInit(input: { url: string; key: string; body: string; timeoutMs: number }): { url: string; init: RequestInit } {
+  return {
+    url: input.url,
+    init: {
+      method: 'POST',
+      redirect: 'error',
+      signal: AbortSignal.timeout(input.timeoutMs),
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${input.key}`,
+      },
+      body: input.body,
     },
-    body: input.body,
-  });
+  };
+}
+
+async function defaultPost(input: { url: string; key: string; body: string; timeoutMs: number }): Promise<{ status: number }> {
+  const request = intakeFetchInit(input);
+  const headers = request.init.headers as Record<string, string>;
+  if ('cookie' in headers) throw new Error('intake request must not send a cookie');
+  const response = await fetch(request.url, request.init);
   return { status: response.status };
 }

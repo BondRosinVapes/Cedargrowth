@@ -9,6 +9,9 @@ import {
   runIntake,
   validateIntakeBody,
   clientFeedEventAllowed,
+  intakeFetchInit,
+  markFromUpdate,
+  intakeOutcome,
   type IntakeClaim,
   type IntakePost,
 } from '../src/lib/kelvinIntake';
@@ -63,6 +66,13 @@ const wire = intakeWireBody({ agent: 'MERIDIAN', taskId: TASK, note: 'Check the 
 assert(wire.intent === 'propose' && wire.project === 'cedargrowth' && wire.routine === 'cedargrowth-kelvin-request-intake', 'wire body is a proposal for this routine');
 assert(wire.agentBotId === '81e152c2-da8d-4d32-9c40-44f78a7a2871', 'wire body uses the server roster id');
 assert(!JSON.stringify(wire).includes('cookie') && !JSON.stringify(wire).includes('genetics'), 'wire body has no cookie or genetics');
+
+const fetchInit = intakeFetchInit({ url: GOOD_URL, key: 'routine-key', body: '{}', timeoutMs: 8000 });
+assert(fetchInit.init.redirect === 'error', 'webhook fetch does not follow redirects');
+assert(!Object.keys(fetchInit.init.headers as object).some((name) => name.toLowerCase() === 'cookie'), 'webhook fetch does not send a cookie');
+assert(markFromUpdate({ error: true, rows: 1, durableState: 'accepted', expectedState: 'accepted' }) === 'failed', 'an update error is not a saved receipt');
+assert(markFromUpdate({ error: false, rows: 1, durableState: 'reserved', expectedState: 'accepted' }) === 'failed', 'a reserved read-back is not a saved acceptance');
+assert(intakeOutcome('accepted', 'failed').state === 'unpersisted' && intakeOutcome('accepted', 'failed').upstream === 'accepted', 'upstream acceptance stays distinct from a failed receipt write');
 
 const READY = { url: GOOD_URL, key: 'routine-key', receipts: 'verified' };
 

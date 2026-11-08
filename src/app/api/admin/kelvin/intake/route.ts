@@ -37,8 +37,8 @@ export async function GET(request: Request) {
   if (!readIntakeConfig(intakeEnv()).configured) return NextResponse.json({ configured: false });
   const supabase = getSupabaseServerClient();
   if (!supabase) return NextResponse.json({ configured: false });
-  const contract = await supabase.rpc('kelvin_intake_receipt_contract');
-  return NextResponse.json({ configured: !contract.error && contract.data === true });
+  const contract = await supabase.rpc('kelvin_intake_receipt_contract_v2');
+  return NextResponse.json({ configured: !contract.error && contract.data === 'ok' });
 }
 
 export async function POST(request: Request) {
@@ -79,13 +79,23 @@ export async function POST(request: Request) {
         .from('kelvin_intake_receipts')
         .update({ state, updated_at: new Date().toISOString() })
         .eq('task_id', taskId)
-        .select('task_id');
-      return markFromUpdate({ error: !!updated.error, rows: updated.data?.length ?? 0 });
+        .eq('state', 'reserved')
+        .select('state');
+      if (updated.error || !updated.data || updated.data.length !== 1 || updated.data[0]?.state !== state) {
+        return 'failed';
+      }
+      const durable = await supabase.from('kelvin_intake_receipts').select('state').eq('task_id', taskId).maybeSingle();
+      return markFromUpdate({
+        error: !!updated.error || !!durable.error,
+        rows: updated.data.length,
+        durableState: durable.data && typeof durable.data.state === 'string' ? durable.data.state : null,
+        expectedState: state,
+      });
     },
     contract: async () => {
       if (!supabase) return false;
-      const result = await supabase.rpc('kelvin_intake_receipt_contract');
-      return !result.error && result.data === true;
+      const result = await supabase.rpc('kelvin_intake_receipt_contract_v2');
+      return !result.error && result.data === 'ok';
     },
   });
 
