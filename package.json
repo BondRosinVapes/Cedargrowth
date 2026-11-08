@@ -10,6 +10,7 @@
     "lint": "next lint",
     "check:research": "node scripts/check-research-terms.mjs",
     "typecheck": "tsc --noEmit",
+    "test:crm": "node --experimental-strip-types scripts/crm-selftest.ts",
     "provenance": "node scripts/research-provenance.mjs"
   },
   "dependencies": {

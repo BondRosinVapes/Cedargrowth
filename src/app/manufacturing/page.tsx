@@ -7,6 +7,7 @@ import { Placeholder } from '@/components/shell/Placeholder';
 import { Rise } from '@/components/motion/Rise';
 import { FrameWipe } from '@/components/motion/FrameWipe';
 import { manufacturing, type ManufacturingService } from '@/content/manufacturing';
+import { WholesaleInsights } from '@/components/crm/WholesaleInsights';
 
 // CG Prompt 10: contract manufacturing, white label, post-production, and bulk
 // solventless supply, on CedarGrowth's own New York licence. Copy lives in
@@ -16,6 +17,8 @@ import { manufacturing, type ManufacturingService } from '@/content/manufacturin
 // transfer, or interstate movement.
 
 const m = manufacturing;
+
+export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {
   title: m.meta.title,
@@ -271,6 +274,7 @@ export default function ManufacturingPage() {
           </Rise>
         </div>
       </section>
+      <WholesaleInsights />
     </>
   );
 }
