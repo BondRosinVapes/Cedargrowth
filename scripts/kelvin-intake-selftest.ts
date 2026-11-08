@@ -1,6 +1,7 @@
 // Intake contract. Run: npx tsx scripts/kelvin-intake-selftest.ts
 // No network and no secret values.
 
+import { readFileSync } from 'node:fs';
 import {
   documentedIntakeUrl,
   intakeOriginAllowed,
@@ -166,6 +167,8 @@ assert(unpersisted.posts === 1 && unpersisted.result.body.state === 'unpersisted
 
 const unproven = await attempt({ contract: async () => false });
 assert(unproven.posts === 0 && unproven.result.body.state === 'unproven', 'a failed receipt contract sends nothing');
+const routeSource = readFileSync(new URL('../src/app/api/admin/kelvin/intake/route.ts', import.meta.url), 'utf8');
+assert(routeSource.includes("rpc('kelvin_intake_receipt_contract_v3')") && !routeSource.includes('kelvin_intake_receipt_contract_v2'), 'the intake route calls contract v3');
 
 const shared = new Map<string, 'reserved' | 'accepted' | 'rejected'>();
 let entered = 0;
