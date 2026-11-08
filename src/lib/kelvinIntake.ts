@@ -127,14 +127,39 @@ export type IntakeClaim =
   | { won: false; state: StoredReceipt }
   | { won: false; state: 'unavailable' };
 
+export type UpstreamResult = 'accepted' | 'not-accepted' | 'unknown';
+export type MarkResult = 'updated' | 'failed';
+
 export type IntakeResult = {
   http: number;
   body: {
-    state: 'unauthorized' | 'forbidden' | 'invalid' | 'unconfigured' | 'pending' | 'accepted' | 'rejected' | 'error';
+    state: 'unauthorized' | 'forbidden' | 'invalid' | 'unconfigured' | 'unproven' | 'pending' | 'accepted' | 'rejected' | 'error' | 'unpersisted';
     taskId?: string;
     fresh?: boolean;
+    upstream?: UpstreamResult;
   };
 };
+
+export function claimFromWrite(insertErrorCode: string | null, read: { error: boolean; state: string | null }): IntakeClaim {
+  if (!insertErrorCode) return { won: true };
+  if (insertErrorCode !== '23505') return { won: false, state: 'unavailable' };
+  if (read.error) return { won: false, state: 'unavailable' };
+  if (read.state === 'reserved' || read.state === 'accepted' || read.state === 'rejected') {
+    return { won: false, state: read.state };
+  }
+  return { won: false, state: 'unavailable' };
+}
+
+export function markFromUpdate(result: { error: boolean; rows: number }): MarkResult {
+  if (result.error || result.rows !== 1) return 'failed';
+  return 'updated';
+}
+
+export function intakeOutcome(upstream: UpstreamResult, mark: MarkResult): IntakeResult['body'] {
+  if (upstream === 'accepted' && mark === 'updated') return { state: 'accepted', fresh: true };
+  if (upstream === 'not-accepted' && mark === 'updated') return { state: 'error' };
+  return { state: 'unpersisted', upstream };
+}
 
 export type IntakePost = (input: { url: string; key: string; body: string; timeoutMs: number }) => Promise<{ status: number }>;
 
@@ -145,7 +170,8 @@ export async function runIntake(input: {
   rawText: string;
   env: IntakeEnv;
   claim: (value: IntakeProposal) => Promise<IntakeClaim>;
-  mark: (taskId: string, summary: 'Intake accepted' | 'Intake not accepted') => Promise<void>;
+  mark: (taskId: string, summary: 'Intake accepted' | 'Intake not accepted') => Promise<MarkResult>;
+  contract: () => Promise<boolean>;
   post?: IntakePost;
 }): Promise<IntakeResult> {
   if (!input.admin) return { http: 401, body: { state: 'unauthorized' } };
@@ -157,6 +183,10 @@ export async function runIntake(input: {
   if (!proposal.ok) return { http: 400, body: { state: 'invalid' } };
   const config = readIntakeConfig(input.env);
   if (!config.configured) return { http: 503, body: { state: 'unconfigured', taskId: proposal.value.taskId } };
+
+  let proven = false;
+  try { proven = await input.contract(); } catch { proven = false; }
+  if (!proven) return { http: 503, body: { state: 'unproven', taskId: proposal.value.taskId } };
 
   const claimed = await input.claim(proposal.value);
   if (!claimed.won) {
@@ -180,13 +210,19 @@ export async function runIntake(input: {
   } catch {
     status = 0;
   }
-  try {
-    await input.mark(proposal.value.taskId, status === 200 ? 'Intake accepted' : 'Intake not accepted');
-  } catch {
-    // The webhook was already called once. A failed receipt write must not cause a retry.
+  const upstream: UpstreamResult = status === 200 ? 'accepted' : status === 0 ? 'unknown' : 'not-accepted';
+  let mark: MarkResult = 'failed';
+  if (upstream !== 'unknown') {
+    try {
+      mark = await input.mark(proposal.value.taskId, upstream === 'accepted' ? 'Intake accepted' : 'Intake not accepted');
+      if (mark !== 'updated') mark = 'failed';
+    } catch {
+      mark = 'failed';
+    }
   }
-  if (status !== 200) return { http: 502, body: { state: 'error', taskId: proposal.value.taskId } };
-  return { http: 200, body: { state: 'accepted', fresh: true, taskId: proposal.value.taskId } };
+  const outcome = intakeOutcome(upstream, mark);
+  const http = outcome.state === 'accepted' ? 200 : 502;
+  return { http, body: { ...outcome, taskId: proposal.value.taskId } };
 }
 
 async function defaultPost(input: { url: string; key: string; body: string; timeoutMs: number }): Promise<{ status: number }> {

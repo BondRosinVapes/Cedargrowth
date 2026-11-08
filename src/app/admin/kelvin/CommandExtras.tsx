@@ -31,7 +31,8 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
   const [intakeReady, setIntakeReady] = useState<boolean | null>(null);
   const [proposal, setProposal] = useState('');
   const [proposalAgent, setProposalAgent] = useState('MERIDIAN');
-  const [intakePhase, setIntakePhase] = useState<'idle' | 'pending' | 'unconfigured' | 'accepted' | 'rejected' | 'error' | 'invalid'>('idle');
+  const [intakePhase, setIntakePhase] = useState<'idle' | 'pending' | 'unconfigured' | 'unproven' | 'accepted' | 'rejected' | 'error' | 'invalid' | 'unpersisted'>('idle');
+  const [intakeUpstream, setIntakeUpstream] = useState<'accepted' | 'not-accepted' | 'unknown' | ''>('');
   const [intakeFresh, setIntakeFresh] = useState(false);
   const [intakeTask, setIntakeTask] = useState('');
 
@@ -60,7 +61,8 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
       const data = await res.json().catch(() => ({}));
       const state = data && typeof data.state === 'string' ? data.state : 'error';
       setIntakeFresh(data.fresh === true);
-      if (state === 'accepted' || state === 'pending' || state === 'rejected' || state === 'unconfigured' || state === 'invalid' || state === 'error') {
+      setIntakeUpstream(data.upstream === 'accepted' || data.upstream === 'not-accepted' || data.upstream === 'unknown' ? data.upstream : '');
+      if (state === 'accepted' || state === 'pending' || state === 'rejected' || state === 'unconfigured' || state === 'unproven' || state === 'invalid' || state === 'error' || state === 'unpersisted') {
         setIntakePhase(state);
       } else {
         setIntakePhase('error');
@@ -142,12 +144,16 @@ export default function CommandExtras({ view, addEvent, flash, now, tuning, relo
           <div className="field"><label>Proposal</label><textarea rows={4} value={proposal} onChange={(e) => setProposal(e.target.value)} placeholder="State the task. Do not include access codes or genetic results." /></div>
           <div className="field"><label>Named role</label><select value={proposalAgent} onChange={(e) => setProposalAgent(e.target.value)}>{ROSTER.map((a) => <option key={a.id}>{a.id}</option>)}</select></div>
           <div className="actions"><button className="btn solid" type="submit" disabled={intakePhase === 'pending'}>{intakePhase === 'pending' ? 'Sending proposal' : 'Propose task'}</button></div>
-          {intakePhase === 'accepted' && intakeFresh ? <p className="lead">Accepted. Task {intakeTask}. A run started. Not finished, and not a gate pass.</p> : null}
+          {intakePhase === 'accepted' && intakeFresh ? <p className="lead">Accepted. Task {intakeTask}. A run started and the receipt was saved. Not finished, and not a gate pass.</p> : null}
           {intakePhase === 'accepted' && !intakeFresh ? <p className="lead">This task id is already accepted. Not sent again.</p> : null}
           {intakePhase === 'pending' ? <p className="lead">This task id is pending. Not sent again.</p> : null}
           {intakePhase === 'rejected' ? <p className="lead">This task id was not accepted. Not sent again.</p> : null}
           {intakePhase === 'unconfigured' ? <p className="lead">Intake unconfigured. Nothing was sent.</p> : null}
-          {intakePhase === 'error' ? <p className="lead">Not accepted. Nothing was retried.</p> : null}
+          {intakePhase === 'unproven' ? <p className="lead">The receipt table does not meet the required contract. Nothing was sent.</p> : null}
+          {intakePhase === 'unpersisted' && intakeUpstream === 'accepted' ? <p className="lead">The routine accepted the call and a run started, but the receipt was not saved. Task {intakeTask} stays pending. Not sent again.</p> : null}
+          {intakePhase === 'unpersisted' && intakeUpstream === 'unknown' ? <p className="lead">The call did not finish and the receipt was not updated. Task {intakeTask} stays pending. Not sent again. This is not a rejection.</p> : null}
+          {intakePhase === 'unpersisted' && intakeUpstream === 'not-accepted' ? <p className="lead">The routine did not accept the call. The receipt was not saved and stays pending. Not sent again.</p> : null}
+          {intakePhase === 'error' ? <p className="lead">Not accepted. The receipt records the refusal. Nothing was retried.</p> : null}
           {intakePhase === 'invalid' ? <p className="lead">The proposal was refused. Nothing was sent.</p> : null}
         </form>
       </>
