@@ -160,7 +160,7 @@ export default function SecurityWing({ view, addEvent, flash, now }: Props) {
     const gate = releaseGate(data.prechecks);
     return (
       <>
-        <p className="lead">Release prechecks. SENTINEL sits between LITMUS and VERNIER on the release chain. A build clears only when every precheck passes.</p>
+        <p className="lead">Release prechecks stored in the console. A Pass mark here is not release evidence. LITMUS, SENTINEL, and VERNIER stay closed until each gate has its own evidence. A build does not clear while any precheck fails.</p>
         <div className="detailpanel">
           <h3>Prechecks</h3>
           {data.prechecks.map((p) => <div className="keyfield" key={p.id}><span className="kf-k" style={{ color: 'var(--k-secondary)' }}>{p.item}</span><span className="kf-v">{stateChip(p.state)}</span></div>)}

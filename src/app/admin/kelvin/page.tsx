@@ -10,10 +10,9 @@ import WarrantWing from './wings/WarrantWing';
 import EditorialWing from './wings/EditorialWing';
 import CommandExtras from './CommandExtras';
 import {
-  AGENTS,
   EVENT_TYPES,
+  ROSTER,
   WINGS,
-  mintEvent,
   nowTime,
   type EventType,
   type KEvent,
@@ -36,7 +35,6 @@ export default function KelvinConsole() {
   const [tuning, setTuning] = useState<TuningItem[]>([]);
   const [filterAgent, setFilterAgent] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<EventType | null>(null);
-  const [mode, setMode] = useState<'live' | 'preview'>('live');
   const [openRow, setOpenRow] = useState<number | null>(null);
   const [toast, setToast] = useState('');
   const [sessionEmail, setSessionEmail] = useState('');
@@ -115,21 +113,6 @@ export default function KelvinConsole() {
     [events, filterAgent, filterType],
   );
 
-  // Live ticker: only on the live feed in live mode, honoring active filters.
-  useEffect(() => {
-    if (mode !== 'live' || wing !== 'command' || view !== 'live-feed') return;
-    let timer: ReturnType<typeof setTimeout>;
-    const loop = () => {
-      setEvents((prev) => {
-        nextId.current += 1;
-        return [mintEvent(nextId.current, filterAgent, filterType), ...prev];
-      });
-      timer = setTimeout(loop, 25000 + Math.floor(Math.random() * 20000));
-    };
-    timer = setTimeout(loop, 25000 + Math.floor(Math.random() * 20000));
-    return () => clearTimeout(timer);
-  }, [mode, wing, view, filterAgent, filterType]);
-
   function goWing(id: string) {
     const def = WINGS.find((w) => w.id === id);
     if (!def) return;
@@ -151,7 +134,7 @@ export default function KelvinConsole() {
     setReview((prev) => prev.map((r) => (r.id === id ? { ...r, status: decision } : r)));
     const verb = decision === 'approved' ? 'approved' : decision === 'rejected' ? 'rejected' : 'sent back';
     addEvent(
-      { agent: 'MERIDIAN', time: nowTime(), type: 'DECISION', summary: `Owner ${verb}: ${title}`, sub: `Review item ${id} resolved. Queue count updated.` },
+      { agent: 'KELVIN', time: nowTime(), type: 'DECISION', summary: `Owner ${verb}: ${title}`, sub: `Review item ${id} recorded in the console. Not delivered to a bot, and no gate was passed.` },
       false,
     );
     const remaining = review.filter((r) => r.status === 'open' && r.id !== id).length;
@@ -207,19 +190,10 @@ export default function KelvinConsole() {
             <div className="wing-rule" />
           </div>
           <div className="status-cluster">
-            <div className={`live-ind${mode === 'live' ? ' on' : ''}`}>
+            <div className="live-ind">
               <span className="live-dot" />
-              {mode === 'live' ? 'Live' : 'Frozen'}
+              Unverified
             </div>
-            <button
-              className={`preview-toggle${mode === 'preview' ? ' on' : ''}`}
-              onClick={() => {
-                setMode((m) => (m === 'live' ? 'preview' : 'live'));
-                flash(mode === 'live' ? 'Design preview. Ticker frozen.' : 'Live. Ticker running.');
-              }}
-            >
-              Design Preview
-            </button>
             <span className="session-id">{sessionEmail || 'admin session'}</span>
           </div>
         </div>
@@ -242,7 +216,6 @@ export default function KelvinConsole() {
           {wing === 'command' ? (
             <CommandView
               view={view}
-              events={events}
               filtered={filtered}
               review={review}
               filterAgent={filterAgent}
@@ -285,7 +258,6 @@ export default function KelvinConsole() {
 
 function CommandView(props: {
   view: string;
-  events: KEvent[];
   filtered: KEvent[];
   review: ReviewItem[];
   filterAgent: string | null;
@@ -301,13 +273,16 @@ function CommandView(props: {
   tuning: TuningItem[];
   reloadCommand: () => Promise<void>;
 }) {
-  const { view, events, filtered, review, filterAgent, filterType, openRow, setFilterAgent, setFilterType, setOpenRow, resolveReview, addEvent, flash, now, tuning, reloadCommand } = props;
+  const { view, filtered, review, filterAgent, filterType, openRow, setFilterAgent, setFilterType, setOpenRow, resolveReview, addEvent, flash, now, tuning, reloadCommand } = props;
 
   if (view === 'live-feed') {
     return (
       <>
+        <p className="lead">
+          Prototype records from the console store. A gate word in a line is not a pass. No row is authenticated bot telemetry, and the ticker that minted extra lines is off.
+        </p>
         <div className="filters" style={{ marginBottom: 16 }}>
-          {AGENTS.map((a) => (
+          {ROSTER.map((a) => (
             <button
               key={a.id}
               className={`pill${filterAgent === a.id ? ' active' : ''}`}
@@ -340,7 +315,7 @@ function CommandView(props: {
                     <span className="mono row-type">{e.type}</span>
                   </span>
                   <span className="row-sum">{e.summary}</span>
-                  {e.type === 'ALERT' ? <span className="chip fail">P0</span> : null}
+                  <span className="chip attention">Prototype</span>
                 </div>
                 {openRow === e.id ? (
                   <div className="row-detail">
@@ -349,8 +324,8 @@ function CommandView(props: {
                       <span>{e.sub}</span>
                     </div>
                     <div className="kv">
-                      <span className="k">Audit id</span>
-                      <span className="mono">{`AX-${3200 + e.id}`}</span>
+                      <span className="k">Source</span>
+                      <span>Console store. Transport none. Audit id none.</span>
                     </div>
                   </div>
                 ) : null}
@@ -366,44 +341,37 @@ function CommandView(props: {
 
   if (view === 'agents') {
     return (
-      <div className="grid cols3">
-        {AGENTS.map((a) => {
-          const mine = events.filter((e) => e.agent === a.id).slice(0, 6);
-          return (
+      <>
+        <p className="lead">
+          Roster metadata only. Bot ids are inert identifiers, not credentials. No web link is on file, and no event transport is connected. Routing acknowledgement has not been confirmed. Health, errors, and recommendations stay blank until a verified feed exists.
+        </p>
+        <div className="grid cols3">
+          {ROSTER.map((a) => (
             <div className="card" key={a.id}>
               <h3>
                 {a.id}
-                <span className={`chip ${a.status === 'HOLDING' ? 'attention' : 'pass'}`}>
-                  <span className={`sq ${a.status === 'HOLDING' ? 'attention' : 'pass'}`} />
-                  {a.status}
+                <span className="chip attention">
+                  <span className="sq attention" />
+                  Unverified
                 </span>
               </h3>
               <div className="fn">{a.fn}</div>
-              <div className="task">{a.task}</div>
-              <div className="stat-row">
-                <span>
-                  Errors <b className="mono">{String(a.errors).padStart(2, '0')}</b>
-                </span>
-                <span>
-                  Recommendations <b className="mono">{String(a.recs.length).padStart(2, '0')}</b>
-                </span>
-                <span>
-                  Events <b className="mono">{String(mine.length).padStart(2, '0')}</b>
-                </span>
+              <div className="task">
+                {a.kind === 'console'
+                  ? 'This console. Not a routed teammate, and not a delivery target.'
+                  : a.id === 'MERIDIAN'
+                    ? 'Existing lead. This console cannot deliver work to the lead.'
+                    : 'Named role. This console cannot deliver work to the role.'}
               </div>
-              {a.recs.length ? (
-                <div className="recs">
-                  {a.recs.map((r) => (
-                    <div className="rec" key={r}>
-                      {r}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
+              <div className="botid">{a.botId}</div>
+              <div className="stat-row">
+                <span>Link <b>None</b></span>
+                <span>Telemetry <b>None</b></span>
+              </div>
             </div>
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      </>
     );
   }
 
@@ -411,8 +379,7 @@ function CommandView(props: {
     return (
       <>
         <p className="lead">
-          Items at owner review. Each decision writes to the feed and updates the queue count. The count
-          reaches zero only when the queue clears honestly.
+          Items stored in the console. Approving one records an owner decision in KELVIN. It does not clear LITMUS, SENTINEL, or VERNIER, and it does not reach a bot.
         </p>
         {review.map((r) =>
           r.status === 'open' ? (
