@@ -6,11 +6,11 @@ import {
   INTAKE_MAX_BODY,
   INTAKE_RECEIPTS_ENV,
   INTAKE_URL_ENV,
+  claimFromWrite,
+  markFromUpdate,
   readIntakeConfig,
   runIntake,
   intakeOriginAllowed,
-  type IntakeClaim,
-  type StoredReceipt,
 } from '@/lib/kelvinIntake';
 
 // One-way proposal intake. Session gated. Reads the routine URL and key from
@@ -27,11 +27,6 @@ function intakeEnv() {
   };
 }
 
-function storedState(value: unknown): StoredReceipt | null {
-  if (value === 'reserved' || value === 'accepted' || value === 'rejected') return value;
-  return null;
-}
-
 export async function GET(request: Request) {
   const admin = await currentAdmin();
   if (!admin) return NextResponse.json({ configured: false }, { status: 401 });
@@ -39,7 +34,11 @@ export async function GET(request: Request) {
   if (origin && !intakeOriginAllowed(origin, request.url)) {
     return NextResponse.json({ configured: false }, { status: 403 });
   }
-  return NextResponse.json({ configured: readIntakeConfig(intakeEnv()).configured });
+  if (!readIntakeConfig(intakeEnv()).configured) return NextResponse.json({ configured: false });
+  const supabase = getSupabaseServerClient();
+  if (!supabase) return NextResponse.json({ configured: false });
+  const contract = await supabase.rpc('kelvin_intake_receipt_contract');
+  return NextResponse.json({ configured: !contract.error && contract.data === true });
 }
 
 export async function POST(request: Request) {
@@ -58,25 +57,35 @@ export async function POST(request: Request) {
     requestUrl: request.url,
     rawText,
     env: intakeEnv(),
-    claim: async (value): Promise<IntakeClaim> => {
-      if (!supabase) return { won: false, state: 'unavailable' };
+    claim: async (value) => {
+      if (!supabase) return { won: false, state: 'unavailable' as const };
       const inserted = await supabase.from('kelvin_intake_receipts').insert({
         task_id: value.taskId,
         agent: value.agent,
         state: 'reserved',
       });
-      if (!inserted.error) return { won: true };
-      if (inserted.error.code !== '23505') return { won: false, state: 'unavailable' };
+      if (!inserted.error) return claimFromWrite(null, { error: false, state: null });
+      if (inserted.error.code !== '23505') return claimFromWrite(inserted.error.code ?? 'error', { error: true, state: null });
       const existing = await supabase.from('kelvin_intake_receipts').select('state').eq('task_id', value.taskId).maybeSingle();
-      if (existing.error) return { won: false, state: 'unavailable' };
-      const state = storedState(existing.data?.state);
-      if (!state) return { won: false, state: 'unavailable' };
-      return { won: false, state };
+      return claimFromWrite('23505', {
+        error: !!existing.error,
+        state: existing.data && typeof existing.data.state === 'string' ? existing.data.state : null,
+      });
     },
     mark: async (taskId, summary) => {
-      if (!supabase) return;
+      if (!supabase) return 'failed';
       const state = summary === 'Intake accepted' ? 'accepted' : 'rejected';
-      await supabase.from('kelvin_intake_receipts').update({ state, updated_at: new Date().toISOString() }).eq('task_id', taskId);
+      const updated = await supabase
+        .from('kelvin_intake_receipts')
+        .update({ state, updated_at: new Date().toISOString() })
+        .eq('task_id', taskId)
+        .select('task_id');
+      return markFromUpdate({ error: !!updated.error, rows: updated.data?.length ?? 0 });
+    },
+    contract: async () => {
+      if (!supabase) return false;
+      const result = await supabase.rpc('kelvin_intake_receipt_contract');
+      return !result.error && result.data === true;
     },
   });
 

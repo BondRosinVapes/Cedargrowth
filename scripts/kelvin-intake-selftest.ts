@@ -87,7 +87,8 @@ async function attempt(overrides: Partial<Parameters<typeof runIntake>[0]> = {},
     rawText: JSON.stringify({ agent: 'FOUNDRY', taskId: TASK, note: 'Inspect the tooling note' }),
     env: READY,
     claim: async (value) => { order.push('claim'); return claim(); void value; },
-    mark: async () => { order.push('mark'); },
+    mark: async () => { order.push('mark'); return 'updated' as const; },
+    contract: async () => true,
     post,
     ...overrides,
   });
@@ -146,7 +147,15 @@ const thrown = await attempt({
     throw new Error('timeout');
   },
 });
-assert(thrown.result.body.state === 'error' && thrownPosts === 1, 'timeout is an error and is not retried');
+assert(thrown.result.body.state === 'unpersisted' && thrown.result.body.upstream === 'unknown' && thrownPosts === 1, 'an unfinished call is not called a rejection and is not retried');
+
+const unpersisted = await attempt({
+  mark: async () => 'failed',
+});
+assert(unpersisted.posts === 1 && unpersisted.result.body.state === 'unpersisted' && unpersisted.result.body.upstream === 'accepted' && unpersisted.result.body.fresh !== true, 'upstream 200 with a failed receipt write is not a fresh saved acceptance');
+
+const unproven = await attempt({ contract: async () => false });
+assert(unproven.posts === 0 && unproven.result.body.state === 'unproven', 'a failed receipt contract sends nothing');
 
 const shared = new Map<string, 'reserved' | 'accepted' | 'rejected'>();
 let entered = 0;
@@ -181,7 +190,9 @@ const overlapEnv = {
   claim: claimShared,
   mark: async (_taskId: string, summary: 'Intake accepted' | 'Intake not accepted') => {
     shared.set(TASK, summary === 'Intake accepted' ? 'accepted' : 'rejected');
+    return 'updated' as const;
   },
+  contract: async () => true,
   post: overlapPost,
 };
 const overlapped = await Promise.all([runIntake(overlapEnv), runIntake(overlapEnv)]);
