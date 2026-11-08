@@ -1,42 +1,29 @@
+import type { CSSProperties } from 'react';
 import type { Metadata } from 'next';
-import localFont from 'next/font/local';
 import { Shell } from '@/components/shell/Shell';
 import { AgeGate } from '@/components/shell/AgeGate';
 import { ReservationProvider } from '@/components/reserve/ReservationProvider';
 import { MotionProvider } from '@/components/motion/MotionProvider';
 import { isAgeGateEnabled } from '@/lib/flags';
+import {
+  fontClassName,
+  ibmPlexMonoFamily,
+  interTightFamily,
+  newsreaderFamily,
+} from '@/fonts/faces';
 import '../../tokens.css';
 import './globals.css';
+import './font-fallback.css';
 
 // Three faces, no more (Section 4.2). Files live in src/fonts with their OFL
 // texts. next/font/local reads them at build time and does not call Google.
-// Weights and styles match the previous next/font/google calls.
-const newsreader = localFont({
-  src: [
-    { path: '../fonts/newsreader-latin-400.woff2', weight: '400', style: 'normal' },
-    { path: '../fonts/newsreader-latin-400-italic.woff2', weight: '400', style: 'italic' },
-  ],
-  variable: '--font-newsreader',
-  display: 'swap',
-  adjustFontFallback: false,
-});
-
-const interTight = localFont({
-  src: '../fonts/inter-tight-latin-variable.woff2',
-  weight: '400 500',
-  style: 'normal',
-  variable: '--font-inter-tight',
-  display: 'swap',
-});
-
-const ibmPlexMono = localFont({
-  src: [
-    { path: '../fonts/ibm-plex-mono-latin-400.woff2', weight: '400', style: 'normal' },
-    { path: '../fonts/ibm-plex-mono-latin-500.woff2', weight: '500', style: 'normal' },
-  ],
-  variable: '--font-ibm-plex-mono',
-  display: 'swap',
-});
+// The CSS variables list every subset next/font/google used to embed, then
+// the packaged size-adjust fallback where Next.js 14.2.35 has one.
+const fontVariables = {
+  '--font-newsreader': newsreaderFamily,
+  '--font-inter-tight': interTightFamily,
+  '--font-ibm-plex-mono': ibmPlexMonoFamily,
+} as CSSProperties;
 
 export const metadata: Metadata = {
   title: {
@@ -53,10 +40,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html
-      lang="en"
-      className={`${newsreader.variable} ${interTight.variable} ${ibmPlexMono.variable}`}
-    >
+    <html lang="en" className={fontClassName} style={fontVariables}>
       <body className="bg-parchment text-primary font-sans">
         {/*
           Age gate (spec Section C item 6), guarded at this mount site rather
