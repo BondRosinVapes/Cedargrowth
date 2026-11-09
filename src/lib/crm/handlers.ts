@@ -589,13 +589,52 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
   const existing = await ctx.store.exportBrand(auth.brand);
   if (existing.state !== 'ok') return storageBody(auth.brand, existing.state === 'rejected' || existing.state === 'missing' ? 'unavailable' : existing.state);
   const key = (value: string) => value.trim().toLowerCase();
-  const accountsByName = new Map(existing.value.accounts.filter((row) => row.brand === auth.brand).map((row) => [key(row.displayName), row.id]));
+  const brandAccounts = existing.value.accounts.filter((row) => row.brand === auth.brand);
+  const accountsByName = new Map(brandAccounts.map((row) => [key(row.displayName), row.id]));
+  const accountsByLicense = new Map(brandAccounts.filter((row) => row.licenseRef).map((row) => [key(row.licenseRef || ''), row.id]));
+  const licenseHits = new Map<string, string[]>();
+  const nameHits = new Map<string, string[]>();
+  for (const row of brandAccounts) {
+    const names = nameHits.get(key(row.displayName)) ?? [];
+    names.push(row.id);
+    nameHits.set(key(row.displayName), names);
+    if (!row.licenseRef) continue;
+    const licenses = licenseHits.get(key(row.licenseRef)) ?? [];
+    licenses.push(row.id);
+    licenseHits.set(key(row.licenseRef), licenses);
+  }
+  const contactKeys = new Set(existing.value.contacts.filter((row) => row.brand === auth.brand).map((row) => `${row.accountId}|${key(row.name)}|${key(row.email || '')}`));
   const dealKeys = new Set(existing.value.opportunities.filter((row) => row.brand === auth.brand).map((row) => `${row.accountId}|${key(row.name)}`));
+  const rememberAccount = (id: string, name: string, license: string | null | undefined) => {
+    const names = nameHits.get(key(name)) ?? [];
+    names.push(id);
+    nameHits.set(key(name), names);
+    if (!license) return;
+    accountsByLicense.set(key(license), id);
+    const licenses = licenseHits.get(key(license)) ?? [];
+    licenses.push(id);
+    licenseHits.set(key(license), licenses);
+  };
+  const resolveContact = (license: unknown, name: unknown): { id: string } | { error: string } => {
+    const licenseKey = typeof license === 'string' && license.trim() ? key(license) : '';
+    if (licenseKey) {
+      const hits = licenseHits.get(licenseKey) ?? [];
+      if (hits.length === 1) return { id: hits[0] };
+      if (hits.length > 1) return { error: 'More than one account has this license number.' };
+      return { error: 'No account with this license number. Import or add the account first.' };
+    }
+    const nameKey = typeof name === 'string' ? key(name) : '';
+    if (!nameKey) return { error: 'No account for this contact. Link it to an account first.' };
+    const hits = nameHits.get(nameKey) ?? [];
+    if (hits.length === 1) return { id: hits[0] };
+    if (hits.length > 1) return { error: 'More than one account has this name.' };
+    return { error: 'No account with this name. Import or add the account first.' };
+  };
 
   const outcomes: ImportOutcome[] = [];
   const pendingRetailers: { licenseNumber: string; name: string; county: string; licenseType: string }[] = [];
   for (const raw of rows) {
-    const item = (raw ?? {}) as { line?: unknown; record?: unknown; accountName?: unknown };
+    const item = (raw ?? {}) as { line?: unknown; record?: unknown; accountName?: unknown; accountLicense?: unknown };
     const line = typeof item.line === 'number' ? item.line : 0;
     const fields = item.record && typeof item.record === 'object' ? { ...(item.record as Record<string, unknown>) } : null;
     if (!fields) { outcomes.push({ line, status: 'error', reason: 'Row could not be read.' }); continue; }
@@ -614,8 +653,15 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
       const parsed = parseAccountWrite(fields, 'create');
       if (!parsed.ok || !parsed.value.displayName) { outcomes.push({ line, status: 'error', reason: parsed.ok ? 'Account name is empty.' : parsed.reason }); continue; }
       const name = key(parsed.value.displayName);
-      if (accountsByName.has(name)) { outcomes.push({ line, status: 'skipped', reason: 'An account with this name already exists.' }); continue; }
-      if (!commit) { accountsByName.set(name, 'pending'); outcomes.push({ line, status: 'ready' }); continue; }
+      const license = parsed.value.licenseRef ? key(parsed.value.licenseRef) : '';
+      if (license && accountsByLicense.has(license)) { outcomes.push({ line, status: 'skipped', reason: 'An account with this license number already exists.' }); continue; }
+      if (!license && accountsByName.has(name)) { outcomes.push({ line, status: 'skipped', reason: 'An account with this name already exists.' }); continue; }
+      if (!commit) {
+        if (license) accountsByLicense.set(license, `pending-${line}`);
+        else accountsByName.set(name, `pending-${line}`);
+        outcomes.push({ line, status: 'ready' });
+        continue;
+      }
       const created = await ctx.store.createAccount(auth.brand, auth.actorId, {
         displayName: parsed.value.displayName,
         status: parsed.value.status ?? 'prospect',
@@ -630,6 +676,7 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
       });
       if (created.state !== 'ok') { outcomes.push({ line, status: 'error', reason: 'Storage did not accept this row.' }); continue; }
       accountsByName.set(name, created.value.id);
+      rememberAccount(created.value.id, created.value.displayName, created.value.licenseRef);
       outcomes.push({ line, status: 'created' });
       continue;
     }
@@ -652,6 +699,19 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
       if (saved.value.action === 'updated') outcomes.push({ line, status: 'updated', orderId: saved.value.order.id });
       else if (!saved.value.order.accountId) outcomes.push({ line, status: 'unmatched', orderId: saved.value.order.id, reason: 'No account matched. Link this retailer. Nothing new was created.' });
       else outcomes.push({ line, status: 'created', orderId: saved.value.order.id });
+      continue;
+    }
+    if (kind === 'contacts') {
+      const resolved = resolveContact(item.accountLicense, item.accountName);
+      if ('error' in resolved) { outcomes.push({ line, status: 'error', reason: resolved.error }); continue; }
+      const parsed = parseContactWrite({ ...fields, accountId: resolved.id, preference: 'unspecified' }, 'create');
+      if (!parsed.ok || !parsed.value.name) { outcomes.push({ line, status: 'error', reason: parsed.ok ? 'Contact name is empty.' : parsed.reason }); continue; }
+      const contactKey = `${resolved.id}|${key(parsed.value.name)}|${key(parsed.value.email || '')}`;
+      if (contactKeys.has(contactKey)) { outcomes.push({ line, status: 'skipped', reason: 'This account already has this contact.' }); continue; }
+      contactKeys.add(contactKey);
+      if (!commit) { outcomes.push({ line, status: 'ready' }); continue; }
+      const created = await ctx.store.createContact(auth.brand, auth.actorId, { ...parsed.value, accountId: resolved.id, name: parsed.value.name });
+      outcomes.push(created.state === 'ok' ? { line, status: 'created' } : { line, status: 'error', reason: 'Storage did not accept this row.' });
       continue;
     }
     const accountName = typeof item.accountName === 'string' ? key(item.accountName) : '';
