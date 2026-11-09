@@ -7,7 +7,7 @@ import { BRAND } from '@/lib/site';
 
 export function Wordmark({ className = '', masthead = false }: { className?: string; masthead?: boolean }) {
   const size = masthead
-    ? 'text-heading-s-m min-[1280px]:text-heading-m'
+    ? 'text-heading-m'
     : 'text-heading-s-m md:text-heading-m';
   return (
     <Link
