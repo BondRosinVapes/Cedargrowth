@@ -57,33 +57,33 @@ export function Header() {
 
   return (
     <header className="bg-parchment">
-      {/* Section row from 880px. Sales and Access sit left, the wordmark stays
-          centred, Manufacturing sits immediately left of Reserve. Below 1280
-          the same tokens step down so the row fits a laptop content box. */}
+      {/* Section row from 880px. The phone bar below that width is unchanged.
+          Sales and Access sit left, the wordmark stays centred, Manufacturing
+          sits immediately left of Reserve. The section links share the row. */}
       <div className="hidden min-[880px]:block">
         <div className="border-b border-hairline">
-          <div className="mx-auto grid max-w-content grid-cols-[1fr_auto_1fr] items-center px-3 py-3 min-[1280px]:px-page-margin min-[1280px]:py-4">
-            <ul className="flex items-center gap-2 min-[1280px]:gap-6">
+          <div className="mx-auto grid max-w-content grid-cols-[1fr_auto_1fr] items-center px-5 py-2 min-[1280px]:px-page-margin min-[1280px]:py-3">
+            <ul className="flex items-center gap-3 min-[1280px]:gap-6">
               {UTILITY_LEFT.map((link) => (
                 <li key={link.href}>
                   <Link
                     href={link.href}
-                    className="cedar-underline text-caption-m uppercase tracking-caption text-tertiary min-[1280px]:text-caption min-[1280px]:tracking-eyebrow"
+                    className="cedar-underline text-body-m uppercase leading-none tracking-nav text-tertiary min-[1280px]:tracking-eyebrow"
                   >
                     {link.label}
                   </Link>
                 </li>
               ))}
             </ul>
-            <div className="flex justify-center px-3">
+            <div className="flex justify-center px-4">
               <Wordmark masthead />
             </div>
-            <ul className="flex items-center justify-end gap-2 min-[1280px]:gap-6">
+            <ul className="flex items-center justify-end gap-3 min-[1280px]:gap-6">
               {UTILITY_RIGHT.map((link) => (
                 <li key={link.href}>
                   <Link
                     href={link.href}
-                    className="cedar-underline text-caption-m uppercase tracking-caption text-tertiary min-[1280px]:text-caption min-[1280px]:tracking-eyebrow"
+                    className="cedar-underline text-body-m uppercase leading-none tracking-nav text-tertiary min-[1280px]:tracking-eyebrow"
                   >
                     {link.label}
                   </Link>
@@ -92,11 +92,11 @@ export function Header() {
               <li>
                 <Link
                   href="/reserve"
-                  className="flex items-center gap-2 text-caption-m uppercase tracking-caption text-tertiary cedar-underline min-[1280px]:text-caption min-[1280px]:tracking-eyebrow"
+                  className="flex items-center gap-2 text-body-m uppercase leading-none tracking-nav text-tertiary cedar-underline min-[1280px]:tracking-eyebrow"
                 >
                   <ShoppingBag size={16} strokeWidth={1.5} aria-hidden="true" />
                   Reserve
-                  <span className="font-mono text-data-m lowercase tracking-normal min-[1280px]:text-data">
+                  <span className="font-mono text-data lowercase leading-none tracking-normal">
                     ({reserveCount})
                   </span>
                 </Link>
@@ -106,12 +106,12 @@ export function Header() {
         </div>
 
         <nav aria-label="Primary" className="border-b border-hairline">
-          <ul className="mx-auto flex max-w-content items-center justify-center gap-3 px-3 py-3 min-[1280px]:gap-8 min-[1280px]:px-page-margin min-[1280px]:py-4">
+          <ul className="mx-auto flex w-full max-w-content items-center justify-between px-5 py-3 min-[1280px]:px-page-margin">
             {PRIMARY_NAV.map((item) => (
               <li key={item.label}>
                 <Link
                   href={item.href}
-                  className="cedar-underline text-caption tracking-nav text-primary min-[1280px]:text-body-m"
+                  className="cedar-underline text-body-m leading-none tracking-nav text-primary"
                 >
                   {item.label}
                 </Link>
