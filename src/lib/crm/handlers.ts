@@ -1,9 +1,14 @@
 import {
   authorizeCrmRequest,
+  buildAging,
+  buildFunnel,
+  buildWorkload,
   brandLabel,
   CANIX_NOT_CONNECTED,
   evaluateDesk,
   formatForecast,
+  mirrorContract,
+  parseNote,
   HOODIE_NOT_CONNECTED,
   canExport,
   nextAlertState,
@@ -144,6 +149,11 @@ export async function handleAccountCollection(ctx: CrmContext, method: 'GET' | '
     status: parsed.value.status,
     city: parsed.value.city ?? null,
     notes: parsed.value.notes ?? '',
+    licenseRef: parsed.value.licenseRef ?? null,
+    facilityRef: parsed.value.facilityRef ?? null,
+    licenseJurisdiction: parsed.value.licenseJurisdiction ?? null,
+    licenseExpiry: parsed.value.licenseExpiry ?? null,
+    assignedRep: parsed.value.assignedRep ?? null,
   });
   if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'rejected' ? 'unavailable' : created.state === 'missing' ? 'unavailable' : created.state);
   return { status: 201, body: { ok: true, configured: true, brand: auth.brand, account: created.value } };
@@ -158,7 +168,17 @@ export async function handleAccountUpdate(ctx: CrmContext, id: string): Promise<
   if (!parseUuid(id)) return { status: 400, body: { ok: false, reason: 'Not found in this brand.' } };
   const parsed = parseAccountWrite(record, 'update');
   if (!parsed.ok) return { status: 400, body: { ok: false, reason: parsed.reason } };
-  const updated = await ctx.store.updateAccount(auth.brand, auth.actorId, id, parsed.value);
+  const updated = await ctx.store.updateAccount(auth.brand, auth.actorId, id, {
+    displayName: parsed.value.displayName,
+    status: parsed.value.status,
+    city: parsed.value.city,
+    notes: parsed.value.notes,
+    licenseRef: parsed.value.licenseRef,
+    facilityRef: parsed.value.facilityRef,
+    licenseJurisdiction: parsed.value.licenseJurisdiction,
+    licenseExpiry: parsed.value.licenseExpiry,
+    assignedRep: parsed.value.assignedRep,
+  });
   if (updated.state === 'missing') return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   if (updated.state !== 'ok') return storageBody(auth.brand, updated.state === 'rejected' ? 'unavailable' : updated.state);
   return { status: 200, body: { ok: true, configured: true, brand: auth.brand, account: updated.value } };
@@ -441,6 +461,76 @@ export async function handleAlerts(ctx: CrmContext, method: 'GET' | 'POST'): Pro
   if (saved.state === 'missing') return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'rejected' ? 'unavailable' : saved.state);
   return { status: 200, body: { ok: true, configured: true, brand: auth.brand, alert: saved.value, alertsActivated: false } };
+}
+
+export async function handleReports(ctx: CrmContext): Promise<CrmResult> {
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  const [opps, tasks] = await Promise.all([ctx.store.listOpportunities(auth.brand), ctx.store.listTasks(auth.brand, null)]);
+  if (opps.state !== 'ok') return storageBody(auth.brand, opps.state === 'rejected' || opps.state === 'missing' ? 'unavailable' : opps.state);
+  if (tasks.state !== 'ok') return storageBody(auth.brand, tasks.state === 'rejected' || tasks.state === 'missing' ? 'unavailable' : tasks.state);
+  const today = new Date().toISOString().slice(0, 10);
+  const funnel = buildFunnel(opps.value.map((row) => ({ brand: row.brand, stage: row.stage, expectedCloseOn: row.expectedCloseOn })), auth.brand);
+  const aging = buildAging(opps.value.map((row) => ({ brand: row.brand, stage: row.stage, expectedCloseOn: row.expectedCloseOn })), auth.brand, today);
+  const workload = buildWorkload(tasks.value.map((row) => ({ brand: row.brand, ownerActor: row.ownerActor, status: row.status })), auth.brand);
+  if (!funnel.ok || !aging.ok || !workload.ok) return { status: 403, body: { ok: false, reason: 'This brand is not assigned.' } };
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      configured: true,
+      brand: auth.brand,
+      synthetic: false,
+      amountKind: 'forecast',
+      invoicedCents: null,
+      paidCents: null,
+      funnel: funnel.stages,
+      agedOpenOpportunities: aging.aged,
+      workload: workload.owners,
+      mirror: mirrorContract(),
+    },
+  };
+}
+
+export async function handleHealth(ctx: CrmContext): Promise<CrmResult> {
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      brand: auth.brand,
+      canix: { connected: false, label: CANIX_NOT_CONNECTED, lastSuccessAt: null, exceptions: 'Not configured' },
+      hoodie: { connected: false, label: HOODIE_NOT_CONNECTED, lastSuccessAt: null, exceptions: 'Not configured' },
+      mirror: mirrorContract(),
+    },
+  };
+}
+
+export async function handleNotes(ctx: CrmContext, method: 'GET' | 'POST'): Promise<CrmResult> {
+  if (method === 'GET') {
+    const url = new URL(ctx.request.url);
+    const auth = await gate(ctx, url.searchParams.get('brand'));
+    if (isResult(auth)) return auth;
+    const accountId = url.searchParams.get('accountId');
+    if (accountId && !parseUuid(accountId)) return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+    const rows = await ctx.store.listNotes(auth.brand, accountId);
+    if (rows.state !== 'ok') return storageBody(auth.brand, rows.state === 'rejected' || rows.state === 'missing' ? 'unavailable' : rows.state);
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, notes: rows.value } };
+  }
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  const parsed = parseNote(record);
+  if (!parsed.ok) return { status: 400, body: { ok: false, reason: parsed.reason } };
+  const created = await ctx.store.createNote(auth.brand, auth.actorId, { accountId: parsed.accountId, body: parsed.text });
+  if (created.state === 'rejected') return { status: 400, body: { ok: false, reason: 'The related record is not in this brand.' } };
+  if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'missing' ? 'unavailable' : created.state);
+  return { status: 201, body: { ok: true, configured: true, brand: auth.brand, note: created.value } };
 }
 
 export function staffAudience(hasCedarSalesMembership: boolean): Audience {
