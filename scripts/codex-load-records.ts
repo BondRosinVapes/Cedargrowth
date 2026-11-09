@@ -5,7 +5,7 @@
 
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { mapRows, parseCsv, type ImportRow } from '../src/lib/crm/importer.ts';
+import { mapRows, matchHeaders, parseCsv, type ImportRow } from '../src/lib/crm/importer.ts';
 import { signIntake } from '../src/lib/crm/intake.ts';
 import { AGENT_HOUR_LIMIT, AGENT_ROW_LIMIT, agentRateLimited, parseAgentRow } from '../src/lib/crm/agentIntake.ts';
 
@@ -17,16 +17,19 @@ const SECRET_ENV = 'CG_AGENT_INTAKE_SECRET';
 const URL_ENV = 'CG_AGENT_INTAKE_URL';
 
 export function planCodexCsv(kind: 'accounts' | 'contacts', text: string): CodexPlan {
-  const mapped = mapRows(kind, parseCsv(text));
+  const table = parseCsv(text);
+  const mapped = mapRows(kind, table);
   const failed: CodexIssue[] = [];
   if (mapped.missing.length) failed.push({ line: 1, reason: 'The header is missing a required column.' });
+  const columns = kind === 'accounts' ? matchHeaders('accounts', table[0] || []).columns : {};
   const ready: CodexRow[] = [];
   for (const row of mapped.rows) {
     if (row.error || !row.record) {
       failed.push({ line: row.line, reason: row.error || 'Row could not be read.' });
       continue;
     }
-    const payload = kind === 'accounts' ? accountPayload(row.record) : contactPayload(row);
+    const source = table[row.line - 1] || [];
+    const payload = kind === 'accounts' ? accountPayload(row.record, source, columns) : contactPayload(row);
     const parsed = parseAgentRow(0, payload);
     if (!('op' in parsed)) failed.push({ line: row.line, reason: parsed.reason });
     else ready.push({ line: row.line, payload });
@@ -63,7 +66,11 @@ export function codexReport(label: string, ready: number, failed: readonly Codex
   ];
 }
 
-function accountPayload(record: Record<string, unknown>): Record<string, unknown> {
+function accountPayload(record: Record<string, unknown>, source: string[], columns: Record<string, number>): Record<string, unknown> {
+  const cell = (key: string) => {
+    const index = columns[key];
+    return index === undefined ? '' : (source[index] || '').trim();
+  };
   return {
     kind: 'account',
     display_name: text(record.displayName),
@@ -77,7 +84,15 @@ function accountPayload(record: Record<string, unknown>): Record<string, unknown
     country: 'USA',
     license_number: text(record.licenseRef),
     license_expiry: text(record.licenseExpiry),
-    notes: text(record.notes),
+    street: cell('address'),
+    postal_code: cell('zip'),
+    phone: cell('phone'),
+    email: cell('email'),
+    website: cell('website'),
+    operating: cell('operating'),
+    region: cell('region'),
+    license_status: cell('licenseStatus'),
+    notes: cell('notes'),
   };
 }
 
@@ -156,7 +171,6 @@ async function loadKind(kind: 'accounts' | 'contacts', path: string, dryRun: boo
     failed.push(...posted.failed);
   }
   for (const line of codexReport(label, plan.ready.length, failed, skipped, hidden)) io.print(line);
-  void created;
   io.print(`${label} created ${created}`);
   return failed.length ? 1 : 0;
 }

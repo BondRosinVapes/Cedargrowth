@@ -168,6 +168,24 @@ export function matchHeaders(kind: ImportKind, header: string[]): { columns: Rec
   return { columns, unmatched };
 }
 
+export function matchLeadSource(value: string): (typeof LEAD_SOURCES)[number] | null | 'invalid' {
+  return choice(value, LEAD_SOURCES, LEAD_SOURCE_LABELS, SOURCE_SYNONYMS);
+}
+
+export function composeAccountNotes(input: { notes?: string; address?: string; zip?: string; county?: string; region?: string; phone?: string; email?: string; website?: string; licenseStatus?: string; operating?: string }): string {
+  const extra = [
+    ['Address', [input.address || '', input.zip || ''].filter(Boolean).join(' ')],
+    ['County', input.county || ''],
+    ['Region', input.region || ''],
+    ['Store phone', input.phone || ''],
+    ['Store email', input.email || ''],
+    ['Website', input.website || ''],
+    ['License status', input.licenseStatus || ''],
+    ['Operating', input.operating || ''],
+  ].filter(([, value]) => value).map(([name, value]) => `${name}: ${value}`);
+  return [input.notes || '', ...extra].filter(Boolean).join('\n').slice(0, 4000);
+}
+
 function choice<T extends string>(value: string, allowed: readonly T[], labels: Record<T, string>, synonyms: Record<string, T>): T | null | 'invalid' {
   const v = norm(value);
   if (!v) return null;
@@ -321,18 +339,19 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
           countyName = county.county;
         }
       }
-      const extra = [
-        ['Address', [cell(row, 'address'), cell(row, 'zip')].filter(Boolean).join(' ')],
-        ['County', countyName],
-        ['Region', cell(row, 'region')],
-        ['Store phone', cell(row, 'phone')],
-        ['Store email', cell(row, 'email')],
-        ['Website', cell(row, 'website')],
-        ['License status', cell(row, 'licenseStatus')],
-        ['Operating', cell(row, 'operating')],
-      ].filter(([, value]) => value).map(([name, value]) => `${name}: ${value}`);
-      const notes = [cell(row, 'notes'), ...extra].filter(Boolean).join('\n');
-      if (notes) record.notes = notes.slice(0, 4000);
+      const notes = composeAccountNotes({
+        notes: cell(row, 'notes'),
+        address: cell(row, 'address'),
+        zip: cell(row, 'zip'),
+        county: countyName,
+        region: cell(row, 'region'),
+        phone: cell(row, 'phone'),
+        email: cell(row, 'email'),
+        website: cell(row, 'website'),
+        licenseStatus: cell(row, 'licenseStatus'),
+        operating: cell(row, 'operating'),
+      });
+      if (notes) record.notes = notes;
       return { line, record };
     }
     if (kind === 'contacts') {
