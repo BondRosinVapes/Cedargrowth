@@ -11,8 +11,10 @@ import {
   type CrmBrand,
   type DeskEvaluation,
 } from '@/lib/crm/engine';
+import { STAGE_LABELS } from '@/lib/crm/dashboard';
+import { DashboardWing } from './DashboardWing';
 
-type Wing = 'accounts' | 'pipeline' | 'tasks' | 'activity' | 'reports' | 'health' | 'signals' | 'canix';
+type Wing = 'dashboard' | 'accounts' | 'pipeline' | 'tasks' | 'activity' | 'reports' | 'health' | 'signals' | 'canix';
 
 type Account = {
   id: string;
@@ -31,6 +33,7 @@ type Task = { id: string; publicId: string; title: string; status: string; dueOn
 type Activity = { id: string; publicId: string; summary: string; createdAt: string; actor: string };
 
 const WINGS: { id: Wing; label: string }[] = [
+  { id: 'dashboard', label: 'Dashboard' },
   { id: 'accounts', label: 'Accounts' },
   { id: 'pipeline', label: 'Pipeline' },
   { id: 'tasks', label: 'Tasks' },
@@ -60,7 +63,7 @@ export function CrmConsole({
   roleLabel: string;
 }) {
   const [brand, setBrand] = useState<CrmBrand>(brands[0] ?? 'cedargrowth');
-  const [wing, setWing] = useState<Wing>('accounts');
+  const [wing, setWing] = useState<Wing>('dashboard');
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [notice, setNotice] = useState('');
   const [counts, setCounts] = useState<Record<string, number | null | boolean> | null>(null);
@@ -251,7 +254,7 @@ export function CrmConsole({
   const lines = desk ? signalLines(desk) : [];
 
   return (
-    <div className="mx-auto flex min-h-full w-full max-w-content flex-col gap-8 px-page-margin-mobile py-8 md:px-page-margin md:py-12">
+    <div className={`mx-auto flex min-h-full w-full flex-col gap-8 px-page-margin-mobile py-8 md:px-page-margin md:py-12 ${wing === 'dashboard' ? 'max-w-none' : 'max-w-content'}`}>
       <header className="flex flex-col gap-4 border-b border-hairline pb-6">
         <p className="font-sans text-eyebrow-m md:text-eyebrow font-medium uppercase text-cedar">Wholesale CRM</p>
         <div className="flex flex-wrap items-end justify-between gap-4">
@@ -271,11 +274,10 @@ export function CrmConsole({
             </button>
           ))}
         </div>
-        <p className="max-w-editorial text-caption text-secondary">
-          {label} records stay in {label}. An email match does not merge CedarGrowth with Bond.
-          The wholesale page shows CedarGrowth signals only, and only to this admin session.
+        <p className="max-w-editorial text-caption text-tertiary">
+          {label} records stay in {label}. Brands are never merged.{' '}
+          <Link href="/admin/kelvin" className="cedar-underline font-mono text-specimen uppercase tracking-specimen">KELVIN</Link>
         </p>
-        <Link href="/admin/kelvin" className="cedar-underline w-fit font-mono text-specimen uppercase tracking-specimen">KELVIN</Link>
       </header>
 
       <nav className="flex flex-wrap gap-4" aria-label="Wings">
@@ -299,7 +301,7 @@ export function CrmConsole({
         </p>
       ) : null}
 
-      {counts && configured ? (
+      {counts && configured && wing !== 'dashboard' ? (
         <dl className="grid grid-cols-2 gap-4 md:grid-cols-4">
           <Count label="Accounts" value={counts.accounts} />
           <Count label="Contacts" value={counts.contacts} />
@@ -309,6 +311,10 @@ export function CrmConsole({
             <dd className="font-mono text-data text-primary">{formatForecast(typeof counts.forecastCents === 'number' ? counts.forecastCents : null)}</dd>
           </div>
         </dl>
+      ) : null}
+
+      {wing === 'dashboard' ? (
+        <DashboardWing key={`${brand}-${refresh}`} brand={brand} brandName={label} onOpen={setWing} />
       ) : null}
 
       {wing === 'accounts' ? (
@@ -340,43 +346,47 @@ export function CrmConsole({
             </article>
           ) : null}
           <RecordList rows={contacts.map((row) => ({ id: row.id, title: row.name, meta: row.email || 'No email' }))} />
-          <form onSubmit={(event) => { event.preventDefault(); createContact(new FormData(event.currentTarget)); }} className="grid max-w-editorial grid-cols-1 gap-3 border border-hairline bg-clinical p-4">
-            <label className="flex flex-col gap-1 text-caption text-tertiary">Account
-              <select name="accountId" className="border border-hairline bg-clinical px-3 py-2 text-body-m">
-                <option value="">Choose</option>
-                {accounts.map((row) => <option key={row.id} value={row.id}>{row.displayName}</option>)}
-              </select>
-            </label>
-            <Field name="name" label="Contact name" />
-            <Field name="email" label="Work email. Not a merge key." />
-            <label className="flex flex-col gap-1 text-caption text-tertiary">Preference
-              <select name="preference" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="unspecified">
-                <option value="unspecified">Unspecified. Storing is not consent to contact.</option>
-                <option value="store_only">Store only</option>
-                <option value="do_not_contact">Do not contact</option>
-              </select>
-            </label>
-            <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Save contact</button>
-          </form>
-          <form onSubmit={(event) => { event.preventDefault(); createAccount(new FormData(event.currentTarget)); }} className="grid max-w-editorial grid-cols-1 gap-3 border border-hairline bg-clinical p-4">
-            <Field name="displayName" label="Account name" />
-            <label className="flex flex-col gap-1 text-caption text-tertiary">Status
-              <select name="status" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="prospect">
-                <option value="prospect">Prospect</option>
-                <option value="active">Active</option>
-                <option value="paused">Paused</option>
-                <option value="closed">Closed</option>
-              </select>
-            </label>
-            <Field name="city" label="City, operator entered, not a verified address" />
-            <Field name="licenseRef" label="License reference, stored only, not a validity certification" />
-            <Field name="facilityRef" label="Facility reference, stored only, not certified" />
-            <Field name="licenseJurisdiction" label="Jurisdiction label, operator entered" />
-            <Field name="licenseExpiry" label="Expiry date on the reference (YYYY-MM-DD)" />
-            <Field name="assignedRep" label="Assigned rep for this brand. This does not grant access." />
-            <Field name="notes" label="Sales notes owned by this CRM" />
-            <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Save account</button>
-          </form>
+          <AddPanel label="Add contact">
+            <form onSubmit={(event) => { event.preventDefault(); createContact(new FormData(event.currentTarget)); }} className="grid grid-cols-1 gap-3 border-t border-hairline p-4">
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Account
+                <select name="accountId" className="border border-hairline bg-clinical px-3 py-2 text-body-m">
+                  <option value="">Choose</option>
+                  {accounts.map((row) => <option key={row.id} value={row.id}>{row.displayName}</option>)}
+                </select>
+              </label>
+              <Field name="name" label="Contact name" />
+              <Field name="email" label="Work email" />
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Preference
+                <select name="preference" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="unspecified">
+                  <option value="unspecified">Unspecified</option>
+                  <option value="store_only">Store only</option>
+                  <option value="do_not_contact">Do not contact</option>
+                </select>
+              </label>
+              <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Save contact</button>
+            </form>
+          </AddPanel>
+          <AddPanel label="Add account">
+            <form onSubmit={(event) => { event.preventDefault(); createAccount(new FormData(event.currentTarget)); }} className="grid grid-cols-1 gap-3 border-t border-hairline p-4">
+              <Field name="displayName" label="Account name" />
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Status
+                <select name="status" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="prospect">
+                  <option value="prospect">Prospect</option>
+                  <option value="active">Active</option>
+                  <option value="paused">Paused</option>
+                  <option value="closed">Closed</option>
+                </select>
+              </label>
+              <Field name="city" label="City or region" />
+              <Field name="licenseRef" label="License number (reference only)" />
+              <Field name="facilityRef" label="Facility reference" />
+              <Field name="licenseJurisdiction" label="Jurisdiction" />
+              <Field name="licenseExpiry" type="date" label="License expiry date" />
+              <Field name="assignedRep" label="Sales rep" />
+              <Field name="notes" label="Notes" />
+              <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Save account</button>
+            </form>
+          </AddPanel>
         </section>
       ) : null}
 
@@ -384,26 +394,28 @@ export function CrmConsole({
         <section className="flex flex-col gap-6">
           <p className="max-w-editorial text-body-m text-secondary">Forecast is not invoiced revenue and not paid revenue. Invoiced and paid amounts are not in this CRM.</p>
           {configured && opportunities.length === 0 ? <p className="text-body-m text-secondary">No {label} opportunities yet.</p> : null}
-          <RecordList rows={opportunities.map((row) => ({ id: row.publicId || row.id, title: row.name, meta: `${row.stage}. ${row.forecastLabel || formatForecast(row.forecastCents)}` }))} />
-          <form onSubmit={(event) => { event.preventDefault(); createOpportunity(new FormData(event.currentTarget)); }} className="grid max-w-editorial grid-cols-1 gap-3 border border-hairline bg-clinical p-4">
-            <label className="flex flex-col gap-1 text-caption text-tertiary">Account
-              <select name="accountId" className="border border-hairline bg-clinical px-3 py-2 text-body-m">
-                <option value="">Choose</option>
-                {accounts.map((row) => <option key={row.id} value={row.id}>{row.displayName}</option>)}
-              </select>
-            </label>
-            <Field name="name" label="Opportunity name" />
-            <label className="flex flex-col gap-1 text-caption text-tertiary">Stage
-              <select name="stage" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="lead">
-                {OPPORTUNITY_STAGES.map((stage) => <option key={stage} value={stage}>{stage}</option>)}
-              </select>
-            </label>
-            <Field name="forecast" label="Forecast amount in dollars, not invoiced, not paid" />
-            <Field name="expectedCloseOn" label="Expected close (YYYY-MM-DD), not an invoice date" />
-            <Field name="nextAction" label="Next action" />
-            <Field name="lossReason" label="Loss reason, required when stage is lost" />
-            <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Save opportunity</button>
-          </form>
+          <RecordList rows={opportunities.map((row) => ({ id: row.publicId || row.id, title: row.name, meta: `${STAGE_LABELS[row.stage as keyof typeof STAGE_LABELS] ?? row.stage}. ${row.forecastLabel || formatForecast(row.forecastCents)}` }))} />
+          <AddPanel label="Add opportunity">
+            <form onSubmit={(event) => { event.preventDefault(); createOpportunity(new FormData(event.currentTarget)); }} className="grid grid-cols-1 gap-3 border-t border-hairline p-4">
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Account
+                <select name="accountId" className="border border-hairline bg-clinical px-3 py-2 text-body-m">
+                  <option value="">Choose</option>
+                  {accounts.map((row) => <option key={row.id} value={row.id}>{row.displayName}</option>)}
+                </select>
+              </label>
+              <Field name="name" label="Opportunity name" />
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Stage
+                <select name="stage" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="lead">
+                  {OPPORTUNITY_STAGES.map((stage) => <option key={stage} value={stage}>{STAGE_LABELS[stage]}</option>)}
+                </select>
+              </label>
+              <Field name="forecast" label="Forecast amount in dollars" />
+              <Field name="expectedCloseOn" type="date" label="Expected close date" />
+              <Field name="nextAction" label="Next action" />
+              <Field name="lossReason" label="Loss reason, required when stage is lost" />
+              <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Save opportunity</button>
+            </form>
+          </AddPanel>
         </section>
       ) : null}
 
@@ -421,18 +433,20 @@ export function CrmConsole({
               </li>
             ))}
           </ul>
-          <form onSubmit={(event) => { event.preventDefault(); createTask(new FormData(event.currentTarget)); }} className="grid max-w-editorial grid-cols-1 gap-3 border border-hairline bg-clinical p-4">
-            <Field name="title" label="Follow-up" />
-            <label className="flex flex-col gap-1 text-caption text-tertiary">Account
-              <select name="accountId" className="border border-hairline bg-clinical px-3 py-2 text-body-m">
-                <option value="">None</option>
-                {accounts.map((row) => <option key={row.id} value={row.id}>{row.displayName}</option>)}
-              </select>
-            </label>
-            <Field name="dueOn" label="Due date (YYYY-MM-DD)" />
-            <Field name="ownerActor" label="Task owner. Leave empty to use this session." />
-            <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Save task</button>
-          </form>
+          <AddPanel label="Add task">
+            <form onSubmit={(event) => { event.preventDefault(); createTask(new FormData(event.currentTarget)); }} className="grid grid-cols-1 gap-3 border-t border-hairline p-4">
+              <Field name="title" label="Follow-up" />
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Account
+                <select name="accountId" className="border border-hairline bg-clinical px-3 py-2 text-body-m">
+                  <option value="">None</option>
+                  {accounts.map((row) => <option key={row.id} value={row.id}>{row.displayName}</option>)}
+                </select>
+              </label>
+              <Field name="dueOn" type="date" label="Due date" />
+              <Field name="ownerActor" label="Owner (leave empty for yourself)" />
+              <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Save task</button>
+            </form>
+          </AddPanel>
         </section>
       ) : null}
 
@@ -440,16 +454,18 @@ export function CrmConsole({
         <section className="flex flex-col gap-3">
           {configured && activity.length === 0 ? <p className="text-body-m text-secondary">No activity has been recorded for {label}.</p> : null}
           <RecordList rows={activity.map((row) => ({ id: row.publicId || row.id, title: row.summary, meta: `${row.createdAt} ${row.actor}` }))} />
-          <form onSubmit={(event) => { event.preventDefault(); recordNote(new FormData(event.currentTarget)); }} className="grid max-w-editorial grid-cols-1 gap-3 border border-hairline bg-clinical p-4">
-            <label className="flex flex-col gap-1 text-caption text-tertiary">Account
-              <select name="accountId" className="border border-hairline bg-clinical px-3 py-2 text-body-m">
-                <option value="">Choose</option>
-                {accounts.map((row) => <option key={row.id} value={row.id}>{row.displayName}</option>)}
-              </select>
-            </label>
-            <Field name="text" label="Actual note. This is appended and not edited later." />
-            <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Append note</button>
-          </form>
+          <AddPanel label="Add note">
+            <form onSubmit={(event) => { event.preventDefault(); recordNote(new FormData(event.currentTarget)); }} className="grid grid-cols-1 gap-3 border-t border-hairline p-4">
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Account
+                <select name="accountId" className="border border-hairline bg-clinical px-3 py-2 text-body-m">
+                  <option value="">Choose</option>
+                  {accounts.map((row) => <option key={row.id} value={row.id}>{row.displayName}</option>)}
+                </select>
+              </label>
+              <Field name="text" label="Note (saved permanently)" />
+              <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Append note</button>
+            </form>
+          </AddPanel>
         </section>
       ) : null}
 
@@ -459,7 +475,7 @@ export function CrmConsole({
           {report?.configured === false ? <p className="text-body-m">{String(report.reason || 'CRM storage is not configured.')}</p> : null}
           {report?.configured === true ? (
             <ul className="flex flex-col gap-2 font-mono text-specimen">
-              {((report.funnel as { stage: string; count: number }[]) || []).map((row) => <li key={row.stage}>{row.stage}: {row.count}</li>)}
+              {((report.funnel as { stage: string; count: number }[]) || []).map((row) => <li key={row.stage}>{STAGE_LABELS[row.stage as keyof typeof STAGE_LABELS] ?? row.stage}: {row.count}</li>)}
               <li>Open opportunities past expected close: {String(report.agedOpenOpportunities)}</li>
               {((report.workload as { ownerActor: string; openTasks: number }[]) || []).map((row) => (
                 <li key={row.ownerActor}>Open tasks for {row.ownerActor}: {row.openTasks}</li>
@@ -518,6 +534,17 @@ export function CrmConsole({
   );
 }
 
+function AddPanel({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <details className="group max-w-editorial border border-hairline bg-clinical">
+      <summary className="cursor-pointer list-none px-4 py-3 font-mono text-specimen uppercase tracking-specimen text-primary">
+        <span className="group-open:hidden">+ </span><span className="hidden group-open:inline">- </span>{label}
+      </summary>
+      {children}
+    </details>
+  );
+}
+
 function Count({ label, value }: { label: string; value: number | boolean | null | undefined }) {
   return (
     <div>
@@ -527,11 +554,11 @@ function Count({ label, value }: { label: string; value: number | boolean | null
   );
 }
 
-function Field({ name, label }: { name: string; label: string }) {
+function Field({ name, label, type = 'text' }: { name: string; label: string; type?: 'text' | 'date' }) {
   return (
     <label className="flex flex-col gap-1 text-caption text-tertiary">
       {label}
-      <input name={name} className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
+      <input name={name} type={type} className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
     </label>
   );
 }
