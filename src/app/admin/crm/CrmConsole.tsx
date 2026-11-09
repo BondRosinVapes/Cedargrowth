@@ -19,6 +19,7 @@ import {
 } from '@/lib/crm/engine';
 import { STAGE_LABELS } from '@/lib/crm/dashboard';
 import { DISTRIBUTOR_LABELS } from '@/lib/crm/distributor';
+import { VISIT_OUTCOME_LABELS, type VisitOutcome } from '@/lib/crm/field';
 import { DashboardWing } from './DashboardWing';
 
 type Wing = 'dashboard' | 'accounts' | 'pipeline' | 'tasks' | 'activity' | 'reports' | 'health' | 'signals' | 'canix';
@@ -66,6 +67,34 @@ const WINGS: { id: Wing; label: string }[] = [
   { id: 'canix', label: 'Canix' },
 ];
 
+function FieldMedia({ brand, id, kind }: { brand: CrmBrand; id: string; kind: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [note, setNote] = useState('');
+  async function open() {
+    const res = await crmFetch(`/api/admin/crm/media?brand=${brand}&id=${id}`);
+    const signed = typeof res.body.url === 'string' ? res.body.url : '';
+    if (res.status === 200 && signed) {
+      setUrl(signed);
+      setNote('');
+      return;
+    }
+    setNote(typeof res.body.reason === 'string' ? res.body.reason : 'The file could not be signed.');
+  }
+  const label = kind === 'voice_note' ? 'Voice note' : 'Shelf photo';
+  return (
+    <li className="flex flex-col gap-2">
+      <button type="button" onClick={open} className="min-h-[44px] self-start border border-ink px-3 py-2 text-body-m text-primary">{label}. Open for 10 minutes</button>
+      {url && kind === 'voice_note' ? <audio controls src={url} className="w-full" /> : null}
+      {url && kind !== 'voice_note' ? (
+        // Signed URLs last 10 minutes and are not a configured image host.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={url} alt="Shelf photo" className="max-w-full" />
+      ) : null}
+      {note ? <p className="text-caption text-secondary">{note}</p> : null}
+    </li>
+  );
+}
+
 async function crmFetch(path: string, init?: RequestInit): Promise<{ status: number; body: Record<string, unknown> }> {
   const headers = new Headers(init?.headers);
   headers.set('x-cedargrowth-crm', '1');
@@ -95,6 +124,7 @@ export function CrmConsole({
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [distributorOrders, setDistributorOrders] = useState<DistributorOrderRow[]>([]);
+  const [fieldNotes, setFieldNotes] = useState<{ visits: { id: string; accountId: string; checkedInAt: string; outcome: string; notes: string }[]; samples: { id: string; accountId: string; productLine: string; quantityUnits: number; followUpOn: string }[]; media: { id: string; accountId: string; kind: string }[] }>({ visits: [], samples: [], media: [] });
   const [report, setReport] = useState<Record<string, unknown> | null>(null);
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [desk, setDesk] = useState<DeskEvaluation | null>(null);
@@ -165,8 +195,16 @@ export function CrmConsole({
         if (!cancel) setHealth(res.body);
       }
       if (wing === 'accounts') {
-        const res = await crmFetch(`/api/admin/crm/contacts?brand=${brand}`);
+        const [res, fieldRes] = await Promise.all([
+          crmFetch(`/api/admin/crm/contacts?brand=${brand}`),
+          crmFetch(`/api/admin/crm/field?brand=${brand}`),
+        ]);
         if (!cancel) setContacts((res.body.contacts as Contact[]) || []);
+        if (!cancel) setFieldNotes({
+          visits: (fieldRes.body.visits as { id: string; accountId: string; checkedInAt: string; outcome: string; notes: string }[]) || [],
+          samples: (fieldRes.body.samples as { id: string; accountId: string; productLine: string; quantityUnits: number; followUpOn: string }[]) || [],
+          media: (fieldRes.body.media as { id: string; accountId: string; kind: string }[]) || [],
+        });
       }
     }
     load().catch(() => { if (!cancel) setNotice('The desk could not be read.'); });
@@ -376,6 +414,24 @@ export function CrmConsole({
               <ul className="flex flex-col gap-1">
                 {distributorOrders.filter((row) => row.accountId === selected.id).length === 0 ? <li className="text-caption text-tertiary">No distributor orders linked to this account.</li> : distributorOrders.filter((row) => row.accountId === selected.id).map((row) => (
                   <li key={row.id} className="text-body-m text-primary">{row.orderRef}. {row.orderStatus}. {row.orderedOn || 'No order date'}.</li>
+                ))}
+              </ul>
+              <h3 className="font-display text-body-l text-primary">Visits</h3>
+              <ul className="flex flex-col gap-1">
+                {fieldNotes.visits.filter((row) => row.accountId === selected.id).length === 0 ? <li className="text-caption text-tertiary">No visits yet.</li> : fieldNotes.visits.filter((row) => row.accountId === selected.id).map((row) => (
+                  <li key={row.id} className="text-body-m text-primary">{row.checkedInAt.slice(0, 10)}. {VISIT_OUTCOME_LABELS[row.outcome as VisitOutcome] || row.outcome}. {row.notes}</li>
+                ))}
+              </ul>
+              <h3 className="font-display text-body-l text-primary">Samples</h3>
+              <ul className="flex flex-col gap-1">
+                {fieldNotes.samples.filter((row) => row.accountId === selected.id).length === 0 ? <li className="text-caption text-tertiary">No samples left.</li> : fieldNotes.samples.filter((row) => row.accountId === selected.id).map((row) => (
+                  <li key={row.id} className="text-body-m text-primary">{PRODUCT_LINE_LABELS[row.productLine as keyof typeof PRODUCT_LINE_LABELS] || row.productLine}. {row.quantityUnits} units. Follow up {row.followUpOn}.</li>
+                ))}
+              </ul>
+              <h3 className="font-display text-body-l text-primary">Photos and voice notes</h3>
+              <ul className="flex flex-col gap-1">
+                {fieldNotes.media.filter((row) => row.accountId === selected.id).length === 0 ? <li className="text-caption text-tertiary">No shelf photos or voice notes.</li> : fieldNotes.media.filter((row) => row.accountId === selected.id).map((row) => (
+                  <FieldMedia key={row.id} brand={brand} id={row.id} kind={row.kind} />
                 ))}
               </ul>
               <ul className="flex flex-col gap-2">

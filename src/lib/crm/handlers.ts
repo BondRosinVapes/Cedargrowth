@@ -35,6 +35,8 @@ import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
 import { monthStarts, parseCapacityWrite, productionForecast, stageWinRates } from './forecast';
+import { FIELD_BUCKET, READ_URL_SECONDS, isProductLine, isVisitOutcome, mediaPath, roundLocation, validateMediaUpload } from './field';
+import { getSupabaseServerClient } from '@/lib/supabase';
 import { IMPORT_BATCH, IMPORT_KINDS, type ImportKind } from './importer';
 
 export type CrmResult = { status: number; body: Record<string, unknown> };
@@ -510,12 +512,13 @@ export async function handleDashboard(ctx: CrmContext): Promise<CrmResult> {
   const auth = await gate(ctx, url.searchParams.get('brand'));
   if (isResult(auth)) return auth;
   // exportBrand reads every row in this brand (up to its cap), not the 100 most recent.
-  const [all, notes, orders] = await Promise.all([ctx.store.exportBrand(auth.brand), ctx.store.listNotes(auth.brand, null), ctx.store.listDistributorOrders(auth.brand)]);
+  const [all, notes, orders, visits] = await Promise.all([ctx.store.exportBrand(auth.brand), ctx.store.listNotes(auth.brand, null), ctx.store.listDistributorOrders(auth.brand), ctx.store.listVisits(auth.brand)]);
   for (const result of [all, notes]) {
     if (result.state !== 'ok') return storageBody(auth.brand, result.state === 'rejected' || result.state === 'missing' ? 'unavailable' : result.state);
   }
   if (all.state !== 'ok' || notes.state !== 'ok') return storageBody(auth.brand, 'unavailable');
   if (orders.state !== 'ok' && orders.state !== 'absent') return storageBody(auth.brand, orders.state === 'rejected' || orders.state === 'missing' ? 'unavailable' : orders.state);
+  if (visits.state !== 'ok' && visits.state !== 'absent') return storageBody(auth.brand, visits.state === 'rejected' || visits.state === 'missing' ? 'unavailable' : visits.state);
   const accounts = { value: all.value.accounts };
   const opps = { value: all.value.opportunities };
   const tasks = { value: all.value.tasks };
@@ -530,6 +533,7 @@ export async function handleDashboard(ctx: CrmContext): Promise<CrmResult> {
     activity: activity.value,
     notes: notes.value,
     orders: orders.state === 'ok' ? orders.value : [],
+    visits: visits.state === 'ok' ? visits.value : [],
   });
   return {
     status: 200,
@@ -675,6 +679,152 @@ export async function handleCapacity(ctx: CrmContext): Promise<CrmResult> {
   const saved = await ctx.store.upsertCapacity(auth.brand, auth.actorId, parsed.value);
   if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'rejected' || saved.state === 'missing' ? 'unavailable' : saved.state);
   return { status: 200, body: { ok: true, configured: true, brand: auth.brand, capacity: saved.value } };
+}
+
+export async function handleField(ctx: CrmContext): Promise<CrmResult> {
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  const [accounts, visits, tasks, samples, media] = await Promise.all([
+    ctx.store.listAccounts(auth.brand, { q: null, status: null }),
+    ctx.store.listVisits(auth.brand),
+    ctx.store.listTasks(auth.brand, 'open'),
+    ctx.store.listSamples(auth.brand),
+    ctx.store.listMedia(auth.brand),
+  ]);
+  for (const result of [accounts, visits, tasks, samples, media]) {
+    if (result.state !== 'ok') return storageBody(auth.brand, result.state === 'rejected' || result.state === 'missing' ? 'unavailable' : result.state);
+  }
+  if (accounts.state !== 'ok' || visits.state !== 'ok' || tasks.state !== 'ok' || samples.state !== 'ok' || media.state !== 'ok') {
+    return storageBody(auth.brand, 'unavailable');
+  }
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      configured: true,
+      brand: auth.brand,
+      actorId: auth.actorId,
+      accounts: accounts.value.map((row) => ({ id: row.id, displayName: row.displayName, city: row.city })),
+      visits: visits.value,
+      tasks: tasks.value.filter((row) => row.ownerActor === auth.actorId || (row.title.startsWith('Follow up on samples at ') && row.dueOn !== null && row.dueOn <= new Date().toISOString().slice(0, 10))),
+      samples: samples.value,
+      media: media.value,
+    },
+  };
+}
+
+export async function handleVisit(ctx: CrmContext, method: 'POST' | 'PATCH'): Promise<CrmResult> {
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  if (method === 'PATCH') {
+    const visitId = typeof record.visitId === 'string' ? record.visitId : '';
+    if (!parseUuid(visitId)) return { status: 400, body: { ok: false, reason: 'Visit was not found in this brand.' } };
+    const saved = await ctx.store.checkOut(auth.brand, visitId);
+    if (saved.state === 'rejected' || saved.state === 'missing') return { status: 404, body: { ok: false, reason: 'Visit was not found in this brand.' } };
+    if (saved.state !== 'ok') return storageBody(auth.brand, saved.state);
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, visit: saved.value } };
+  }
+  const accountId = typeof record.accountId === 'string' ? record.accountId : '';
+  if (!parseUuid(accountId)) return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+  if (!isVisitOutcome(record.outcome)) return { status: 400, body: { ok: false, reason: 'Outcome is not recognized.' } };
+  const notes = record.notes === undefined || record.notes === null ? '' : record.notes;
+  if (typeof notes !== 'string' || notes.length > 2000) return { status: 400, body: { ok: false, reason: 'Notes are too long.' } };
+  const location = roundLocation(record.latitude, record.longitude);
+  if (location === 'invalid') return { status: 400, body: { ok: false, reason: 'Location could not be read.' } };
+  const saved = await ctx.store.checkIn(auth.brand, auth.actorId, {
+    accountId,
+    outcome: record.outcome,
+    notes,
+    latitude: location?.latitude ?? null,
+    longitude: location?.longitude ?? null,
+  });
+  if (saved.state === 'rejected') return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+  if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'missing' ? 'unavailable' : saved.state);
+  return { status: 201, body: { ok: true, configured: true, brand: auth.brand, visit: saved.value } };
+}
+
+export async function handleSample(ctx: CrmContext): Promise<CrmResult> {
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  const accountId = typeof record.accountId === 'string' ? record.accountId : '';
+  if (!parseUuid(accountId)) return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+  const visitId = record.visitId === undefined || record.visitId === null || record.visitId === '' ? null : record.visitId;
+  if (visitId !== null && (typeof visitId !== 'string' || !parseUuid(visitId))) return { status: 400, body: { ok: false, reason: 'Visit was not found in this brand.' } };
+  if (!isProductLine(record.productLine)) return { status: 400, body: { ok: false, reason: 'Product line is not recognized.' } };
+  if (typeof record.quantityUnits !== 'number' || !Number.isInteger(record.quantityUnits) || record.quantityUnits < 1) {
+    return { status: 400, body: { ok: false, reason: 'Sample quantity must be at least 1.' } };
+  }
+  if (typeof record.leftOn !== 'string' || typeof record.followUpOn !== 'string') return { status: 400, body: { ok: false, reason: 'Sample dates are required.' } };
+  const notes = record.notes === undefined || record.notes === null ? '' : record.notes;
+  if (typeof notes !== 'string' || notes.length > 2000) return { status: 400, body: { ok: false, reason: 'Notes are too long.' } };
+  const saved = await ctx.store.createSample(auth.brand, auth.actorId, {
+    accountId,
+    visitId,
+    productLine: record.productLine,
+    quantityUnits: record.quantityUnits,
+    leftOn: record.leftOn,
+    followUpOn: record.followUpOn,
+    notes,
+  });
+  if (saved.state === 'rejected') return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+  if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'missing' ? 'unavailable' : saved.state);
+  return { status: 201, body: { ok: true, configured: true, brand: auth.brand, sample: saved.value.sample, task: saved.value.task } };
+}
+
+export async function handleMedia(ctx: CrmContext, method: 'GET' | 'POST'): Promise<CrmResult> {
+  if (method === 'GET') {
+    const url = new URL(ctx.request.url);
+    const auth = await gate(ctx, url.searchParams.get('brand'));
+    if (isResult(auth)) return auth;
+    const id = url.searchParams.get('id') || '';
+    if (!parseUuid(id)) return { status: 400, body: { ok: false, reason: 'Media was not found in this brand.' } };
+    const rows = await ctx.store.listMedia(auth.brand);
+    if (rows.state !== 'ok') return storageBody(auth.brand, rows.state === 'rejected' || rows.state === 'missing' ? 'unavailable' : rows.state);
+    const media = rows.value.find((row) => row.id === id);
+    if (!media) return { status: 404, body: { ok: false, reason: 'Media was not found in this brand.' } };
+    const client = getSupabaseServerClient();
+    if (!client) return storageBody(auth.brand, 'absent');
+    const signed = await client.storage.from(FIELD_BUCKET).createSignedUrl(media.storagePath, READ_URL_SECONDS);
+    if (signed.error || !signed.data?.signedUrl) return { status: 503, body: { ok: false, reason: 'The file could not be signed.' } };
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, url: signed.data.signedUrl, expiresIn: READ_URL_SECONDS } };
+  }
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  const checked = validateMediaUpload(record);
+  if (!checked.ok) return { status: 400, body: { ok: false, reason: checked.reason } };
+  const accountId = typeof record.accountId === 'string' ? record.accountId : '';
+  if (!parseUuid(accountId)) return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+  const visitId = record.visitId === undefined || record.visitId === null || record.visitId === '' ? null : record.visitId;
+  if (visitId !== null && (typeof visitId !== 'string' || !parseUuid(visitId))) return { status: 400, body: { ok: false, reason: 'Visit was not found in this brand.' } };
+  const id = crypto.randomUUID();
+  const path = mediaPath(auth.brand, accountId, id, checked.ext);
+  const created = await ctx.store.createMedia(auth.brand, auth.actorId, {
+    id,
+    accountId,
+    visitId,
+    kind: checked.kind,
+    storagePath: path,
+    contentType: checked.contentType,
+    byteSize: checked.byteSize,
+    durationSeconds: checked.durationSeconds,
+  });
+  if (created.state === 'rejected') return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+  if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'missing' ? 'unavailable' : created.state);
+  const client = getSupabaseServerClient();
+  if (!client) return { status: 201, body: { ok: true, configured: false, brand: auth.brand, media: { ...created.value, storagePath: path }, uploadUrl: null, token: null } };
+  const signed = await client.storage.from(FIELD_BUCKET).createSignedUploadUrl(path);
+  if (signed.error || !signed.data) return { status: 503, body: { ok: false, reason: 'The upload could not be signed.' } };
+  return { status: 201, body: { ok: true, configured: true, brand: auth.brand, media: { ...created.value, storagePath: path }, uploadUrl: signed.data.signedUrl, token: signed.data.token, path } };
 }
 
 export async function handleHealth(ctx: CrmContext): Promise<CrmResult> {

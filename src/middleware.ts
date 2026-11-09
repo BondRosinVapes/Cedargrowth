@@ -20,7 +20,7 @@ export async function middleware(req: NextRequest) {
     return res;
   }
 
-  if (pathname === '/admin/crm' || pathname.startsWith('/admin/crm/')) {
+  if (pathname === '/admin/crm' || pathname.startsWith('/admin/crm/') || pathname === '/sales/field' || pathname.startsWith('/sales/field/')) {
     if (!salesCookie && !kelvinEmail) {
       return new NextResponse('Not found', {
         status: 404,
@@ -47,5 +47,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/admin/kelvin', '/admin/kelvin/:path*', '/admin/crm', '/admin/crm/:path*', '/manufacturing'],
+  matcher: ['/admin/kelvin', '/admin/kelvin/:path*', '/admin/crm', '/admin/crm/:path*', '/sales/field', '/sales/field/:path*', '/manufacturing'],
 };
