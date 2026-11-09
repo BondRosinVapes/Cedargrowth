@@ -15,6 +15,7 @@ import { coverageLabel } from '../src/lib/crm/territory.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
+import { applyAgentOps } from '../src/lib/crm/agentIntake.ts';
 import type { IntakeLead } from '../src/lib/crm/intake.ts';
 import { reorderLinkHtml } from '../src/lib/email.ts';
 import {
@@ -79,6 +80,7 @@ import {
   handleEmailStatusRefresh,
   handleTerritoryAssign,
   handleBondIntake,
+  handleAgentIntake,
   handleIntakeDelete,
   handleIntakePurge,
   useDigestDelivery,
@@ -764,6 +766,34 @@ class MemoryCrm implements CrmStore {
     }
     return { state: 'ok' as const, value: { purged } };
   }
+  agentRequests: { requestId: string; receivedAtMs: number }[] = [];
+  async receiveAgentRecords(input: { requestId: string; receivedAt: string; ops: import('../src/lib/crm/agentIntake.ts').AgentOp[] }) {
+    const receivedAtMs = Date.parse(input.receivedAt);
+    const result = applyAgentOps({
+      requestId: input.requestId,
+      receivedAtMs,
+      requests: this.agentRequests,
+      accounts: this.accounts.map((row) => ({ id: row.id, brand: row.brand, displayName: row.displayName, licenseRef: row.licenseRef })),
+      ops: input.ops,
+      nextId: () => this.id(),
+    });
+    if (result.code === 'replay') return { state: 'ok' as const, value: { code: 'replay' as const } };
+    if (result.code === 'rate') return { state: 'ok' as const, value: { code: 'rate' as const, retryAfter: result.retryAfter } };
+    this.agentRequests.push({ requestId: input.requestId, receivedAtMs });
+    for (const account of result.accounts) {
+      this.accounts.push({ id: account.id, publicId: 'test-only:agent:account', brand: 'cedargrowth', displayName: account.displayName, status: account.status, city: account.city, county: account.county, notes: '', licenseRef: account.licenseRef, facilityRef: null, licenseJurisdiction: null, licenseExpiry: null, assignedRep: null, accountType: account.accountType, leadSource: null, distributor: null, distributorAccountRef: null, createdAt: input.receivedAt, updatedAt: input.receivedAt, createdBy: 'CODEX agent', updatedBy: 'CODEX agent', state: 'NY', sourceRequestId: input.requestId });
+    }
+    for (const contact of result.contacts) {
+      this.contacts.push({ id: contact.id, publicId: 'test-only:agent:contact', brand: 'cedargrowth', accountId: contact.accountId, name: contact.name, title: contact.title, email: contact.email, phone: contact.phone, notes: '', preference: 'unspecified', createdAt: input.receivedAt, updatedAt: input.receivedAt, sourceRequestId: input.requestId });
+    }
+    for (const note of result.notes) {
+      this.notes.push({ id: note.id, publicId: 'test-only:agent:note', brand: 'cedargrowth', accountId: note.accountId, body: note.body, actor: 'CODEX agent', createdAt: input.receivedAt, sourceRequestId: input.requestId });
+    }
+    for (const row of result.activity) {
+      this.activity.push({ id: row.id, publicId: 'test-only:agent:activity', brand: 'cedargrowth', accountId: row.accountId, kind: row.kind, summary: row.summary, actor: 'CODEX agent', createdAt: input.receivedAt, sourceRequestId: input.requestId });
+    }
+    return { state: 'ok' as const, value: { code: 'ok' as const, created: result.created, skipped: result.skipped, failed: result.failed } };
+  }
 }
 
 const memory = new MemoryCrm();
@@ -1275,6 +1305,62 @@ const limited = await handleBondIntake(intakeStore, intakeRequest(intakePayload(
 assert(limited.status === 429 && (limited.retryAfter || 0) >= 1 && intakeStore.accounts.every((row) => row.displayName !== 'Late Shop'), 'the source rate limit returns retry after and stores nothing');
 assert(intakeLogs.every((line) => line.includes('test-secret') === false && line.includes('next-secret') === false && line.includes('ada@northstore.test') === false && line.includes('Hello plain') === false), 'secret and payload never logged');
 assert(parseIntake({ consumer: true }).ok === false && intakeExpired('2024-01-01T00:00:00Z', '2026-11-09T15:00:00Z') && intakeExpired('2026-10-01T00:00:00Z', '2026-11-09T15:00:00Z') === false, 'consumer fields are rejected and the retention window is twelve months');
+
+const agentStore = new MemoryCrm();
+const agentNow = Date.parse('2026-11-09T18:00:00Z');
+const agentStamp = String(Math.floor(agentNow / 1000));
+const agentEnv = { AGENT_INTAKE_ENABLED: 'true', CG_AGENT_INTAKE_SECRET: 'agent-secret' };
+function agentPayload(requestId: string, rows: unknown[]) {
+  return { request_id: requestId, brand: 'cedargrowth', rows };
+}
+function agentRequest(body: unknown, options?: { secret?: string; stamp?: string; raw?: string; headers?: Record<string, string> }) {
+  const raw = options?.raw ?? JSON.stringify(body);
+  const stamp = options?.stamp ?? agentStamp;
+  const secret = options?.secret ?? 'agent-secret';
+  const requestId = body && typeof body === 'object' && 'request_id' in (body as Record<string, unknown>) ? String((body as { request_id: unknown }).request_id) : '';
+  return new Request('https://cedargrowth.vercel.app/api/intake/agent-records', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-cg-timestamp': stamp, 'x-cg-signature': signIntake(secret, stamp, raw), 'idempotency-key': requestId, ...options?.headers },
+    body: raw,
+  });
+}
+const agentLogs: string[] = [];
+const agentConsole = console.error;
+console.error = (...args: unknown[]) => { agentLogs.push(args.map((item) => String(item)).join(' ')); };
+const agentOff = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', [])), { nowMs: agentNow, env: { CG_AGENT_INTAKE_SECRET: 'agent-secret' } });
+const agentNoSecret = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', [])), { nowMs: agentNow, env: { AGENT_INTAKE_ENABLED: 'true' } });
+const agentBadSig = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', []), { secret: 'wrong' }), { nowMs: agentNow, env: agentEnv });
+const agentStale = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', []), { stamp: String(Number(agentStamp) - 301) }), { nowMs: agentNow, env: agentEnv });
+const agentUnknown = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', []), { headers: {} }), { nowMs: agentNow, env: agentEnv });
+console.error = agentConsole;
+const agentUnknownBody = await handleAgentIntake(agentStore, agentRequest({ ...agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2', []), haus: 'hidden' }), { nowMs: agentNow, env: agentEnv });
+const agentCounty = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3', [{ kind: 'account', display_name: 'Bad County', status: 'prospect', county: 'Brooklyn', state: 'NY', country: 'USA' }])), { nowMs: agentNow, env: agentEnv });
+const accountsAfterCounty = agentStore.accounts.length;
+const agentOversize = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4', Array.from({ length: 51 }, () => ({ kind: 'account', display_name: 'Bulk', status: 'prospect', state: 'NY', country: 'USA', county: 'Erie' })))), { nowMs: agentNow, env: agentEnv });
+const accountsAfterOversize = agentStore.accounts.length;
+const goodId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5';
+const agentGood = await handleAgentIntake(agentStore, agentRequest(agentPayload(goodId, [
+  { kind: 'account', display_name: 'Agent Shop', status: 'prospect', account_type: 'adult_use_dispensary', city: 'Buffalo', county: 'Erie', state: 'NY', country: 'USA', license_number: 'AGENT-LIC-1' },
+  { kind: 'contact', name: 'Agent Buyer', email: 'Buyer@Agent.test', account_license: 'AGENT-LIC-1' },
+  { kind: 'note', body: 'Plain note', account_license: 'AGENT-LIC-1' },
+])), { nowMs: agentNow, env: agentEnv });
+const agentReplay = await handleAgentIntake(agentStore, agentRequest(agentPayload(goodId, [
+  { kind: 'account', display_name: 'Agent Shop Again', status: 'prospect', county: 'Erie', state: 'NY', country: 'USA', license_number: 'AGENT-LIC-2' },
+])), { nowMs: agentNow, env: agentEnv });
+const agentDupe = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6', [
+  { kind: 'account', display_name: 'Agent Shop Copy', status: 'active', county: 'Erie', state: 'NY', country: 'USA', license_number: 'agent-lic-1' },
+])), { nowMs: agentNow, env: agentEnv });
+assert(agentOff.status === 503 && agentNoSecret.status === 503, 'agent intake stays off until the flag and secret are set');
+assert(agentBadSig.status === 401 && agentStale.status === 401 && JSON.stringify(agentBadSig.body) === '{"ok":false}', 'a bad or stale agent signature stores nothing');
+assert(agentUnknownBody.status === 400 && JSON.stringify(agentUnknownBody.body).includes('haus') && JSON.stringify(agentUnknownBody.body).includes('hidden') === false, 'an unknown agent field is named and its value is not stored');
+assert(agentCounty.status === 200 && ((agentCounty.body.failed as { reason: string }[]) || []).some((row) => row.reason.includes('New York')) && accountsAfterCounty === 0, 'an unknown county is rejected');
+assert(agentOversize.status === 413 && accountsAfterOversize === 0, 'an agent batch over 50 rows is rejected');
+const agentCreated = agentGood.body.created as { accounts: number; contacts: number; notes: number };
+assert(agentGood.status === 200 && agentCreated.accounts === 1 && agentCreated.contacts === 1 && agentCreated.notes === 1 && agentStore.accounts.filter((row) => row.brand === 'cedargrowth' && row.licenseRef === 'AGENT-LIC-1').length === 1 && agentStore.contacts.some((row) => row.email === 'buyer@agent.test' && row.preference === 'unspecified') && agentStore.notes.some((row) => row.body === 'Plain note' && row.actor === 'CODEX agent') && agentStore.activity.some((row) => row.actor === 'CODEX agent' && row.sourceRequestId === goodId), 'a signed agent request writes an account, a contact, and a note');
+assert(agentReplay.status === 409 && agentStore.accounts.filter((row) => row.licenseRef === 'AGENT-LIC-2').length === 0, 'a replayed agent request id is rejected');
+assert(agentDupe.status === 200 && ((agentDupe.body.skipped as { reason: string }[]) || []).some((row) => row.reason.includes('license')) && agentStore.accounts.filter((row) => row.displayName === 'Agent Shop Copy').length === 0, 'a duplicate license is not added again');
+assert(agentLogs.every((line) => line.includes('agent-secret') === false), 'the agent secret is never logged');
+void agentUnknown;
 
 const suiteSql = readFileSync('supabase/migrations/0123_crm_suite_workflows.sql', 'utf8');
 const raiseAt = suiteSql.indexOf('unsupported opportunity stage');

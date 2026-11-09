@@ -24,6 +24,7 @@ import { sampleTaskTitle, type MediaKind, type VisitOutcome } from './field';
 import { confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, reorderDeal, type ReleasedBatch, type ReorderLine } from './reorder';
 import { knownEmailEvent, type EmailEvent } from './emailStatus';
 import { intakeTestMarker, type IntakeLead } from './intake';
+import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
 
 export type StoreResult<T> =
   | { state: 'ok'; value: T }
@@ -57,6 +58,7 @@ export type Account = {
   ocmStatus?: 'unverified' | 'verified' | null;
   recordMarker?: 'test' | null;
   sourceInquiryId?: string | null;
+  sourceRequestId?: string | null;
   distributor: Distributor | null;
   distributorAccountRef: string | null;
   createdAt: string;
@@ -78,6 +80,7 @@ export type Contact = {
   preference: 'unspecified' | 'store_only' | 'do_not_contact';
   createdAt: string;
   updatedAt: string;
+  sourceRequestId?: string | null;
 };
 
 export type Opportunity = {
@@ -126,6 +129,7 @@ export type Note = {
   actor: string;
   createdAt: string;
   sourceInquiryId?: string | null;
+  sourceRequestId?: string | null;
 };
 
 export type Activity = {
@@ -137,6 +141,7 @@ export type Activity = {
   summary: string;
   actor: string;
   createdAt: string;
+  sourceRequestId?: string | null;
 };
 
 export type DistributorOrder = {
@@ -359,6 +364,7 @@ export interface CrmStore {
   receiveBondInquiry(lead: IntakeLead, receivedAt: string): Promise<StoreResult<{ duplicate: boolean }>>;
   deleteBondInquiry(inquiryId: string): Promise<StoreResult<{ deleted: boolean }>>;
   purgeBondInquiries(nowIso: string): Promise<StoreResult<{ purged: number }>>;
+  receiveAgentRecords(input: { requestId: string; receivedAt: string; ops: AgentOp[] }): Promise<StoreResult<{ code: 'replay' } | { code: 'rate'; retryAfter: number } | { code: 'ok'; created: { accounts: number; contacts: number; notes: number }; skipped: { index: number; reason: string }[]; failed: AgentRowFailure[] }>>;
 }
 
 const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,street,state,postal_code,consent_version,consent_received_at,intake_submitted_at,ocm_status,record_marker,source_inquiry_id,created_at,updated_at,created_by,updated_by';
@@ -1513,6 +1519,25 @@ class SupabaseCrmStore implements CrmStore {
     const payload = data as { ok?: boolean; purged?: number } | null;
     if (error || !payload || payload.ok !== true) return { state: 'unavailable' as const };
     return { state: 'ok' as const, value: { purged: Number(payload.purged) || 0 } };
+  }
+
+  async receiveAgentRecords(input: { requestId: string; receivedAt: string; ops: AgentOp[] }) {
+    const { data, error } = await this.db.rpc('crm_receive_agent_records', {
+      p_request_id: input.requestId,
+      p_received_at: input.receivedAt,
+      p_rows: input.ops.map((op) => {
+        if (op.op === 'account') return { op: 'account', index: op.index, display_name: op.displayName, status: op.status, account_type: op.accountType, city: op.city, county: op.county, license_number: op.licenseNumber };
+        if (op.op === 'contact') return { op: 'contact', index: op.index, name: op.name, email: op.email, phone: op.phone, title: op.title, account_license: op.accountLicense, account_name: op.accountName };
+        return { op: 'note', index: op.index, body: op.body, account_license: op.accountLicense, account_name: op.accountName };
+      }),
+    });
+    if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
+    const payload = data as { ok?: boolean; code?: string; retry_after?: number; created?: { accounts: number; contacts: number; notes: number }; skipped?: { index: number; reason: string }[]; failed?: AgentRowFailure[] } | null;
+    if (error || !payload) return { state: 'unavailable' as const };
+    if (payload.code === 'replay') return { state: 'ok' as const, value: { code: 'replay' as const } };
+    if (payload.code === 'rate') return { state: 'ok' as const, value: { code: 'rate' as const, retryAfter: Number(payload.retry_after) || 1 } };
+    if (payload.ok !== true || !payload.created) return { state: 'unavailable' as const };
+    return { state: 'ok' as const, value: { code: 'ok' as const, created: payload.created, skipped: payload.skipped || [], failed: payload.failed || [] } };
   }
 
   private one<T extends { brand: CrmBrand }>(
