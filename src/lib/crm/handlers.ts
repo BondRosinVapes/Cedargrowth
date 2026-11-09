@@ -497,14 +497,36 @@ export async function handleHealth(ctx: CrmContext): Promise<CrmResult> {
   const url = new URL(ctx.request.url);
   const auth = await gate(ctx, url.searchParams.get('brand'));
   if (isResult(auth)) return auth;
+  const ready = await ctx.store.counts(auth.brand);
+  const adapters = {
+    canix: { connected: false, label: CANIX_NOT_CONNECTED, lastSuccessAt: null, exceptions: 'Not configured' },
+    hoodie: { connected: false, label: HOODIE_NOT_CONNECTED, lastSuccessAt: null, exceptions: 'Not configured' },
+    mirror: mirrorContract(),
+    adaptersConnected: false,
+  };
+  if (ready.state !== 'ok') {
+    const absent = ready.state === 'absent';
+    return {
+      status: 503,
+      body: {
+        ok: false,
+        configured: false,
+        storage: absent ? 'absent' : 'unavailable',
+        brand: auth.brand,
+        reason: absent ? 'CRM storage is not configured.' : 'CRM storage could not be read.',
+        detail: absent ? 'schema_absent' : 'read_failed',
+        ...adapters,
+      },
+    };
+  }
   return {
     status: 200,
     body: {
       ok: true,
+      configured: true,
+      storage: 'ready',
       brand: auth.brand,
-      canix: { connected: false, label: CANIX_NOT_CONNECTED, lastSuccessAt: null, exceptions: 'Not configured' },
-      hoodie: { connected: false, label: HOODIE_NOT_CONNECTED, lastSuccessAt: null, exceptions: 'Not configured' },
-      mirror: mirrorContract(),
+      ...adapters,
     },
   };
 }

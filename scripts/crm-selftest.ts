@@ -94,6 +94,12 @@ assert(authorizeCrmRequest({
   actorId: 'owner', grants: ownerGrants, method: 'POST', requestOrigin: origin, headerOrigin: 'https://evil.example', headerMarker: '1', headerFetchSite: 'cross-site', brandRaw: 'cedargrowth',
 }).status === 403, 'cross-origin mutation is rejected');
 assert(authorizeCrmRequest({
+  actorId: 'owner', grants: ownerGrants, method: 'GET', requestOrigin: origin, headerOrigin: null, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: 'cedargrowth',
+}).ok === true, 'a same-origin read without an Origin header is accepted');
+assert(authorizeCrmRequest({
+  actorId: 'owner', grants: ownerGrants, method: 'POST', requestOrigin: origin, headerOrigin: null, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: 'cedargrowth',
+}).status === 403, 'a mutation without an Origin header is rejected');
+assert(authorizeCrmRequest({
   actorId: 'owner', grants: ownerGrants, method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: null,
 }).status === 400, 'missing brand is rejected');
 const bondOk = authorizeCrmRequest({
@@ -477,7 +483,25 @@ const reports = await handleReports({ actorId: 'gary@cedargrowthco.com', grants:
 assert(reports.status === 200 && reports.body.synthetic === false && reports.body.invoicedCents === null, 'route reports are stored rows, not a synthetic live history');
 const health = await handleHealth({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/health?brand=cedargrowth'), store: memory });
 const healthCanix = health.body.canix as { connected?: boolean; lastSuccessAt?: unknown };
-assert(health.status === 200 && healthCanix.connected === false && healthCanix.lastSuccessAt === null, 'route health says Canix is not connected');
+assert(health.status === 200 && health.body.storage === 'ready' && health.body.configured === true && healthCanix.connected === false && health.body.adaptersConnected === false, 'ready storage is separate from a disconnected adapter');
+const absentHealth = await handleHealth({
+  actorId: 'gary@cedargrowthco.com',
+  grants: owner,
+  request: crmReq('GET', '/api/admin/crm/health?brand=cedargrowth'),
+  store: new Proxy(memory, { get(target, prop, receiver) { return prop === 'counts' ? async () => ({ state: 'absent' }) : Reflect.get(target, prop, receiver); } }),
+});
+const absentCanix = absentHealth.body.canix as { connected?: boolean };
+assert(absentHealth.status === 503 && absentHealth.body.ok === false && absentHealth.body.configured === false && absentHealth.body.storage === 'absent' && absentCanix.connected === false, 'absent storage is not reported as a healthy desk');
+
+const suiteSql = readFileSync('supabase/migrations/0123_crm_suite_workflows.sql', 'utf8');
+const raiseAt = suiteSql.indexOf('unsupported opportunity stage');
+const dropStageAt = suiteSql.indexOf('drop constraint if exists crm_opportunities_stage_check');
+const qualifiedAt = suiteSql.indexOf("when 'qualified' then 'qualification'");
+const addStageAt = suiteSql.indexOf("check (stage in ('lead', 'qualification'");
+assert(raiseAt > 0 && raiseAt < dropStageAt && dropStageAt < qualifiedAt && qualifiedAt < addStageAt, 'known stages are rewritten in the same statement that replaces the check');
+assert(suiteSql.includes('unsupported opportunity stage'), 'an unsupported stage aborts the upgrade');
+assert(suiteSql.includes("set search_path = pg_catalog"), 'audit_note pins search_path to pg_catalog');
+assert(suiteSql.lastIndexOf('revoke all on all functions in schema crm_private') > suiteSql.indexOf('function crm_private.audit_note'), 'note functions repeat the execute revoke');
 
 const sql = readFileSync('supabase/migrations/0120_crm_internal_wholesale.sql', 'utf8')
   + readFileSync('supabase/migrations/0121_crm_sales_intelligence.sql', 'utf8');
