@@ -68,7 +68,7 @@ export function Header() {
                 <li key={link.href}>
                   <Link
                     href={link.href}
-                    className="cedar-underline text-body-m uppercase leading-none tracking-nav text-tertiary min-[1280px]:tracking-eyebrow"
+                    className="cedar-underline text-body-m leading-none tracking-nav text-primary"
                   >
                     {link.label}
                   </Link>
@@ -83,7 +83,7 @@ export function Header() {
                 <li key={link.href}>
                   <Link
                     href={link.href}
-                    className="cedar-underline text-body-m uppercase leading-none tracking-nav text-tertiary min-[1280px]:tracking-eyebrow"
+                    className="cedar-underline text-body-m leading-none tracking-nav text-primary"
                   >
                     {link.label}
                   </Link>
@@ -92,11 +92,11 @@ export function Header() {
               <li>
                 <Link
                   href="/reserve"
-                  className="flex items-center gap-2 text-body-m uppercase leading-none tracking-nav text-tertiary cedar-underline min-[1280px]:tracking-eyebrow"
+                  className="flex items-center gap-2 cedar-underline text-body-m leading-none tracking-nav text-primary"
                 >
                   <ShoppingBag size={16} strokeWidth={1.5} aria-hidden="true" />
                   Reserve
-                  <span className="font-mono text-data lowercase leading-none tracking-normal">
+                  <span>
                     ({reserveCount})
                   </span>
                 </Link>
