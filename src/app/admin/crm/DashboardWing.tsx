@@ -16,6 +16,7 @@ import {
 } from '@/lib/crm/dashboard';
 import { QuickAdd, SpreadsheetUpload } from './DataIntake';
 import { DigestPanel } from './DigestPanel';
+import { NextActions, TerritoryMap } from './TerritoryMap';
 
 type Source = { connected: boolean; label: string };
 type DashboardBody = {
@@ -53,7 +54,7 @@ const SECTIONS: { id: Section; label: string }[] = [
 const SERIES = ['rgb(var(--accent-cedar))', 'rgb(var(--accent-verdant))', 'rgb(var(--text-tertiary))', 'rgb(var(--surface-ink))'];
 const STATUS_COLOR: Record<string, string> = { open: SERIES[3], won: SERIES[1], lost: SERIES[2] };
 
-const EMPTY_FILTERS = { year: '', month: '', rep: '', region: '', accountType: '', leadSource: '', stage: '', status: '' };
+const EMPTY_FILTERS = { year: '', month: '', rep: '', region: '', territory: '', accountType: '', leadSource: '', stage: '', status: '' };
 type Filters = typeof EMPTY_FILTERS;
 
 function money(cents: number | null): string {
@@ -229,6 +230,8 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false }: { b
           </div>
         ) : null}
 
+        <TerritoryMap brand={brand} canAssign={canEditCapacity} territory={filters.territory} onSelect={(region) => setFilters((current) => ({ ...current, territory: current.territory === region ? '' : region }))} />
+
         {section === 'overview' ? (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             <Card title="Deals by account type">
@@ -249,6 +252,7 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false }: { b
         {section === 'reps' ? (
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <Card title="Deals by sales rep" className="xl:col-span-2"><RepTable rows={data.byRep} /></Card>
+            <Card title="Next best action" className="xl:col-span-2"><NextActions brand={brand} /></Card>
             <Card title="Visits this week" className="xl:col-span-2">
               {data.fieldReps.length === 0 ? <p className="text-caption text-tertiary">No visits logged yet.</p> : (
                 <ul className="flex flex-col gap-2">

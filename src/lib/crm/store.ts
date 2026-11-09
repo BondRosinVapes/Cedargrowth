@@ -38,6 +38,7 @@ export type Account = {
   displayName: string;
   status: AccountStatus;
   city: string | null;
+  county: string | null;
   notes: string;
   licenseRef: string | null;
   facilityRef: string | null;
@@ -289,10 +290,10 @@ function asBrand(value: unknown): CrmBrand | null {
 export interface CrmStore {
   counts(brand: CrmBrand): Promise<StoreResult<Counts>>;
   listAccounts(brand: CrmBrand, filter: { q: string | null; status: AccountStatus | null }): Promise<StoreResult<Account[]>>;
-  createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>>;
+  createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; county?: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>>;
   listNotes(brand: CrmBrand, accountId: string | null): Promise<StoreResult<Note[]>>;
   createNote(brand: CrmBrand, actor: string, input: { accountId: string; body: string }): Promise<StoreResult<Note>>;
-  updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>>;
+  updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; county?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>>;
   listContacts(brand: CrmBrand, accountId: string | null): Promise<StoreResult<Contact[]>>;
   createContact(brand: CrmBrand, actor: string, input: ContactWrite & { accountId: string; name: string }): Promise<StoreResult<Contact>>;
   updateContact(brand: CrmBrand, actor: string, id: string, patch: ContactWrite): Promise<StoreResult<Contact>>;
@@ -335,9 +336,16 @@ export interface CrmStore {
   insertEmailLog(brand: CrmBrand, actor: string, input: { kind: 'digest' | 'reorder_link'; resendId: string; recipient: string; accountId: string | null }): Promise<StoreResult<EmailLog>>;
   listEmailLogs(brand: CrmBrand, sinceIso: string, accountId?: string | null): Promise<StoreResult<EmailLog[]>>;
   updateEmailLog(brand: CrmBrand, id: string, lastEvent: EmailEvent, lastEventAt: string): Promise<StoreResult<EmailLog>>;
+  listTerritories(brand: CrmBrand): Promise<StoreResult<{ id: string; brand: CrmBrand; region: string; repActor: string }[]>>;
+  assignTerritory(brand: CrmBrand, region: string, repActor: string): Promise<StoreResult<{ id: string; brand: CrmBrand; region: string; repActor: string }>>;
+  clearTerritory(brand: CrmBrand, region: string): Promise<StoreResult<{ cleared: true }>>;
+  listMarketRetailers(brand: CrmBrand): Promise<StoreResult<{ id: string; brand: CrmBrand; licenseNumber: string; name: string; county: string; licenseType: string; uploadedAt: string }[]>>;
+  insertMarketRetailers(brand: CrmBrand, rows: { licenseNumber: string; name: string; county: string; licenseType: string }[], uploadedAt: string): Promise<StoreResult<{ count: number }>>;
+  listDismissals(brand: CrmBrand): Promise<StoreResult<{ id: string; brand: CrmBrand; repActor: string; actionKey: string; until: string }[]>>;
+  upsertDismissal(brand: CrmBrand, repActor: string, actionKey: string, until: string): Promise<StoreResult<{ id: string; brand: CrmBrand; repActor: string; actionKey: string; until: string }>>;
 }
 
-const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,created_at,updated_at,created_by,updated_by';
+const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,created_at,updated_at,created_by,updated_by';
 const ORDER_COLS = 'id,public_id,brand,account_id,distributor,order_ref,retailer_name,ordered_on,delivered_on,order_status,invoice_cents,retailer_payment_status,retailer_paid_on,payout_status,payout_cents,payout_on,opportunity_id,source,imported_at';
 const CONTACT_COLS = 'id,public_id,brand,account_id,name,title,email,phone,notes,preference,created_at,updated_at';
 const OPP_COLS = 'id,public_id,brand,account_id,name,stage,forecast_cents,expected_close_on,notes,loss_reason,next_action,next_action_on,product_line,quantity_units,updated_at';
@@ -363,6 +371,7 @@ function mapAccount(row: Record<string, unknown>): Account | null {
     displayName: String(row.display_name ?? ''),
     status: row.status as AccountStatus,
     city: row.city === null || row.city === undefined ? null : String(row.city),
+    county: row.county ? String(row.county) : null,
     notes: String(row.notes ?? ''),
     licenseRef: row.license_ref ? String(row.license_ref) : null,
     facilityRef: row.facility_ref ? String(row.facility_ref) : null,
@@ -764,12 +773,13 @@ class SupabaseCrmStore implements CrmStore {
     return this.rows(brand, query, mapAccount);
   }
 
-  async createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>> {
+  async createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; county?: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>> {
     const { data, error } = await this.db.from('crm_accounts').insert({
       brand,
       display_name: input.displayName,
       status: input.status,
       city: input.city,
+      county: input.county ?? null,
       notes: input.notes,
       license_ref: input.licenseRef ?? null,
       facility_ref: input.facilityRef ?? null,
@@ -791,11 +801,12 @@ class SupabaseCrmStore implements CrmStore {
     return { state: 'ok', value: account };
   }
 
-  async updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }) {
+  async updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; county?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }) {
     const row: Record<string, unknown> = { updated_by: actor };
     if (patch.displayName !== undefined) row.display_name = patch.displayName;
     if (patch.status !== undefined) row.status = patch.status;
     if (patch.city !== undefined) row.city = patch.city;
+    if (patch.county !== undefined) row.county = patch.county;
     if (patch.notes !== undefined) row.notes = patch.notes;
     if (patch.licenseRef !== undefined) row.license_ref = patch.licenseRef;
     if (patch.facilityRef !== undefined) row.facility_ref = patch.facilityRef;
@@ -1370,6 +1381,73 @@ class SupabaseCrmStore implements CrmStore {
   async updateEmailLog(brand: CrmBrand, id: string, lastEvent: EmailEvent, lastEventAt: string): Promise<StoreResult<EmailLog>> {
     const { data, error } = await this.db.from('crm_email_log').update({ last_event: lastEvent, last_event_at: lastEventAt }).eq('id', id).eq('brand', brand).select('id,brand,kind,resend_id,recipient,account_id,sent_at,last_event,last_event_at,created_by').maybeSingle();
     return this.one(brand, data as Record<string, unknown> | null, error, mapEmailLog);
+  }
+
+  listTerritories(brand: CrmBrand) {
+    return this.rows(brand, this.db.from('crm_territories').select('id,brand,region,rep_actor').eq('brand', brand), (row) => {
+      const itemBrand = asBrand(row.brand);
+      if (!itemBrand || typeof row.id !== 'string') return null;
+      return { id: row.id, brand: itemBrand, region: String(row.region ?? ''), repActor: String(row.rep_actor ?? '') };
+    });
+  }
+
+  async assignTerritory(brand: CrmBrand, region: string, repActor: string) {
+    const existing = await this.db.from('crm_territories').select('id').eq('brand', brand).eq('region', region).maybeSingle();
+    if (classify(existing.error)) return { state: classify(existing.error) as 'absent' | 'unavailable' };
+    if (existing.data?.id) {
+      const { data, error } = await this.db.from('crm_territories').update({ rep_actor: repActor }).eq('id', existing.data.id).eq('brand', brand).select('id,brand,region,rep_actor').maybeSingle();
+      if (classify(error) || error || !data) return { state: 'unavailable' as const };
+      return { state: 'ok' as const, value: { id: String(data.id), brand, region: String(data.region), repActor: String(data.rep_actor) } };
+    }
+    const { data, error } = await this.db.from('crm_territories').insert({ brand, region, rep_actor: repActor }).select('id,brand,region,rep_actor').maybeSingle();
+    if (classify(error) || error || !data) return { state: 'unavailable' as const };
+    return { state: 'ok' as const, value: { id: String(data.id), brand, region: String(data.region), repActor: String(data.rep_actor) } };
+  }
+
+  async clearTerritory(brand: CrmBrand, region: string) {
+    const { error } = await this.db.from('crm_territories').delete().eq('brand', brand).eq('region', region);
+    if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
+    if (error) return { state: 'unavailable' as const };
+    return { state: 'ok' as const, value: { cleared: true as const } };
+  }
+
+  listMarketRetailers(brand: CrmBrand) {
+    return this.rows(brand, this.db.from('crm_market_retailers').select('id,brand,license_number,name,county,license_type,uploaded_at').eq('brand', brand).order('uploaded_at', { ascending: false }).limit(5000), (row) => {
+      const itemBrand = asBrand(row.brand);
+      if (!itemBrand || typeof row.id !== 'string') return null;
+      return { id: row.id, brand: itemBrand, licenseNumber: String(row.license_number ?? ''), name: String(row.name ?? ''), county: String(row.county ?? ''), licenseType: String(row.license_type ?? ''), uploadedAt: String(row.uploaded_at ?? '') };
+    });
+  }
+
+  async insertMarketRetailers(brand: CrmBrand, rows: { licenseNumber: string; name: string; county: string; licenseType: string }[], uploadedAt: string) {
+    if (!rows.length) return { state: 'ok' as const, value: { count: 0 } };
+    const { error } = await this.db.from('crm_market_retailers').insert(rows.map((row) => ({
+      brand, license_number: row.licenseNumber, name: row.name, county: row.county, license_type: row.licenseType, uploaded_at: uploadedAt,
+    })));
+    if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
+    if (error) return { state: 'rejected' as const };
+    return { state: 'ok' as const, value: { count: rows.length } };
+  }
+
+  listDismissals(brand: CrmBrand) {
+    return this.rows(brand, this.db.from('crm_action_dismissals').select('id,brand,rep_actor,action_key,until').eq('brand', brand), (row) => {
+      const itemBrand = asBrand(row.brand);
+      if (!itemBrand || typeof row.id !== 'string') return null;
+      return { id: row.id, brand: itemBrand, repActor: String(row.rep_actor ?? ''), actionKey: String(row.action_key ?? ''), until: String(row.until ?? '').slice(0, 10) };
+    });
+  }
+
+  async upsertDismissal(brand: CrmBrand, repActor: string, actionKey: string, until: string) {
+    const existing = await this.db.from('crm_action_dismissals').select('id').eq('brand', brand).eq('rep_actor', repActor).eq('action_key', actionKey).maybeSingle();
+    if (classify(existing.error)) return { state: classify(existing.error) as 'absent' | 'unavailable' };
+    if (existing.data?.id) {
+      const { data, error } = await this.db.from('crm_action_dismissals').update({ until }).eq('id', existing.data.id).eq('brand', brand).select('id,brand,rep_actor,action_key,until').maybeSingle();
+      if (error || !data) return { state: 'unavailable' as const };
+      return { state: 'ok' as const, value: { id: String(data.id), brand, repActor: String(data.rep_actor), actionKey: String(data.action_key), until: String(data.until).slice(0, 10) } };
+    }
+    const { data, error } = await this.db.from('crm_action_dismissals').insert({ brand, rep_actor: repActor, action_key: actionKey, until }).select('id,brand,rep_actor,action_key,until').maybeSingle();
+    if (error || !data) return { state: 'unavailable' as const };
+    return { state: 'ok' as const, value: { id: String(data.id), brand, repActor: String(data.rep_actor), actionKey: String(data.action_key), until: String(data.until).slice(0, 10) } };
   }
 
   private one<T extends { brand: CrmBrand }>(

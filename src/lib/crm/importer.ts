@@ -9,6 +9,7 @@ import {
   parsePayoutToken,
   parseRetailerPaymentToken,
 } from './distributor';
+import { parseCounty } from './nyRegions';
 import {
   ACCOUNT_TYPE_LABELS,
   ACCOUNT_TYPES,
@@ -22,7 +23,7 @@ import {
   type ProductLine,
 } from './engine';
 
-export const IMPORT_KINDS = ['accounts', 'deals', 'orders'] as const;
+export const IMPORT_KINDS = ['accounts', 'deals', 'orders', 'retailers'] as const;
 export type ImportKind = (typeof IMPORT_KINDS)[number];
 export const IMPORT_BATCH = 100;
 export const IMPORT_MAX_ROWS = 2000;
@@ -64,6 +65,7 @@ const ACCOUNT_HEADERS: Record<string, string[]> = {
   displayName: ['account', 'account name', 'name', 'customer', 'customer name', 'retailer', 'store', 'dispensary', 'company', 'business name', 'licensee'],
   status: ['status', 'account status'],
   city: ['city', 'region', 'town', 'location'],
+  county: ['county'],
   accountType: ['account type', 'type', 'customer type', 'license type', 'buyer type'],
   leadSource: ['lead source', 'source', 'how found', 'channel', 'origin'],
   assignedRep: ['sales rep', 'rep', 'account manager', 'owner', 'assigned rep', 'salesperson'],
@@ -89,6 +91,13 @@ const ORDER_HEADERS: Record<string, string[]> = {
   distributor: ['distributor'],
 };
 
+const RETAILER_HEADERS: Record<string, string[]> = {
+  licenseNumber: ['license number', 'license', 'license no', 'license id'],
+  name: ['name', 'retailer', 'dispensary', 'business name'],
+  county: ['county'],
+  licenseType: ['license type', 'type'],
+};
+
 const DEAL_HEADERS: Record<string, string[]> = {
   accountName: ['account', 'account name', 'customer', 'customer name', 'retailer', 'store', 'dispensary', 'company'],
   name: ['deal', 'deal name', 'opportunity', 'opportunity name', 'order', 'title', 'name'],
@@ -103,7 +112,7 @@ const DEAL_HEADERS: Record<string, string[]> = {
 };
 
 export function matchHeaders(kind: ImportKind, header: string[]): { columns: Record<string, number>; unmatched: string[] } {
-  const table = kind === 'accounts' ? ACCOUNT_HEADERS : kind === 'orders' ? ORDER_HEADERS : DEAL_HEADERS;
+  const table = kind === 'accounts' ? ACCOUNT_HEADERS : kind === 'orders' ? ORDER_HEADERS : kind === 'retailers' ? RETAILER_HEADERS : DEAL_HEADERS;
   const columns: Record<string, number> = {};
   const unmatched: string[] = [];
   header.forEach((raw, index) => {
@@ -175,8 +184,8 @@ export function parseMoney(value: string): number | null | 'invalid' {
 export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[]; missing: string[]; unmatched: string[] } {
   const [header = [], ...body] = table;
   const { columns, unmatched } = matchHeaders(kind, header);
-  const required = kind === 'accounts' ? ['displayName'] : kind === 'orders' ? ['orderRef', 'retailerName'] : ['accountName', 'name'];
-  const missing = required.filter((key) => !(key in columns)).map((key) => ({ displayName: 'Account name', accountName: 'Account', name: 'Deal name', orderRef: 'Order ID', retailerName: 'Retailer' }[key] ?? key));
+  const required = kind === 'accounts' ? ['displayName'] : kind === 'orders' ? ['orderRef', 'retailerName'] : kind === 'retailers' ? ['licenseNumber', 'name', 'county'] : ['accountName', 'name'];
+  const missing = required.filter((key) => !(key in columns)).map((key) => ({ displayName: 'Account name', accountName: 'Account', name: 'Name', orderRef: 'Order ID', retailerName: 'Retailer', licenseNumber: 'License number', county: 'County' }[key] ?? key));
   if (missing.length) return { rows: [], missing, unmatched };
     const cell = (row: string[], key: string) => (key in columns ? (row[columns[key]] ?? '').trim() : '');
   const rows = body.slice(0, IMPORT_MAX_ROWS).map((row, index): ImportRow => {
@@ -224,6 +233,17 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
       };
       return { line, record, accountName: retailerName };
     }
+    if (kind === 'retailers') {
+      const licenseNumber = cell(row, 'licenseNumber');
+      const name = cell(row, 'name');
+      const countyRaw = cell(row, 'county');
+      const licenseType = cell(row, 'licenseType') || 'Unspecified';
+      if (!licenseNumber) return { line, error: 'License number is empty.' };
+      if (!name) return { line, error: 'Name is empty.' };
+      const county = parseCounty(countyRaw);
+      if (!county.ok || !county.county) return { line, error: county.ok ? 'County is empty.' : county.reason };
+      return { line, record: { licenseNumber, name, county: county.county, licenseType } };
+    }
     if (kind === 'accounts') {
       const record: Record<string, unknown> = { displayName: cell(row, 'displayName') };
       if (!record.displayName) return { line, error: 'Account name is empty.' };
@@ -243,6 +263,11 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
       if (expiry === 'invalid') return { line, error: `License expiry "${cell(row, 'licenseExpiry')}" is not a date.` };
       if (expiry) record.licenseExpiry = expiry;
       for (const key of ['city', 'assignedRep', 'licenseRef', 'notes']) if (cell(row, key)) record[key] = cell(row, key);
+      if (cell(row, 'county')) {
+        const county = parseCounty(cell(row, 'county'));
+        if (!county.ok) return { line, error: county.reason };
+        if (county.county) record.county = county.county;
+      }
       return { line, record };
     }
     const accountName = cell(row, 'accountName');
@@ -274,7 +299,8 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
 }
 
 export const TEMPLATES: Record<ImportKind, string> = {
-  accounts: 'Account name,Status,Account type,Lead source,Sales rep,City,License number,License expiry,Notes\n',
+  accounts: 'Account name,Status,Account type,Lead source,Sales rep,City,County,License number,License expiry,Notes\n',
+  retailers: 'License number,Name,County,License type\n',
   deals: 'Account,Deal name,Stage,Amount,Close date,Product line,Quantity,Next action,Loss reason,Notes\n',
   orders: 'Order ID,Retailer,License,Order Date,Delivery Date,Status,Invoice Total,Payment Status,Paid Date,Payout,Payout Date\n',
 };

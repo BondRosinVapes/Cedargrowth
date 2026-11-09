@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { PRODUCT_LINES, PRODUCT_LINE_LABELS, brandLabel, type CrmBrand } from '@/lib/crm/engine';
 import { VISIT_OUTCOMES, VISIT_OUTCOME_LABELS, mapsDirectionsUrl, type VisitOutcome } from '@/lib/crm/field';
+import { NextActions } from '@/app/admin/crm/TerritoryMap';
 
 type Account = { id: string; displayName: string; city: string | null };
 type Visit = { id: string; accountId: string; repActor: string; checkedInAt: string; checkedOutAt: string | null; outcome: VisitOutcome; notes: string };
@@ -187,6 +188,7 @@ export function FieldApp({ brands, actorId, label }: { brands: CrmBrand[]; actor
 
       <section className="flex flex-col gap-3">
         <h2 className="font-display text-heading-s text-primary">Today</h2>
+        <NextActions brand={brand} />
         {tasks.length === 0 ? <p className="text-body-m text-secondary">No open tasks for this session.</p> : tasks.map((task) => (
           <p key={task.id} className="border border-hairline bg-clinical px-3 py-3 text-body-m text-primary">{task.title}{task.dueOn ? `. Due ${task.dueOn}` : ''}</p>
         ))}

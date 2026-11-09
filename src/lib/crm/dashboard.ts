@@ -16,6 +16,7 @@ import {
   type OpportunityStage,
 } from './engine';
 import { summarizeDistributor, type DistributorSummary, type DistributorSummaryOrder } from './distributor';
+import { regionForCounty } from './nyRegions';
 
 export const STAGE_LABELS: Record<OpportunityStage, string> = {
   lead: 'Lead',
@@ -41,6 +42,7 @@ export type DashboardAccountRow = {
   id: string;
   status: string;
   city: string | null;
+  county?: string | null;
   assignedRep: string | null;
   accountType?: AccountType | null;
   leadSource?: LeadSource | null;
@@ -63,6 +65,7 @@ export type DashboardFilter = {
   month: number | null;
   rep: string | null;
   region: string | null;
+  territory?: string | null;
   accountType: AccountType | null;
   leadSource: LeadSource | null;
   stage: OpportunityStage | null;
@@ -118,6 +121,7 @@ export function parseDashboardFilter(params: URLSearchParams): DashboardFilter {
     month: Number.isInteger(month) && month >= 1 && month <= 12 ? month : null,
     rep: clean(params.get('rep')),
     region: clean(params.get('region')),
+    territory: clean(params.get('territory')),
     accountType: (ACCOUNT_TYPES as readonly string[]).includes(params.get('accountType') ?? '') ? (params.get('accountType') as AccountType) : null,
     leadSource: (LEAD_SOURCES as readonly string[]).includes(params.get('leadSource') ?? '') ? (params.get('leadSource') as LeadSource) : null,
     stage: (OPPORTUNITY_STAGES as readonly string[]).includes(stage ?? '') ? (stage as OpportunityStage) : null,
@@ -194,6 +198,7 @@ export function buildDashboard(input: {
   const scopedAccounts = accounts.filter((row) =>
     (!filter.rep || repOf(row) === filter.rep)
     && (!filter.region || regionOf(row) === filter.region)
+    && (!filter.territory || regionForCounty(row.county) === filter.territory)
     && (!filter.accountType || row.accountType === filter.accountType)
     && (!filter.leadSource || row.leadSource === filter.leadSource));
   const accountById = new Map(scopedAccounts.map((row) => [row.id, row]));

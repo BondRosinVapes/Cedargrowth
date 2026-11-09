@@ -3,6 +3,7 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import { CRM_HREF, OPEN_STAGES, formatForecast, type CrmBrand, type OpportunityStage } from './engine';
+import { nextBestActions } from './nextAction';
 import { buildDashboard, type DashboardAccountRow, type DashboardFilter, type DashboardOpportunityRow, type DashboardTaskRow } from './dashboard';
 import type { StageEvent } from './store';
 
@@ -13,7 +14,7 @@ const EMPTY_FILTER: DashboardFilter = {
   year: null, month: null, rep: null, region: null, accountType: null, leadSource: null, stage: null, status: null,
 };
 
-export type DigestVisit = { brand: CrmBrand; repActor: string; checkedInAt: string };
+export type DigestVisit = { brand: CrmBrand; repActor: string; checkedInAt: string; accountId?: string };
 export type DigestOrder = {
   brand: CrmBrand;
   distributor: string;
@@ -27,6 +28,7 @@ export type DigestOrder = {
   payoutOn: string | null;
   importedAt: string;
   retailerName: string;
+  accountId?: string | null;
 };
 export type DigestContact = { brand: CrmBrand; name: string; email: string | null; phone: string | null; preference: string };
 
@@ -52,6 +54,7 @@ export type DigestModel = {
   payoutCents: number | null;
   reps: { rep: string; visits: number; sampleFollowUps: number; overdueTasks: number; pastClose: number; nextActions: readonly string[] }[];
   hoodie: readonly never[];
+  inactive: { title: string; reason: string }[];
 };
 
 export type NyWeek = {
@@ -165,11 +168,6 @@ export function digestConfigured(brand: CrmBrand): boolean {
   return Boolean(process.env.RESEND_API_KEY && digestFromAddress() && digestRecipients(brand).length > 0);
 }
 
-/** Placeholder until 7B ships. Returns no rows and no sample actions. */
-export function nextBestActions(_rep: string): readonly string[] {
-  return [];
-}
-
 /** 6C is not built. Returns no rows. */
 export function hoodieSignals(): readonly never[] {
   return [];
@@ -196,9 +194,9 @@ function moneyOrData(cents: number | null, labeled: string): string {
 export function buildDigest(input: {
   brand: CrmBrand;
   nowMs: number;
-  accounts: readonly (DashboardAccountRow & { createdAt?: string })[];
-  opportunities: readonly (DashboardOpportunityRow & { createdAt?: string })[];
-  tasks: readonly (DashboardTaskRow & { ownerActor?: string | null; title?: string })[];
+  accounts: readonly (DashboardAccountRow & { createdAt?: string; displayName?: string; licenseExpiry?: string | null })[];
+  opportunities: readonly (DashboardOpportunityRow & { createdAt?: string; name?: string })[];
+  tasks: readonly (DashboardTaskRow & { id?: string; accountId?: string | null; ownerActor?: string | null; title?: string })[];
   activity?: readonly { brand: CrmBrand; createdAt: string }[];
   notes?: readonly { brand: CrmBrand; accountId: string; createdAt: string }[];
   visits?: readonly DigestVisit[];
@@ -242,7 +240,7 @@ export function buildDigest(input: {
     const key = name.trim() || 'Unassigned';
     const found = reps.get(key);
     if (found) return found;
-    const row = { rep: key, visits: 0, sampleFollowUps: 0, overdueTasks: 0, pastClose: 0, nextActions: nextBestActions(key) };
+    const row = { rep: key, visits: 0, sampleFollowUps: 0, overdueTasks: 0, pastClose: 0, nextActions: [] as string[] };
     reps.set(key, row);
     return row;
   };
@@ -292,8 +290,27 @@ export function buildDigest(input: {
     invoicedCents: hasImport ? (invoiceKnown.length ? invoiceKnown.reduce((sum, value) => sum + value, 0) : null) : null,
     unpaidPast30: hasImport ? orders.filter((row) => (row.retailerPaymentStatus === 'unpaid' || row.retailerPaymentStatus === 'partial') && !!row.orderedOn && row.orderedOn < cutoffIso && row.orderStatus !== 'cancelled' && row.orderStatus !== 'returned').length : null,
     payoutCents: hasImport ? (payoutKnown.length ? payoutKnown.reduce((sum, value) => sum + value, 0) : null) : null,
-    reps: [...reps.values()].filter((row) => row.visits || row.sampleFollowUps || row.overdueTasks || row.pastClose || row.rep !== 'Unassigned').sort((a, b) => a.rep.localeCompare(b.rep)),
+    reps: [...reps.values()].filter((row) => row.visits || row.sampleFollowUps || row.overdueTasks || row.pastClose || row.rep !== 'Unassigned').sort((a, b) => a.rep.localeCompare(b.rep)).map((row) => {
+      const report = nextBestActions({
+        brand,
+        rep: row.rep,
+        today: week.today,
+        accounts: accounts.map((account) => ({ id: account.id, brand: account.brand, displayName: account.displayName || account.id, status: account.status, county: account.county ?? null, assignedRep: account.assignedRep, licenseExpiry: account.licenseExpiry ?? null })),
+        tasks: tasks.map((task) => ({ id: task.id || task.title || 'task', brand: task.brand, accountId: task.accountId ?? null, title: task.title || '', status: task.status, dueOn: task.dueOn, ownerActor: task.ownerActor ?? null })),
+        deals: opportunities.map((deal) => ({ id: deal.id || deal.accountId, brand: deal.brand, accountId: deal.accountId, name: deal.name || 'Deal', stage: deal.stage, expectedCloseOn: deal.expectedCloseOn })),
+        notes: (input.notes ?? []).filter((note) => note.brand === brand),
+        visits: (input.visits ?? []).filter((visit) => visit.brand === brand).map((visit) => ({ brand: visit.brand, accountId: visit.accountId || '', checkedInAt: visit.checkedInAt })),
+        events: (input.events ?? []).filter((event) => event.brand === brand).map((event) => ({ brand: event.brand, opportunityId: event.opportunityId, at: event.at })),
+        orders: orders.map((order) => ({ brand: order.brand, accountId: order.accountId ?? null, distributor: order.distributor, orderStatus: order.orderStatus, deliveredOn: order.deliveredOn, orderedOn: order.orderedOn, retailerPaymentStatus: order.retailerPaymentStatus })),
+        territories: [],
+        dismissals: [],
+      });
+      return { ...row, nextActions: report.actions.slice(0, 5).map((action) => `${action.reason}. ${action.href}`) };
+    }),
     hoodie: hoodieSignals(),
+    inactive: nextBestActions({
+      brand, rep: '', today: week.today, accounts: [], tasks: [], deals: [], notes: [], visits: [], events: [], orders: orders.map((order) => ({ brand: order.brand, accountId: order.accountId ?? null, distributor: order.distributor, orderStatus: order.orderStatus, deliveredOn: order.deliveredOn, orderedOn: order.orderedOn, retailerPaymentStatus: order.retailerPaymentStatus })), territories: [], dismissals: [],
+    }).inactive,
   };
 }
 
@@ -345,6 +362,8 @@ export function renderDigestText(model: DigestModel): string {
       rep.nextActions.length ? `Next actions: ${rep.nextActions.join('; ')}` : 'Next actions: none yet',
     ]) : ['No rep activity this week.']),
     '',
+    'Not active yet',
+    ...model.inactive.map((row) => `${row.title}: ${row.reason}`),
     'Hoodie: not connected.',
     `Dashboard: ${model.href}`,
   ];
