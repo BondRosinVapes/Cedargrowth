@@ -21,6 +21,7 @@ import {
 } from './engine';
 import { DISTRIBUTORS, ORDER_SOURCES, ORDER_STATUSES, PAYOUT_STATUSES, RETAILER_PAYMENT_STATUSES, type Distributor, type DistributorOrderDraft, type OrderSource, type OrderStatus, type PayoutStatus, type RetailerPaymentStatus } from './distributor';
 import { sampleTaskTitle, type MediaKind, type VisitOutcome } from './field';
+import { confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, reorderDeal, type ReleasedBatch, type ReorderLine } from './reorder';
 
 export type StoreResult<T> =
   | { state: 'ok'; value: T }
@@ -205,6 +206,47 @@ export type Media = {
   createdAt: string;
 };
 
+export type Batch = {
+  id: string;
+  publicId: string;
+  brand: CrmBrand;
+  productId: string;
+  batchNumber: string;
+  labName: string;
+  testedOn: string;
+  coaStoragePath: string | null;
+  released: boolean;
+  releasedAt: string | null;
+  createdBy: string;
+  createdAt: string;
+};
+
+export type ReorderLink = {
+  id: string;
+  publicId: string;
+  brand: CrmBrand;
+  accountId: string;
+  tokenHash: string;
+  expiresAt: string;
+  revokedAt: string | null;
+  createdBy: string;
+  createdAt: string;
+};
+
+export type ReorderRequest = {
+  id: string;
+  publicId: string;
+  brand: CrmBrand;
+  accountId: string;
+  linkId: string;
+  lines: ReorderLine[];
+  buyerName: string;
+  buyerEmail: string;
+  note: string;
+  createdAt: string;
+  status: 'received' | 'converted' | 'declined';
+};
+
 export type Counts = {
   accounts: number;
   contacts: number;
@@ -265,6 +307,15 @@ export interface CrmStore {
   createSample(brand: CrmBrand, actor: string, input: { accountId: string; visitId: string | null; productLine: ProductLine; quantityUnits: number; leftOn: string; followUpOn: string; notes: string }): Promise<StoreResult<{ sample: Sample; task: Task }>>;
   listMedia(brand: CrmBrand): Promise<StoreResult<Media[]>>;
   createMedia(brand: CrmBrand, actor: string, input: { id: string; accountId: string; visitId: string | null; kind: MediaKind; storagePath: string; contentType: string; byteSize: number; durationSeconds: number | null }): Promise<StoreResult<Media>>;
+  listBatches(brand: CrmBrand): Promise<StoreResult<Batch[]>>;
+  createBatch(brand: CrmBrand, actor: string, input: { id: string; productId: string; batchNumber: string; labName: string; testedOn: string; coaStoragePath: string }): Promise<StoreResult<Batch>>;
+  releaseBatch(brand: CrmBrand, id: string): Promise<StoreResult<Batch>>;
+  listReorderLinks(brand: CrmBrand, accountId: string): Promise<StoreResult<ReorderLink[]>>;
+  createReorderLink(brand: CrmBrand, actor: string, accountId: string, nowMs: number): Promise<StoreResult<{ link: ReorderLink; token: string }>>;
+  revokeReorderLink(brand: CrmBrand, id: string, nowMs: number): Promise<StoreResult<ReorderLink>>;
+  openReorder(token: string, nowMs: number): Promise<StoreResult<{ accountName: string; distributor: string | null; assignedRep: string | null; batches: ReleasedBatch[]; status: 'ok' | 'unavailable' | 'inactive' }>>;
+  submitReorder(token: string, nowMs: number, input: { lines: ReorderLine[]; buyerName: string; buyerEmail: string; note: string }): Promise<StoreResult<{ request: ReorderRequest; opportunity: Opportunity; confirmation: string }> | { state: 'closed' }>;
+  lookupReleasedBatch(brand: CrmBrand, batchNumber: string): Promise<StoreResult<Batch | null>>;
 }
 
 const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,created_at,updated_at,created_by,updated_by';
@@ -461,6 +512,79 @@ function mapMedia(row: Record<string, unknown>): Media | null {
     durationSeconds: typeof row.duration_seconds === 'number' ? row.duration_seconds : null,
     createdBy: String(row.created_by ?? ''),
     createdAt: String(row.created_at ?? ''),
+  };
+}
+
+function mapBatch(row: Record<string, unknown>): Batch | null {
+  const brand = asBrand(row.brand);
+  if (!brand || typeof row.id !== 'string') return null;
+  return {
+    id: row.id,
+    publicId: String(row.public_id ?? ''),
+    brand,
+    productId: String(row.product_id ?? ''),
+    batchNumber: String(row.batch_number ?? ''),
+    labName: String(row.lab_name ?? ''),
+    testedOn: String(row.tested_on ?? '').slice(0, 10),
+    coaStoragePath: row.coa_storage_path ? String(row.coa_storage_path) : null,
+    released: row.released === true,
+    releasedAt: row.released_at ? String(row.released_at) : null,
+    createdBy: String(row.created_by ?? ''),
+    createdAt: String(row.created_at ?? ''),
+  };
+}
+
+function mapReorderLink(row: Record<string, unknown>): ReorderLink | null {
+  const brand = asBrand(row.brand);
+  if (!brand || typeof row.id !== 'string' || typeof row.account_id !== 'string' || typeof row.token_hash !== 'string') return null;
+  return {
+    id: row.id,
+    publicId: String(row.public_id ?? ''),
+    brand,
+    accountId: row.account_id,
+    tokenHash: row.token_hash,
+    expiresAt: String(row.expires_at ?? ''),
+    revokedAt: row.revoked_at ? String(row.revoked_at) : null,
+    createdBy: String(row.created_by ?? ''),
+    createdAt: String(row.created_at ?? ''),
+  };
+}
+
+function mapReorderRequest(row: Record<string, unknown>): ReorderRequest | null {
+  const brand = asBrand(row.brand);
+  const status = row.status === 'received' || row.status === 'converted' || row.status === 'declined' ? row.status : null;
+  if (!brand || typeof row.id !== 'string' || typeof row.account_id !== 'string' || typeof row.link_id !== 'string' || !status || !Array.isArray(row.lines)) return null;
+  const lines: ReorderLine[] = [];
+  for (const line of row.lines) {
+    if (!line || typeof line !== 'object') return null;
+    const record = line as Record<string, unknown>;
+    if (typeof record.productId !== 'string' || typeof record.batchNumber !== 'string' || typeof record.quantityUnits !== 'number') return null;
+    lines.push({ productId: record.productId, batchNumber: record.batchNumber, quantityUnits: record.quantityUnits });
+  }
+  return {
+    id: row.id,
+    publicId: String(row.public_id ?? ''),
+    brand,
+    accountId: row.account_id,
+    linkId: row.link_id,
+    lines,
+    buyerName: String(row.buyer_name ?? ''),
+    buyerEmail: String(row.buyer_email ?? ''),
+    note: String(row.note ?? ''),
+    createdAt: String(row.created_at ?? ''),
+    status,
+  };
+}
+
+function asReleased(batch: Batch): ReleasedBatch {
+  return {
+    id: batch.id,
+    productId: batch.productId,
+    batchNumber: batch.batchNumber,
+    labName: batch.labName,
+    testedOn: batch.testedOn,
+    released: batch.released,
+    coaStoragePath: batch.coaStoragePath,
   };
 }
 
@@ -1045,6 +1169,130 @@ class SupabaseCrmStore implements CrmStore {
       created_by: actor,
     }).select('id,public_id,brand,account_id,visit_id,kind,storage_path,content_type,byte_size,duration_seconds,created_by,created_at').maybeSingle();
     return this.one(brand, data as Record<string, unknown> | null, error, mapMedia);
+  }
+
+  listBatches(brand: CrmBrand) {
+    return this.rows(brand, this.db.from('crm_batches').select('id,public_id,brand,product_id,batch_number,lab_name,tested_on,coa_storage_path,released,released_at,created_by,created_at').eq('brand', brand).order('tested_on', { ascending: false }).limit(200), mapBatch);
+  }
+
+  async createBatch(brand: CrmBrand, actor: string, input: { id: string; productId: string; batchNumber: string; labName: string; testedOn: string; coaStoragePath: string }): Promise<StoreResult<Batch>> {
+    const { data, error } = await this.db.from('crm_batches').insert({
+      id: input.id,
+      brand,
+      product_id: input.productId,
+      batch_number: input.batchNumber,
+      lab_name: input.labName,
+      tested_on: input.testedOn,
+      coa_storage_path: input.coaStoragePath,
+      released: false,
+      created_by: actor,
+    }).select('id,public_id,brand,product_id,batch_number,lab_name,tested_on,coa_storage_path,released,released_at,created_by,created_at').maybeSingle();
+    return this.one(brand, data as Record<string, unknown> | null, error, mapBatch);
+  }
+
+  async releaseBatch(brand: CrmBrand, id: string): Promise<StoreResult<Batch>> {
+    const { data, error } = await this.db.from('crm_batches').update({ released: true, released_at: new Date().toISOString() }).eq('id', id).eq('brand', brand).eq('released', false).not('coa_storage_path', 'is', null).select('id,public_id,brand,product_id,batch_number,lab_name,tested_on,coa_storage_path,released,released_at,created_by,created_at').maybeSingle();
+    return this.one(brand, data as Record<string, unknown> | null, error, mapBatch);
+  }
+
+  listReorderLinks(brand: CrmBrand, accountId: string) {
+    return this.rows(brand, this.db.from('crm_reorder_links').select('id,public_id,brand,account_id,token_hash,expires_at,revoked_at,created_by,created_at').eq('brand', brand).eq('account_id', accountId).order('created_at', { ascending: false }).limit(50), mapReorderLink);
+  }
+
+  async createReorderLink(brand: CrmBrand, actor: string, accountId: string, nowMs: number): Promise<StoreResult<{ link: ReorderLink; token: string }>> {
+    const account = await this.db.from('crm_accounts').select('id,brand').eq('id', accountId).eq('brand', brand).maybeSingle();
+    if (classify(account.error)) return { state: classify(account.error) as 'absent' | 'unavailable' };
+    if (!account.data || account.data.brand !== brand) return { state: 'rejected' };
+    const minted = newReorderToken();
+    const { data, error } = await this.db.from('crm_reorder_links').insert({
+      brand,
+      account_id: accountId,
+      token_hash: minted.tokenHash,
+      expires_at: defaultExpiry(nowMs),
+      created_by: actor,
+    }).select('id,public_id,brand,account_id,token_hash,expires_at,revoked_at,created_by,created_at').maybeSingle();
+    const saved = this.one(brand, data as Record<string, unknown> | null, error, mapReorderLink);
+    if (saved.state !== 'ok') return saved;
+    return { state: 'ok', value: { link: saved.value, token: minted.token } };
+  }
+
+  async revokeReorderLink(brand: CrmBrand, id: string, nowMs: number): Promise<StoreResult<ReorderLink>> {
+    const { data, error } = await this.db.from('crm_reorder_links').update({ revoked_at: new Date(nowMs).toISOString() }).eq('id', id).eq('brand', brand).is('revoked_at', null).select('id,public_id,brand,account_id,token_hash,expires_at,revoked_at,created_by,created_at').maybeSingle();
+    return this.one(brand, data as Record<string, unknown> | null, error, mapReorderLink);
+  }
+
+  async openReorder(token: string, nowMs: number): Promise<StoreResult<{ accountName: string; distributor: string | null; assignedRep: string | null; batches: ReleasedBatch[]; status: 'ok' | 'unavailable' | 'inactive' }>> {
+    const link = await this.db.from('crm_reorder_links').select('id,brand,account_id,expires_at,revoked_at').eq('token_hash', hashReorderToken(token)).maybeSingle();
+    if (classify(link.error)) return { state: classify(link.error) as 'absent' | 'unavailable' };
+    if (!link.data || !asBrand(link.data.brand)) return { state: 'ok', value: { accountName: '', distributor: null, assignedRep: null, batches: [], status: 'unavailable' } };
+    const account = await this.db.from('crm_accounts').select('id,brand,display_name,status,distributor,assigned_rep').eq('id', link.data.account_id).eq('brand', link.data.brand).maybeSingle();
+    if (classify(account.error)) return { state: classify(account.error) as 'absent' | 'unavailable' };
+    const access = linkAccess(
+      { expiresAt: String(link.data.expires_at ?? ''), revokedAt: link.data.revoked_at ? String(link.data.revoked_at) : null },
+      account.data ? String(account.data.status ?? '') : null,
+      nowMs,
+    );
+    if (access !== 'ok' || !account.data) return { state: 'ok', value: { accountName: '', distributor: null, assignedRep: null, batches: [], status: access === 'inactive' ? 'inactive' : 'unavailable' } };
+    const batches = await this.listBatches(asBrand(link.data.brand) as CrmBrand);
+    if (batches.state !== 'ok') return batches;
+    return {
+      state: 'ok',
+      value: {
+        accountName: String(account.data.display_name ?? ''),
+        distributor: account.data.distributor ? String(account.data.distributor) : null,
+        assignedRep: account.data.assigned_rep ? String(account.data.assigned_rep) : null,
+        batches: currentReleased(batches.value.map(asReleased)),
+        status: 'ok',
+      },
+    };
+  }
+
+  async submitReorder(token: string, nowMs: number, input: { lines: ReorderLine[]; buyerName: string; buyerEmail: string; note: string }): Promise<StoreResult<{ request: ReorderRequest; opportunity: Opportunity; confirmation: string }> | { state: 'closed' }> {
+    const opened = await this.openReorder(token, nowMs);
+    if (opened.state !== 'ok') return opened;
+    if (opened.value.status !== 'ok') return { state: 'closed' };
+    const link = await this.db.from('crm_reorder_links').select('id,brand,account_id').eq('token_hash', hashReorderToken(token)).maybeSingle();
+    if (classify(link.error)) return { state: classify(link.error) as 'absent' | 'unavailable' };
+    const brand = asBrand(link.data?.brand);
+    if (!link.data || !brand || typeof link.data.account_id !== 'string' || typeof link.data.id !== 'string') return { state: 'closed' };
+    const parsed = parseReorderLines(input.lines, opened.value.batches);
+    if (!parsed.ok) return { state: 'rejected' };
+    const deal = reorderDeal(parsed.lines, new Date(nowMs).toISOString().slice(0, 10));
+    if (!deal) return { state: 'rejected' };
+    const recorded = await this.db.rpc('crm_record_reorder', {
+      p_brand: brand,
+      p_account_id: link.data.account_id,
+      p_link_id: link.data.id,
+      p_lines: parsed.lines,
+      p_buyer_name: input.buyerName,
+      p_buyer_email: input.buyerEmail,
+      p_note: input.note,
+      p_deal_name: deal.name,
+      p_product_line: deal.productLine,
+      p_quantity: deal.quantityUnits,
+    });
+    if (recorded.error) {
+      const message = String(recorded.error.message || '');
+      if (message.includes('reorder link is not available') || message.includes('reorder line is not available')) return { state: 'closed' };
+      return { state: classify(recorded.error) ?? 'unavailable' };
+    }
+    const payload = recorded.data as { request_id?: string; opportunity_id?: string } | null;
+    const requestRow = await this.db.from('crm_reorder_requests').select('id,public_id,brand,account_id,link_id,lines,buyer_name,buyer_email,note,created_at,status').eq('id', payload?.request_id ?? '').eq('brand', brand).maybeSingle();
+    const opportunityRow = await this.db.from('crm_opportunities').select(OPP_COLS).eq('id', payload?.opportunity_id ?? '').eq('brand', brand).maybeSingle();
+    const request = this.one(brand, requestRow.data as Record<string, unknown> | null, requestRow.error, mapReorderRequest);
+    const opportunity = this.one(brand, opportunityRow.data as Record<string, unknown> | null, opportunityRow.error, mapOpportunity);
+    if (request.state !== 'ok' || opportunity.state !== 'ok') return { state: 'unavailable' };
+    return { state: 'ok', value: { request: request.value, opportunity: opportunity.value, confirmation: confirmationFor(opened.value.distributor) } };
+  }
+
+  async lookupReleasedBatch(brand: CrmBrand, batchNumber: string): Promise<StoreResult<Batch | null>> {
+    const { data, error } = await this.db.from('crm_batches').select('id,public_id,brand,product_id,batch_number,lab_name,tested_on,coa_storage_path,released,released_at,created_by,created_at').eq('brand', brand).eq('batch_number', batchNumber).eq('released', true).not('coa_storage_path', 'is', null).maybeSingle();
+    if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
+    if (error) return { state: 'unavailable' };
+    if (!data) return { state: 'ok', value: null };
+    const item = mapBatch(data as Record<string, unknown>);
+    if (!item || item.brand !== brand || !item.released) return { state: 'unavailable' };
+    return { state: 'ok', value: item };
   }
 
   private one<T extends { brand: CrmBrand }>(

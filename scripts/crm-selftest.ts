@@ -8,6 +8,7 @@ import { mapRows, parseCsv, parseDate, parseMoney } from '../src/lib/crm/importe
 import { matchDistributorAccount } from '../src/lib/crm/distributor.ts';
 import { productionForecast, stageWinRates } from '../src/lib/crm/forecast.ts';
 import { roundLocation, sampleTaskTitle, validateMediaUpload } from '../src/lib/crm/field.ts';
+import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, rateLimited, reorderDeal } from '../src/lib/crm/reorder.ts';
 import {
   activePolicy,
   alertDedupeKey,
@@ -61,6 +62,10 @@ import {
   handleVisit,
   handleSample,
   handleMedia,
+  handleBatches,
+  handleReorderLinks,
+  handlePublicReorder,
+  handleTransparencyBatch,
   handleNotes,
   handleOpportunityCollection,
   handleReports,
@@ -541,6 +546,74 @@ class MemoryCrm implements CrmStore {
     this.media.push(row);
     return { state: 'ok' as const, value: row };
   }
+  batches: import('../src/lib/crm/store.ts').Batch[] = [];
+  links: import('../src/lib/crm/store.ts').ReorderLink[] = [];
+  requests: import('../src/lib/crm/store.ts').ReorderRequest[] = [];
+  async listBatches(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.batches.filter((row) => row.brand === brand) }; }
+  async createBatch(brand: 'cedargrowth' | 'bond', actor: string, input: { id: string; productId: string; batchNumber: string; labName: string; testedOn: string; coaStoragePath: string }) {
+    if (this.batches.some((row) => row.brand === brand && row.batchNumber === input.batchNumber)) return { state: 'rejected' as const };
+    const row = { id: input.id, publicId: 'test-only:batch', brand, productId: input.productId, batchNumber: input.batchNumber, labName: input.labName, testedOn: input.testedOn, coaStoragePath: input.coaStoragePath, released: false, releasedAt: null, createdBy: actor, createdAt: '2026-11-09T18:00:00Z' };
+    this.batches.push(row);
+    return { state: 'ok' as const, value: row };
+  }
+  async releaseBatch(brand: 'cedargrowth' | 'bond', id: string) {
+    const batch = this.batches.find((row) => row.id === id && row.brand === brand && !row.released && row.coaStoragePath);
+    if (!batch) return { state: 'missing' as const };
+    batch.released = true;
+    batch.releasedAt = '2026-11-09T18:05:00Z';
+    return { state: 'ok' as const, value: batch };
+  }
+  async listReorderLinks(brand: 'cedargrowth' | 'bond', accountId: string) { return { state: 'ok' as const, value: this.links.filter((row) => row.brand === brand && row.accountId === accountId) }; }
+  async createReorderLink(brand: 'cedargrowth' | 'bond', actor: string, accountId: string, nowMs: number) {
+    const account = this.accounts.find((row) => row.id === accountId && row.brand === brand);
+    if (!account) return { state: 'rejected' as const };
+    const minted = newReorderToken();
+    const row = { id: this.id(), publicId: 'test-only:link', brand, accountId, tokenHash: minted.tokenHash, expiresAt: defaultExpiry(nowMs), revokedAt: null, createdBy: actor, createdAt: new Date(nowMs).toISOString() };
+    this.links.push(row);
+    return { state: 'ok' as const, value: { link: row, token: minted.token } };
+  }
+  async revokeReorderLink(brand: 'cedargrowth' | 'bond', id: string, nowMs: number) {
+    const link = this.links.find((row) => row.id === id && row.brand === brand && !row.revokedAt);
+    if (!link) return { state: 'missing' as const };
+    link.revokedAt = new Date(nowMs).toISOString();
+    return { state: 'ok' as const, value: link };
+  }
+  async openReorder(token: string, nowMs: number) {
+    const link = this.links.find((row) => row.tokenHash === hashReorderToken(token));
+    if (!link) return { state: 'ok' as const, value: { accountName: '', distributor: null, assignedRep: null, batches: [], status: 'unavailable' as const } };
+    const account = this.accounts.find((row) => row.id === link.accountId && row.brand === link.brand);
+    const access = linkAccess(link, account?.status ?? null, nowMs);
+    if (access !== 'ok' || !account) return { state: 'ok' as const, value: { accountName: '', distributor: null, assignedRep: null, batches: [], status: access === 'inactive' ? 'inactive' as const : 'unavailable' as const } };
+    const batches = currentReleased(this.batches.filter((row) => row.brand === link.brand).map((row) => ({ id: row.id, productId: row.productId, batchNumber: row.batchNumber, labName: row.labName, testedOn: row.testedOn, released: row.released, coaStoragePath: row.coaStoragePath })));
+    return { state: 'ok' as const, value: { accountName: account.displayName, distributor: account.distributor, assignedRep: account.assignedRep, batches, status: 'ok' as const } };
+  }
+  async submitReorder(token: string, nowMs: number, input: { lines: { productId: string; batchNumber: string; quantityUnits: number }[]; buyerName: string; buyerEmail: string; note: string }) {
+    const opened = await this.openReorder(token, nowMs);
+    if (opened.state !== 'ok') return opened;
+    if (opened.value.status !== 'ok') return { state: 'closed' as const };
+    const link = this.links.find((row) => row.tokenHash === hashReorderToken(token));
+    const account = link ? this.accounts.find((row) => row.id === link.accountId && row.brand === link.brand) : undefined;
+    if (!link || !account) return { state: 'closed' as const };
+    const parsed = parseReorderLines(input.lines, opened.value.batches);
+    if (!parsed.ok) return { state: 'rejected' as const };
+    const deal = reorderDeal(parsed.lines, new Date(nowMs).toISOString().slice(0, 10));
+    if (!deal) return { state: 'rejected' as const };
+    const beforeRequests = this.requests.length;
+    const beforeDeals = this.opportunities.length;
+    const opportunity = await this.createOpportunity(link.brand, 'reorder request', { accountId: account.id, name: deal.name, stage: 'proposal', forecastCents: null, notes: 'Reorder request. No price is committed and no payment was taken.', productLine: deal.productLine, quantityUnits: deal.quantityUnits });
+    if (opportunity.state !== 'ok') {
+      this.requests.length = beforeRequests;
+      this.opportunities.length = beforeDeals;
+      return opportunity;
+    }
+    const request = { id: this.id(), publicId: 'test-only:request', brand: link.brand, accountId: account.id, linkId: link.id, lines: parsed.lines, buyerName: input.buyerName, buyerEmail: input.buyerEmail, note: input.note, createdAt: new Date(nowMs).toISOString(), status: 'received' as const };
+    this.requests.push(request);
+    return { state: 'ok' as const, value: { request, opportunity: opportunity.value, confirmation: confirmationFor(account.distributor) } };
+  }
+  async lookupReleasedBatch(brand: 'cedargrowth' | 'bond', batchNumber: string) {
+    const batch = this.batches.find((row) => row.brand === brand && row.batchNumber === batchNumber && row.released && row.coaStoragePath) ?? null;
+    return { state: 'ok' as const, value: batch };
+  }
 }
 
 const memory = new MemoryCrm();
@@ -715,6 +788,62 @@ assert(sampleSaved.status === 201 && sampleTask.dueOn === '2026-11-20' && sample
 const wrongType = await handleMedia({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/media', { brand: 'cedargrowth', accountId, kind: 'shelf_photo', contentType: 'image/gif', byteSize: 1000 }), store: memory }, 'POST');
 const tooBig = await handleMedia({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/media', { brand: 'cedargrowth', accountId, kind: 'shelf_photo', contentType: 'image/jpeg', byteSize: 8 * 1024 * 1024 + 1 }), store: memory }, 'POST');
 assert(wrongType.status === 400 && tooBig.status === 400 && validateMediaUpload({ kind: 'shelf_photo', contentType: 'image/gif', byteSize: 1000, durationSeconds: null }).ok === false, 'the upload route rejects the wrong content type and oversize files');
+const nowMs = Date.parse('2026-11-09T18:00:00Z');
+const tokenStates = [
+  linkAccess(null, 'active', nowMs),
+  linkAccess({ expiresAt: '2026-11-01T00:00:00Z', revokedAt: null }, 'active', nowMs),
+  linkAccess({ expiresAt: '2026-12-01T00:00:00Z', revokedAt: '2026-11-08T00:00:00Z' }, 'active', nowMs),
+];
+assert(tokenStates.every((state) => state === 'unavailable') && new Set(tokenStates).size === 1, 'expired, revoked and missing tokens are the same result');
+assert(linkAccess({ expiresAt: '2026-12-01T00:00:00Z', revokedAt: null }, 'paused', nowMs) === 'inactive', 'an inactive account is not an open reorder');
+const hidden = currentReleased([
+  { id: '1', productId: 'vape-1g', batchNumber: 'HIDDEN', labName: 'Lab', testedOn: '2026-11-01', released: false, coaStoragePath: 'cedargrowth/1.pdf' },
+  { id: '2', productId: 'vape-1g', batchNumber: 'LIVE', labName: 'Lab', testedOn: '2026-11-02', released: true, coaStoragePath: 'cedargrowth/2.pdf' },
+]);
+assert(hidden.length === 1 && hidden[0].batchNumber === 'LIVE', 'unreleased batches never appear publicly');
+assert(rateLimited(1000, [900, 950], 200, 2).limited === true && rateLimited(1000, [100], 200, 2).limited === false, 'rate limit counts hits inside the window');
+assert(reorderDeal([{ productId: 'vape-1g', batchNumber: 'LIVE', quantityUnits: 4 }], '2026-11-09')?.productLine === 'vape', 'a single format stays that product line');
+assert(confirmationFor('nabis') === NABIS_CONFIRMATION, 'a Nabis account uses the Nabis confirmation');
+const salesBatch = await handleBatches({ actorId: 'sales-1', grants: salesGrant, request: crmReq('POST', '/api/admin/crm/batches', { brand: 'cedargrowth', productId: 'vape-1g', batchNumber: 'CG-1', labName: 'Lab', testedOn: '2026-11-01', contentType: 'application/pdf', byteSize: 1200 }), store: memory }, 'POST');
+assert(salesBatch.status === 403 && memory.batches.length === 0, 'a salesperson cannot record a batch');
+const recorded = await handleBatches({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/batches', { brand: 'cedargrowth', productId: 'vape-1g', batchNumber: 'CG-1', labName: 'North Lab', testedOn: '2026-11-01', contentType: 'application/pdf', byteSize: 1200 }), store: memory }, 'POST');
+const batchId = String((recorded.body.batch as { id?: string } | undefined)?.id || '');
+assert(recorded.status === 201 && memory.batches.every((row) => row.released === false), 'a new batch stays unreleased');
+const activeShop = await memory.createAccount('cedargrowth', 'gary@cedargrowthco.com', { displayName: 'TEST ONLY active shop', status: 'active', city: 'Buffalo', notes: '', distributor: 'nabis', assignedRep: 'rep@example.com' });
+const activeId = activeShop.state === 'ok' ? activeShop.value.id : '';
+clearReorderRates();
+const openLink = await handleReorderLinks({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/reorder-links', { brand: 'cedargrowth', accountId: activeId }), store: memory }, 'POST');
+const openToken = String(openLink.body.url || '').split('/').pop() || '';
+const beforeRelease = await handlePublicReorder(memory, crmReq('GET', `/api/reorder/${openToken}`), openToken, 'GET');
+const beforeProducts = (beforeRelease.body.products as { batch: { batchNumber?: string } | null }[]) || [];
+assert(beforeRelease.status === 200 && beforeProducts.every((row) => row.batch === null), 'an unreleased batch is not on the reorder page');
+const unreleasedLookup = await handleTransparencyBatch(memory, crmReq('GET', '/api/transparency/batch?number=CG-1'));
+assert(unreleasedLookup.status === 200 && unreleasedLookup.body.found === false && unreleasedLookup.body.reason === BATCH_MISS, 'an unreleased batch number is not published');
+const released = await handleBatches({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('PATCH', '/api/admin/crm/batches', { brand: 'cedargrowth', id: batchId }), store: memory }, 'PATCH');
+assert(released.status === 200, 'an owner can release a batch');
+const published = await handleTransparencyBatch(memory, crmReq('GET', '/api/transparency/batch?number=CG-1'));
+assert(published.body.found === true && (published.body.batch as { labName?: string }).labName === 'North Lab', 'a released batch is published with its lab and test date');
+const wrongToken = 'a'.repeat(43);
+const wrong = await handlePublicReorder(memory, crmReq('GET', `/api/reorder/${wrongToken}`), wrongToken, 'GET');
+const expiredLink = await memory.createReorderLink('cedargrowth', 'gary@cedargrowthco.com', activeId, nowMs);
+if (expiredLink.state === 'ok') expiredLink.value.link.expiresAt = '2026-11-01T00:00:00Z';
+const expiredToken = expiredLink.state === 'ok' ? expiredLink.value.token : '';
+const expired = await handlePublicReorder(memory, crmReq('GET', `/api/reorder/${expiredToken}`), expiredToken, 'GET');
+const revokedLink = await memory.createReorderLink('cedargrowth', 'gary@cedargrowthco.com', activeId, nowMs);
+if (revokedLink.state === 'ok') await memory.revokeReorderLink('cedargrowth', revokedLink.value.link.id, nowMs);
+const revokedToken = revokedLink.state === 'ok' ? revokedLink.value.token : '';
+const revokedPage = await handlePublicReorder(memory, crmReq('GET', `/api/reorder/${revokedToken}`), revokedToken, 'GET');
+assert(wrong.status === expired.status && expired.status === revokedPage.status && JSON.stringify(wrong.body) === JSON.stringify(expired.body) && JSON.stringify(expired.body) === JSON.stringify(revokedPage.body) && wrong.body.reason === LINK_MISS, 'expired, revoked and wrong tokens are rejected the same way');
+const quietBefore = memory.requests.length;
+const inactiveLink = await handleReorderLinks({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/reorder-links', { brand: 'cedargrowth', accountId }), store: memory }, 'POST');
+const inactiveToken = String(inactiveLink.body.url || '').split('/').pop() || '';
+const inactive = await handlePublicReorder(memory, crmReq('POST', `/api/reorder/${inactiveToken}`, { buyerName: 'Buyer', buyerEmail: 'buyer@example.com', note: '', lines: [{ productId: 'vape-1g', batchNumber: 'CG-1', quantityUnits: 2 }] }), inactiveToken, 'POST');
+assert(inactive.status === wrong.status && inactive.body.reason === LINK_MISS && memory.requests.length === quietBefore, 'inactive accounts cannot submit');
+const dealsBefore = memory.opportunities.filter((row) => row.brand === 'cedargrowth').length;
+const bondBefore = memory.opportunities.filter((row) => row.brand === 'bond').length;
+const submitted = await handlePublicReorder(memory, crmReq('POST', `/api/reorder/${openToken}`, { buyerName: 'Buyer', buyerEmail: 'buyer@example.com', note: '', lines: [{ productId: 'vape-1g', batchNumber: 'CG-1', quantityUnits: 4 }] }), openToken, 'POST');
+const cedarDeals = memory.opportunities.filter((row) => row.brand === 'cedargrowth' && row.name.startsWith('Reorder '));
+assert(submitted.status === 201 && submitted.body.confirmation === NABIS_CONFIRMATION && memory.requests.filter((row) => row.brand === 'cedargrowth').length === 1 && cedarDeals.length === 1 && cedarDeals[0].stage === 'proposal' && cedarDeals[0].productLine === 'vape' && cedarDeals[0].quantityUnits === 4 && cedarDeals[0].forecastCents === null && memory.opportunities.filter((row) => row.brand === 'bond').length === bondBefore && memory.opportunities.filter((row) => row.brand === 'cedargrowth').length === dealsBefore + 1, 'a submission creates exactly one request and one deal in the right brand');
 const absentHealth = await handleHealth({
   actorId: 'gary@cedargrowthco.com',
   grants: owner,

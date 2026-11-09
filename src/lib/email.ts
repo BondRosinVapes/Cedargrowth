@@ -140,6 +140,59 @@ export async function sendSignupAlert(data: SignupEmailData): Promise<void> {
   }
 }
 
+export async function sendReorderLink(data: { to: string; accountName: string; url: string }): Promise<boolean> {
+  const resend = getResend();
+  const from = process.env.RESERVATION_ALERT_FROM;
+  if (!resend || !from || !data.to) return false;
+  try {
+    await resend.emails.send({
+      from,
+      to: data.to,
+      subject: `CedarGrowth reorder link, ${data.accountName}`,
+      html:
+        `<p>A reorder link for ${escapeHtml(data.accountName)}.</p>` +
+        `<p><a href="${escapeHtml(data.url)}">${escapeHtml(data.url)}</a></p>` +
+        `<p>This link opens a request. It is not an order and no payment is taken.</p>`,
+    });
+    return true;
+  } catch (err) {
+    console.error('Reorder link email failed', err);
+    return false;
+  }
+}
+
+export async function sendReorderRequest(data: {
+  to: string[];
+  accountName: string;
+  buyerName: string;
+  buyerEmail: string;
+  lines: { name: string; batchNumber: string; quantityUnits: number }[];
+}): Promise<boolean> {
+  const resend = getResend();
+  const from = process.env.RESERVATION_ALERT_FROM;
+  const recipients = [...new Set(data.to.map((item) => item.trim()).filter(Boolean))];
+  if (!resend || !from || recipients.length === 0) return false;
+  const rows = data.lines
+    .map((line) => `<tr><td>${escapeHtml(line.name)}</td><td>${escapeHtml(line.batchNumber)}</td><td>${line.quantityUnits}</td></tr>`)
+    .join('');
+  try {
+    await resend.emails.send({
+      from,
+      to: recipients,
+      subject: `Reorder request, ${data.accountName}`,
+      html:
+        `<p>Reorder request for ${escapeHtml(data.accountName)}.</p>` +
+        `<p>Buyer: ${escapeHtml(data.buyerName)}<br>Email: ${escapeHtml(data.buyerEmail)}</p>` +
+        `<table cellpadding="6" style="border-collapse:collapse"><thead><tr><th align="left">Product</th><th align="left">Batch</th><th align="left">Units</th></tr></thead><tbody>${rows}</tbody></table>` +
+        `<p>This is a request. No price is committed and no payment was taken. Place the order through the distributor.</p>`,
+    });
+    return true;
+  } catch (err) {
+    console.error('Reorder request email failed', err);
+    return false;
+  }
+}
+
 // Confirmation to the submitter. House voice, no compound names, no medical
 // claims, no payment claim, no exclamation marks. States plainly what the
 // address is used for.

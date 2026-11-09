@@ -21,8 +21,9 @@ import { STAGE_LABELS } from '@/lib/crm/dashboard';
 import { DISTRIBUTOR_LABELS } from '@/lib/crm/distributor';
 import { VISIT_OUTCOME_LABELS, type VisitOutcome } from '@/lib/crm/field';
 import { DashboardWing } from './DashboardWing';
+import { BatchesWing } from './BatchesWing';
 
-type Wing = 'dashboard' | 'accounts' | 'pipeline' | 'tasks' | 'activity' | 'reports' | 'health' | 'signals' | 'canix';
+type Wing = 'dashboard' | 'accounts' | 'batches' | 'pipeline' | 'tasks' | 'activity' | 'reports' | 'health' | 'signals' | 'canix';
 
 type Account = {
   id: string;
@@ -58,6 +59,7 @@ type Activity = { id: string; publicId: string; summary: string; createdAt: stri
 const WINGS: { id: Wing; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'accounts', label: 'Accounts' },
+  { id: 'batches', label: 'Batches' },
   { id: 'pipeline', label: 'Pipeline' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'activity', label: 'Activity' },
@@ -104,6 +106,59 @@ async function crmFetch(path: string, init?: RequestInit): Promise<{ status: num
   return { status: res.status, body: body as Record<string, unknown> };
 }
 
+function ReorderLinks({ brand, accountId, accountName }: { brand: CrmBrand; accountId: string; accountName: string }) {
+  const [links, setLinks] = useState<{ id: string; expiresAt: string; revokedAt: string | null }[]>([]);
+  const [url, setUrl] = useState('');
+  const [email, setEmail] = useState('');
+  const [notice, setNotice] = useState('');
+
+  useEffect(() => {
+    let cancel = false;
+    crmFetch(`/api/admin/crm/reorder-links?brand=${brand}&accountId=${accountId}`).then((res) => {
+      if (!cancel) setLinks((res.body.links as { id: string; expiresAt: string; revokedAt: string | null }[]) || []);
+    }).catch(() => { if (!cancel) setNotice('Reorder links could not be read.'); });
+    return () => { cancel = true; };
+  }, [brand, accountId, url]);
+
+  async function create(event: React.FormEvent) {
+    event.preventDefault();
+    const res = await crmFetch('/api/admin/crm/reorder-links', { method: 'POST', body: JSON.stringify({ brand, accountId, email }) });
+    if (typeof res.body.url === 'string') {
+      setUrl(res.body.url);
+      setNotice(res.body.emailed === true ? `Link emailed for ${accountName}.` : 'Copy this link. It is shown once.');
+      return;
+    }
+    setNotice(typeof res.body.reason === 'string' ? res.body.reason : 'The link was not created.');
+  }
+
+  async function revoke(id: string) {
+    const res = await crmFetch('/api/admin/crm/reorder-links', { method: 'PATCH', body: JSON.stringify({ brand, id }) });
+    if (res.body.ok === true) setLinks((rows) => rows.map((row) => row.id === id ? { ...row, revokedAt: String(res.body.link && (res.body.link as { revokedAt?: string }).revokedAt || new Date().toISOString()) } : row));
+    setNotice(res.body.ok === true ? 'Link revoked.' : String(res.body.reason || 'The link was not revoked.'));
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <h3 className="font-display text-body-l text-primary">Reorder link</h3>
+      <p className="text-caption text-tertiary">The link lets this account request a reorder. It is not an order and no payment is taken.</p>
+      {notice ? <p className="text-body-m text-primary">{notice}</p> : null}
+      {url ? <input readOnly value={url} className="min-h-[44px] border border-hairline bg-clinical px-3 font-mono text-specimen text-primary" /> : null}
+      <form onSubmit={create} className="flex flex-col gap-2">
+        <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email the link, optional" className="min-h-[44px] border border-hairline bg-clinical px-3 text-body-m" />
+        <button type="submit" className="min-h-[44px] self-start border border-ink px-3 py-2 font-mono text-specimen uppercase text-primary">Create reorder link</button>
+      </form>
+      <ul className="flex flex-col gap-1">
+        {links.length === 0 ? <li className="text-caption text-tertiary">No reorder links yet.</li> : links.map((row) => (
+          <li key={row.id} className="flex flex-wrap items-center gap-2 text-body-m text-primary">
+            <span>Expires {row.expiresAt.slice(0, 10)}. {row.revokedAt ? 'Revoked' : 'Open'}.</span>
+            {row.revokedAt ? null : <button type="button" onClick={() => revoke(row.id)} className="min-h-[44px] border border-ink px-3 py-2 font-mono text-specimen uppercase">Revoke</button>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function CrmConsole({
   brands,
   sessionLabel,
@@ -125,6 +180,7 @@ export function CrmConsole({
   const [activity, setActivity] = useState<Activity[]>([]);
   const [distributorOrders, setDistributorOrders] = useState<DistributorOrderRow[]>([]);
   const [fieldNotes, setFieldNotes] = useState<{ visits: { id: string; accountId: string; checkedInAt: string; outcome: string; notes: string }[]; samples: { id: string; accountId: string; productLine: string; quantityUnits: number; followUpOn: string }[]; media: { id: string; accountId: string; kind: string }[] }>({ visits: [], samples: [], media: [] });
+  const [batches, setBatches] = useState<{ id: string; productId: string; batchNumber: string; labName: string; testedOn: string; released: boolean }[]>([]);
   const [report, setReport] = useState<Record<string, unknown> | null>(null);
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [desk, setDesk] = useState<DeskEvaluation | null>(null);
@@ -193,6 +249,10 @@ export function CrmConsole({
       if (wing === 'health') {
         const res = await crmFetch(`/api/admin/crm/health?brand=${brand}`);
         if (!cancel) setHealth(res.body);
+      }
+      if (wing === 'batches') {
+        const res = await crmFetch(`/api/admin/crm/batches?brand=${brand}`);
+        if (!cancel) setBatches((res.body.batches as { id: string; productId: string; batchNumber: string; labName: string; testedOn: string; released: boolean }[]) || []);
       }
       if (wing === 'accounts') {
         const [res, fieldRes] = await Promise.all([
@@ -388,6 +448,10 @@ export function CrmConsole({
         <DashboardWing key={`${brand}-${refresh}`} brand={brand} brandName={label} onOpen={setWing} canEditCapacity={roleLabel !== 'Sales'} />
       ) : null}
 
+      {wing === 'batches' ? (
+        <BatchesWing brand={brand} batches={batches} canManage={roleLabel !== 'Sales'} onChanged={() => setRefresh((value) => value + 1)} />
+      ) : null}
+
       {wing === 'accounts' ? (
         <section className="flex flex-col gap-6">
           <form onSubmit={runSearch} className="flex flex-wrap gap-3">
@@ -416,6 +480,7 @@ export function CrmConsole({
                   <li key={row.id} className="text-body-m text-primary">{row.orderRef}. {row.orderStatus}. {row.orderedOn || 'No order date'}.</li>
                 ))}
               </ul>
+              <ReorderLinks brand={brand} accountId={selected.id} accountName={selected.displayName} />
               <h3 className="font-display text-body-l text-primary">Visits</h3>
               <ul className="flex flex-col gap-1">
                 {fieldNotes.visits.filter((row) => row.accountId === selected.id).length === 0 ? <li className="text-caption text-tertiary">No visits yet.</li> : fieldNotes.visits.filter((row) => row.accountId === selected.id).map((row) => (
