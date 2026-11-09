@@ -258,7 +258,7 @@ function textField(value: unknown, max: number, required: boolean): string | nul
 export function parseAccountWrite(
   body: unknown,
   mode: 'create' | 'update',
-): { ok: true; value: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null } } | { ok: false; reason: string } {
+): { ok: true; value: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: 'nabis' | 'other' | 'self' | null; distributorAccountRef?: string | null } } | { ok: false; reason: string } {
   if (!body || typeof body !== 'object') return { ok: false, reason: 'Account could not be read.' };
   const b = body as Record<string, unknown>;
   const displayName = textField(b.displayName, 160, mode === 'create');
@@ -339,12 +339,27 @@ export function parseAccountWrite(
     else if (typeof b.leadSource !== 'string' || !(LEAD_SOURCES as readonly string[]).includes(b.leadSource)) return { ok: false, reason: 'Lead source is not recognized.' };
     else leadSource = b.leadSource as LeadSource;
   }
+  let distributor: 'nabis' | 'other' | 'self' | null | undefined;
+  if (b.distributor !== undefined) {
+    if (b.distributor === null || b.distributor === '') distributor = null;
+    else if (b.distributor === 'nabis' || b.distributor === 'other' || b.distributor === 'self') distributor = b.distributor;
+    else return { ok: false, reason: 'Distributor is not recognized.' };
+  }
+  let distributorAccountRef: string | null | undefined;
+  if (b.distributorAccountRef !== undefined) {
+    if (b.distributorAccountRef === null || b.distributorAccountRef === '') distributorAccountRef = null;
+    else {
+      const v = textField(b.distributorAccountRef, 120, false);
+      if (v === null) return { ok: false, reason: 'Distributor account ID is too long.' };
+      distributorAccountRef = v || null;
+    }
+  }
   if (mode === 'update' && displayName === undefined && status === undefined && city === undefined && notes === undefined
     && licenseRef === undefined && facilityRef === undefined && licenseJurisdiction === undefined && licenseExpiry === undefined && assignedRep === undefined
-    && accountType === undefined && leadSource === undefined) {
+    && accountType === undefined && leadSource === undefined && distributor === undefined && distributorAccountRef === undefined) {
     return { ok: false, reason: 'Nothing to update.' };
   }
-  return { ok: true, value: { displayName: displayName || undefined, status, city, notes, licenseRef, facilityRef, licenseJurisdiction, licenseExpiry, assignedRep, accountType, leadSource } };
+  return { ok: true, value: { displayName: displayName || undefined, status, city, notes, licenseRef, facilityRef, licenseJurisdiction, licenseExpiry, assignedRep, accountType, leadSource, distributor, distributorAccountRef } };
 }
 
 export function dollarsToCents(input: string): number | null | 'invalid' {

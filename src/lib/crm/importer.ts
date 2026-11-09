@@ -4,6 +4,12 @@
 // Rows that cannot be read are reported with a reason, never guessed.
 
 import {
+  parseDistributorToken,
+  parseOrderStatusToken,
+  parsePayoutToken,
+  parseRetailerPaymentToken,
+} from './distributor';
+import {
   ACCOUNT_TYPE_LABELS,
   ACCOUNT_TYPES,
   LEAD_SOURCE_LABELS,
@@ -13,7 +19,7 @@ import {
   type OpportunityStage,
 } from './engine';
 
-export const IMPORT_KINDS = ['accounts', 'deals'] as const;
+export const IMPORT_KINDS = ['accounts', 'deals', 'orders'] as const;
 export type ImportKind = (typeof IMPORT_KINDS)[number];
 export const IMPORT_BATCH = 100;
 export const IMPORT_MAX_ROWS = 2000;
@@ -63,6 +69,23 @@ const ACCOUNT_HEADERS: Record<string, string[]> = {
   notes: ['notes', 'note', 'comments'],
 };
 
+const ORDER_HEADERS: Record<string, string[]> = {
+  orderRef: ['order id', 'order number', 'order no', 'order'],
+  retailerName: ['retailer', 'dispensary', 'store name', 'customer name'],
+  licenseRef: ['license', 'license number', 'license no', 'license ref', 'license id'],
+  distributorAccountRef: ['retailer id', 'customer id', 'account id', 'account number', 'distributor account', 'nabis id'],
+  orderedOn: ['order date', 'ordered', 'ordered on'],
+  deliveredOn: ['delivery date', 'delivered', 'delivered on'],
+  orderStatus: ['status', 'order status'],
+  invoice: ['invoice total', 'invoice', 'invoice amount', 'total'],
+  paymentStatus: ['payment status', 'paid status', 'retailer payment'],
+  paidOn: ['paid date', 'payment date', 'date paid'],
+  payout: ['payout', 'payout amount'],
+  payoutStatus: ['payout status'],
+  payoutOn: ['payout date'],
+  distributor: ['distributor'],
+};
+
 const DEAL_HEADERS: Record<string, string[]> = {
   accountName: ['account', 'account name', 'customer', 'customer name', 'retailer', 'store', 'dispensary', 'company'],
   name: ['deal', 'deal name', 'opportunity', 'opportunity name', 'order', 'title', 'name'],
@@ -75,7 +98,7 @@ const DEAL_HEADERS: Record<string, string[]> = {
 };
 
 export function matchHeaders(kind: ImportKind, header: string[]): { columns: Record<string, number>; unmatched: string[] } {
-  const table = kind === 'accounts' ? ACCOUNT_HEADERS : DEAL_HEADERS;
+  const table = kind === 'accounts' ? ACCOUNT_HEADERS : kind === 'orders' ? ORDER_HEADERS : DEAL_HEADERS;
   const columns: Record<string, number> = {};
   const unmatched: string[] = [];
   header.forEach((raw, index) => {
@@ -143,12 +166,55 @@ export function parseMoney(value: string): number | null | 'invalid' {
 export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[]; missing: string[]; unmatched: string[] } {
   const [header = [], ...body] = table;
   const { columns, unmatched } = matchHeaders(kind, header);
-  const required = kind === 'accounts' ? ['displayName'] : ['accountName', 'name'];
-  const missing = required.filter((key) => !(key in columns)).map((key) => ({ displayName: 'Account name', accountName: 'Account', name: 'Deal name' }[key] ?? key));
+  const required = kind === 'accounts' ? ['displayName'] : kind === 'orders' ? ['orderRef', 'retailerName'] : ['accountName', 'name'];
+  const missing = required.filter((key) => !(key in columns)).map((key) => ({ displayName: 'Account name', accountName: 'Account', name: 'Deal name', orderRef: 'Order ID', retailerName: 'Retailer' }[key] ?? key));
   if (missing.length) return { rows: [], missing, unmatched };
-  const cell = (row: string[], key: string) => (key in columns ? (row[columns[key]] ?? '').trim() : '');
+    const cell = (row: string[], key: string) => (key in columns ? (row[columns[key]] ?? '').trim() : '');
   const rows = body.slice(0, IMPORT_MAX_ROWS).map((row, index): ImportRow => {
     const line = index + 2;
+    if (kind === 'orders') {
+      const orderRef = cell(row, 'orderRef');
+      const retailerName = cell(row, 'retailerName');
+      if (!orderRef) return { line, error: 'Order ID is empty.' };
+      if (!retailerName) return { line, error: 'Retailer is empty.' };
+      const distributor = parseDistributorToken(cell(row, 'distributor') || 'nabis');
+      if (distributor === 'invalid' || !distributor) return { line, error: `Distributor "${cell(row, 'distributor')}" is not Nabis, Other, or Self.` };
+      const orderStatus = parseOrderStatusToken(cell(row, 'orderStatus'));
+      if (orderStatus === 'invalid') return { line, error: `Status "${cell(row, 'orderStatus')}" is not recognized.` };
+      const payment = parseRetailerPaymentToken(cell(row, 'paymentStatus'));
+      if (payment === 'invalid') return { line, error: `Payment status "${cell(row, 'paymentStatus')}" is not recognized.` };
+      const payoutStatus = parsePayoutToken(cell(row, 'payoutStatus'));
+      if (payoutStatus === 'invalid') return { line, error: `Payout status "${cell(row, 'payoutStatus')}" is not recognized.` };
+      const orderedOn = parseDate(cell(row, 'orderedOn'));
+      if (orderedOn === 'invalid') return { line, error: `Order date "${cell(row, 'orderedOn')}" is not a date.` };
+      const deliveredOn = parseDate(cell(row, 'deliveredOn'));
+      if (deliveredOn === 'invalid') return { line, error: `Delivery date "${cell(row, 'deliveredOn')}" is not a date.` };
+      const paidOn = parseDate(cell(row, 'paidOn'));
+      if (paidOn === 'invalid') return { line, error: `Paid date "${cell(row, 'paidOn')}" is not a date.` };
+      const payoutOn = parseDate(cell(row, 'payoutOn'));
+      if (payoutOn === 'invalid') return { line, error: `Payout date "${cell(row, 'payoutOn')}" is not a date.` };
+      const invoice = parseMoney(cell(row, 'invoice'));
+      if (invoice === 'invalid') return { line, error: `Invoice total "${cell(row, 'invoice')}" is not a dollar amount.` };
+      const payoutCents = parseMoney(cell(row, 'payout'));
+      if (payoutCents === 'invalid') return { line, error: `Payout "${cell(row, 'payout')}" is not a dollar amount.` };
+      const record: Record<string, unknown> = {
+        distributor,
+        orderRef,
+        retailerName,
+        distributorAccountRef: cell(row, 'distributorAccountRef') || null,
+        licenseRef: cell(row, 'licenseRef') || null,
+        orderedOn,
+        deliveredOn,
+        orderStatus,
+        invoiceCents: invoice,
+        retailerPaymentStatus: payment,
+        retailerPaidOn: paidOn,
+        payoutStatus,
+        payoutCents,
+        payoutOn,
+      };
+      return { line, record, accountName: retailerName };
+    }
     if (kind === 'accounts') {
       const record: Record<string, unknown> = { displayName: cell(row, 'displayName') };
       if (!record.displayName) return { line, error: 'Account name is empty.' };
@@ -193,4 +259,5 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
 export const TEMPLATES: Record<ImportKind, string> = {
   accounts: 'Account name,Status,Account type,Lead source,Sales rep,City,License number,License expiry,Notes\n',
   deals: 'Account,Deal name,Stage,Amount,Close date,Next action,Loss reason,Notes\n',
+  orders: 'Order ID,Retailer,License,Order Date,Delivery Date,Status,Invoice Total,Payment Status,Paid Date,Payout,Payout Date\n',
 };

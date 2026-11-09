@@ -16,6 +16,7 @@ import {
   type DeskEvaluation,
 } from '@/lib/crm/engine';
 import { STAGE_LABELS } from '@/lib/crm/dashboard';
+import { DISTRIBUTOR_LABELS } from '@/lib/crm/distributor';
 import { DashboardWing } from './DashboardWing';
 
 type Wing = 'dashboard' | 'accounts' | 'pipeline' | 'tasks' | 'activity' | 'reports' | 'health' | 'signals' | 'canix';
@@ -32,6 +33,19 @@ type Account = {
   assignedRep?: string | null;
   accountType?: keyof typeof ACCOUNT_TYPE_LABELS | null;
   leadSource?: keyof typeof LEAD_SOURCE_LABELS | null;
+  distributor?: 'nabis' | 'other' | 'self' | null;
+  distributorAccountRef?: string | null;
+};
+type DistributorOrderRow = {
+  id: string;
+  accountId: string | null;
+  opportunityId: string | null;
+  distributor: 'nabis' | 'other' | 'self';
+  orderRef: string;
+  retailerName: string;
+  orderStatus: string;
+  invoiceCents: number | null;
+  orderedOn: string | null;
 };
 type Contact = { id: string; publicId: string; accountId: string; name: string; email: string | null; title: string | null; preference?: string };
 type Opportunity = { id: string; publicId: string; name: string; stage: string; forecastCents: number | null; forecastLabel?: string };
@@ -78,6 +92,7 @@ export function CrmConsole({
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
+  const [distributorOrders, setDistributorOrders] = useState<DistributorOrderRow[]>([]);
   const [report, setReport] = useState<Record<string, unknown> | null>(null);
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [desk, setDesk] = useState<DeskEvaluation | null>(null);
@@ -123,9 +138,13 @@ export function CrmConsole({
         });
       } else setDesk(null);
       setCanixLabel(String(canixRes.body.label || 'Canix not connected'));
-      if (wing === 'pipeline') {
-        const res = await crmFetch(`/api/admin/crm/opportunities?brand=${brand}`);
-        if (!cancel) setOpportunities((res.body.opportunities as Opportunity[]) || []);
+      if (wing === 'pipeline' || wing === 'accounts') {
+        const [oppRes, orderRes] = await Promise.all([
+          wing === 'pipeline' ? crmFetch(`/api/admin/crm/opportunities?brand=${brand}`) : Promise.resolve(null),
+          crmFetch(`/api/admin/crm/distributor-orders?brand=${brand}`),
+        ]);
+        if (!cancel && oppRes) setOpportunities((oppRes.body.opportunities as Opportunity[]) || []);
+        if (!cancel) setDistributorOrders((orderRes.body.orders as DistributorOrderRow[]) || []);
       }
       if (wing === 'tasks') {
         const res = await crmFetch(`/api/admin/crm/tasks?brand=${brand}`);
@@ -168,6 +187,8 @@ export function CrmConsole({
         assignedRep: String(form.get('assignedRep') || '') || null,
         accountType: String(form.get('accountType') || '') || null,
         leadSource: String(form.get('leadSource') || '') || null,
+        distributor: String(form.get('distributor') || '') || null,
+        distributorAccountRef: String(form.get('distributorAccountRef') || '') || null,
       }),
     });
     setNotice(res.body.ok ? 'Account saved in this brand.' : String(res.body.reason || 'Account was not saved.'));
@@ -347,6 +368,12 @@ export function CrmConsole({
               <p className="text-body-m text-secondary">Facility reference: {selected.facilityRef || 'None stored'}. This is not a certified facility record.</p>
               <p className="text-body-m text-secondary">Account type: {selected.accountType ? ACCOUNT_TYPE_LABELS[selected.accountType] : 'Not set'}. Lead source: {selected.leadSource ? LEAD_SOURCE_LABELS[selected.leadSource] : 'Not set'}.</p>
               <p className="text-body-m text-secondary">Assigned rep: {selected.assignedRep || 'None'}. Assignment does not grant a login or a role.</p>
+              <p className="text-body-m text-secondary">Distributor: {selected.distributor ? DISTRIBUTOR_LABELS[selected.distributor] : 'Not set'}. Distributor account ID: {selected.distributorAccountRef || 'None stored'}.</p>
+              <ul className="flex flex-col gap-1">
+                {distributorOrders.filter((row) => row.accountId === selected.id).length === 0 ? <li className="text-caption text-tertiary">No distributor orders linked to this account.</li> : distributorOrders.filter((row) => row.accountId === selected.id).map((row) => (
+                  <li key={row.id} className="text-body-m text-primary">{row.orderRef}. {row.orderStatus}. {row.orderedOn || 'No order date'}.</li>
+                ))}
+              </ul>
               <ul className="flex flex-col gap-2">
                 {accountContacts.length === 0 ? <li className="text-caption text-tertiary">No contacts on this account.</li> : accountContacts.map((row) => (
                   <li key={row.id} className="text-body-m text-primary">{row.name}. {row.email || 'No email'}. Preference: {row.preference || 'unspecified'}.</li>
@@ -404,6 +431,15 @@ export function CrmConsole({
               <Field name="licenseJurisdiction" label="Jurisdiction" />
               <Field name="licenseExpiry" type="date" label="License expiry date" />
               <Field name="assignedRep" label="Sales rep" />
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Distributor
+                <select name="distributor" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="">
+                  <option value="">Not set</option>
+                  <option value="nabis">Nabis</option>
+                  <option value="other">Other</option>
+                  <option value="self">Self</option>
+                </select>
+              </label>
+              <Field name="distributorAccountRef" label="Distributor account ID" />
               <Field name="notes" label="Notes" />
               <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Save account</button>
             </form>
@@ -415,7 +451,11 @@ export function CrmConsole({
         <section className="flex flex-col gap-6">
           <p className="max-w-editorial text-body-m text-secondary">Forecast is not invoiced revenue and not paid revenue. Invoiced and paid amounts are not in this CRM.</p>
           {configured && opportunities.length === 0 ? <p className="text-body-m text-secondary">No {label} opportunities yet.</p> : null}
-          <RecordList rows={opportunities.map((row) => ({ id: row.publicId || row.id, title: row.name, meta: `${STAGE_LABELS[row.stage as keyof typeof STAGE_LABELS] ?? row.stage}. ${row.forecastLabel || formatForecast(row.forecastCents)}` }))} />
+          <RecordList rows={opportunities.map((row) => {
+            const linked = distributorOrders.find((order) => order.opportunityId === row.id && order.orderStatus === 'delivered' && order.distributor === 'nabis');
+            const invoiced = row.stage === 'won' && linked ? ` Invoiced by Nabis: ${typeof linked.invoiceCents === 'number' ? `$${(linked.invoiceCents / 100).toLocaleString('en-US')}` : 'None'}` : '';
+            return { id: row.publicId || row.id, title: row.name, meta: `${STAGE_LABELS[row.stage as keyof typeof STAGE_LABELS] ?? row.stage}. ${row.forecastLabel || formatForecast(row.forecastCents)}.${invoiced}` };
+          })} />
           <AddPanel label="Add opportunity">
             <form onSubmit={(event) => { event.preventDefault(); createOpportunity(new FormData(event.currentTarget)); }} className="grid grid-cols-1 gap-3 border-t border-hairline p-4">
               <label className="flex flex-col gap-1 text-caption text-tertiary">Account
@@ -518,6 +558,7 @@ export function CrmConsole({
                 : health ? String(health.reason || 'The desk could not be read.') : 'Loading.'}
           </p>
           <p className="text-body-m text-secondary">{health ? `${String((health.canix as { label?: string })?.label || 'Canix not connected')}. ${String((health.hoodie as { label?: string })?.label || 'Hoodie not connected')}. Last successful refresh: none. Adapter disconnection is separate from storage readiness.` : null}</p>
+          <p className="text-body-m text-secondary">{health ? String(health.nabisLabel || 'Nabis: no data yet.') : null}</p>
           <p className="text-caption text-tertiary">Exceptions: not configured. A missing source is not a zero count and not a healthy sync.</p>
         </section>
       ) : null}

@@ -13,7 +13,7 @@ import {
 import { STAGE_LABELS } from '@/lib/crm/dashboard';
 import { IMPORT_BATCH, mapRows, parseCsv, TEMPLATES, type ImportKind, type ImportRow } from '@/lib/crm/importer';
 
-type Outcome = { line: number; status: 'ready' | 'created' | 'skipped' | 'error'; reason?: string };
+type Outcome = { line: number; status: 'ready' | 'created' | 'updated' | 'unmatched' | 'skipped' | 'error'; reason?: string; orderId?: string };
 
 async function send(path: string, init?: RequestInit) {
   const headers = new Headers(init?.headers);
@@ -136,6 +136,12 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
   const [unmatched, setUnmatched] = useState<string[]>([]);
   const [outcomes, setOutcomes] = useState<Outcome[] | null>(null);
   const [phase, setPhase] = useState<'idle' | 'checking' | 'checked' | 'importing' | 'done'>('idle');
+  const [accounts, setAccounts] = useState<{ id: string; displayName: string }[]>([]);
+  const [links, setLinks] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (kind !== 'orders') return;
+    send(`/api/admin/crm/accounts?brand=${brand}`).then((res) => setAccounts((res.body.accounts as { id: string; displayName: string }[]) || []));
+  }, [brand, kind]);
 
   function reset() { setRows([]); setProblems([]); setUnmatched([]); setOutcomes(null); setPhase('idle'); setFileName(''); }
 
@@ -189,6 +195,7 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
           <select value={kind} onChange={(event) => { setKind(event.target.value as ImportKind); reset(); }} className={input}>
             <option value="accounts">Accounts (stores and buyers)</option>
             <option value="deals">Deals</option>
+            <option value="orders">Distributor orders</option>
           </select>
         </label>
         <label className={label}>CSV file
@@ -199,7 +206,9 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
       <p className="text-caption text-tertiary">
         {kind === 'accounts'
           ? 'Needs an Account name column. Optional: Status, Account type, Lead source, Sales rep, City, License number, License expiry, Notes. Accounts that already exist by name are skipped.'
-          : 'Needs Account and Deal name columns. Optional: Stage, Amount, Close date, Next action, Loss reason, Notes. Import accounts first; each deal is matched to an account by name.'}
+          : kind === 'orders'
+            ? 'Needs Order ID and Retailer. Optional: License, Order Date, Delivery Date, Status, Invoice Total, Payment Status, Paid Date, Payout, Payout Date. A repeat Order ID updates that order. Unmatched retailers are not created.'
+            : 'Needs Account and Deal name columns. Optional: Stage, Amount, Close date, Next action, Loss reason, Notes. Import accounts first; each deal is matched to an account by name.'}
         {' '}Nothing is saved until you press Import.
       </p>
       {problems.map((text) => <p key={text} role="alert" className="border border-attention px-3 py-2 text-body-m text-primary">{text}</p>)}
@@ -209,7 +218,7 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
       {outcomes && (phase === 'checked' || phase === 'done') ? (
         <div className="flex flex-col gap-3">
           <p className="text-body-m text-primary">
-            {fileName}: {phase === 'done' ? `${count('created')} imported` : `${count('ready')} ready to import`}, {count('skipped')} skipped, {count('error')} with problems.
+            {fileName}: {phase === 'done' ? `${count('created')} imported` : `${count('ready')} ready to import`}, {count('updated')} updated, {count('unmatched')} unmatched, {count('skipped')} skipped, {count('error')} with problems.
           </p>
           {errors.length ? (
             <ul className="max-h-48 overflow-y-auto border border-hairline">
@@ -220,8 +229,24 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
               ))}
             </ul>
           ) : null}
+          {phase === 'done' ? (outcomes || []).filter((row) => row.status === 'unmatched' && row.orderId).map((row) => (
+            <div key={row.orderId} className="flex flex-wrap items-end gap-2 border border-hairline px-3 py-2">
+              <p className="text-caption text-secondary">Row {row.line} did not match a retailer.</p>
+              <label className={label}>Link to account
+                <select value={links[row.orderId || ''] || ''} onChange={(event) => setLinks((current) => ({ ...current, [row.orderId || '']: event.target.value }))} className={input}>
+                  <option value="">Choose</option>
+                  {accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}
+                </select>
+              </label>
+              <button type="button" disabled={!links[row.orderId || '']} onClick={async () => {
+                const res = await send('/api/admin/crm/distributor-orders', { method: 'POST', body: JSON.stringify({ brand, action: 'link', orderId: row.orderId, accountId: links[row.orderId || ''] }) });
+                setProblems(res.body.ok ? [] : [String(res.body.reason || 'The retailer was not linked.')]);
+                if (res.body.ok) onSaved();
+              }} className={secondaryButton}>Link to account</button>
+            </div>
+          )) : null}
           <div className="flex gap-3">
-            {phase === 'checked' ? <button type="button" disabled={!count('ready')} onClick={commit} className={primaryButton}>Import {count('ready')} rows</button> : null}
+            {phase === 'checked' ? <button type="button" disabled={!count('ready') && !count('unmatched')} onClick={commit} className={primaryButton}>Import {count('ready') + count('unmatched')} rows</button> : null}
             <button type="button" onClick={reset} className={secondaryButton}>{phase === 'done' ? 'Upload another file' : 'Cancel'}</button>
           </div>
         </div>

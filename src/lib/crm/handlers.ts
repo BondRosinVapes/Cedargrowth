@@ -33,6 +33,7 @@ import {
 } from './engine';
 import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
+import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
 import { IMPORT_BATCH, IMPORT_KINDS, type ImportKind } from './importer';
 
 export type CrmResult = { status: number; body: Record<string, unknown> };
@@ -158,6 +159,8 @@ export async function handleAccountCollection(ctx: CrmContext, method: 'GET' | '
     assignedRep: parsed.value.assignedRep ?? null,
     accountType: parsed.value.accountType ?? null,
     leadSource: parsed.value.leadSource ?? null,
+    distributor: parsed.value.distributor ?? null,
+    distributorAccountRef: parsed.value.distributorAccountRef ?? null,
   });
   if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'rejected' ? 'unavailable' : created.state === 'missing' ? 'unavailable' : created.state);
   return { status: 201, body: { ok: true, configured: true, brand: auth.brand, account: created.value } };
@@ -184,6 +187,8 @@ export async function handleAccountUpdate(ctx: CrmContext, id: string): Promise<
     assignedRep: parsed.value.assignedRep,
     accountType: parsed.value.accountType,
     leadSource: parsed.value.leadSource,
+    distributor: parsed.value.distributor,
+    distributorAccountRef: parsed.value.distributorAccountRef,
   });
   if (updated.state === 'missing') return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   if (updated.state !== 'ok') return storageBody(auth.brand, updated.state === 'rejected' ? 'unavailable' : updated.state);
@@ -504,11 +509,12 @@ export async function handleDashboard(ctx: CrmContext): Promise<CrmResult> {
   const auth = await gate(ctx, url.searchParams.get('brand'));
   if (isResult(auth)) return auth;
   // exportBrand reads every row in this brand (up to its cap), not the 100 most recent.
-  const [all, notes] = await Promise.all([ctx.store.exportBrand(auth.brand), ctx.store.listNotes(auth.brand, null)]);
+  const [all, notes, orders] = await Promise.all([ctx.store.exportBrand(auth.brand), ctx.store.listNotes(auth.brand, null), ctx.store.listDistributorOrders(auth.brand)]);
   for (const result of [all, notes]) {
     if (result.state !== 'ok') return storageBody(auth.brand, result.state === 'rejected' || result.state === 'missing' ? 'unavailable' : result.state);
   }
   if (all.state !== 'ok' || notes.state !== 'ok') return storageBody(auth.brand, 'unavailable');
+  if (orders.state !== 'ok' && orders.state !== 'absent') return storageBody(auth.brand, orders.state === 'rejected' || orders.state === 'missing' ? 'unavailable' : orders.state);
   const accounts = { value: all.value.accounts };
   const opps = { value: all.value.opportunities };
   const tasks = { value: all.value.tasks };
@@ -522,6 +528,7 @@ export async function handleDashboard(ctx: CrmContext): Promise<CrmResult> {
     tasks: tasks.value,
     activity: activity.value,
     notes: notes.value,
+    orders: orders.state === 'ok' ? orders.value : [],
   });
   return {
     status: 200,
@@ -544,7 +551,7 @@ export async function handleDashboard(ctx: CrmContext): Promise<CrmResult> {
   };
 }
 
-type ImportOutcome = { line: number; status: 'ready' | 'created' | 'skipped' | 'error'; reason?: string };
+type ImportOutcome = { line: number; status: 'ready' | 'created' | 'updated' | 'unmatched' | 'skipped' | 'error'; reason?: string; orderId?: string };
 
 export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
   const body = await readBody(ctx.request);
@@ -593,6 +600,27 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
       outcomes.push({ line, status: 'created' });
       continue;
     }
+    if (kind === 'orders') {
+      const draft = fields as DistributorOrderDraft;
+      if (!draft.orderRef || !draft.retailerName || !draft.orderStatus || !draft.distributor) {
+        outcomes.push({ line, status: 'error', reason: 'Order could not be read.' });
+        continue;
+      }
+      const accountId = matchDistributorAccount(
+        existing.value.accounts.filter((row) => row.brand === auth.brand),
+        draft,
+      );
+      if (!commit) {
+        outcomes.push({ line, status: accountId ? 'ready' : 'unmatched', reason: accountId ? undefined : 'No account matched. The retailer will not be created.' });
+        continue;
+      }
+      const saved = await ctx.store.upsertDistributorOrder(auth.brand, auth.actorId, { ...draft, accountId });
+      if (saved.state !== 'ok') { outcomes.push({ line, status: 'error', reason: 'Storage did not accept this order.' }); continue; }
+      if (saved.value.action === 'updated') outcomes.push({ line, status: 'updated', orderId: saved.value.order.id });
+      else if (!saved.value.order.accountId) outcomes.push({ line, status: 'unmatched', orderId: saved.value.order.id, reason: 'No account matched. Link this retailer. Nothing new was created.' });
+      else outcomes.push({ line, status: 'created', orderId: saved.value.order.id });
+      continue;
+    }
     const accountName = typeof item.accountName === 'string' ? key(item.accountName) : '';
     const accountId = accountsByName.get(accountName);
     if (!accountId) { outcomes.push({ line, status: 'error', reason: 'No account with this name. Import or add the account first.' }); continue; }
@@ -619,6 +647,11 @@ export async function handleHealth(ctx: CrmContext): Promise<CrmResult> {
     mirror: mirrorContract(),
     adaptersConnected: false,
   };
+  const orders = await ctx.store.listDistributorOrders(auth.brand);
+  const latestNabis = orders.state === 'ok'
+    ? orders.value.filter((row) => row.distributor === 'nabis').sort((a, b) => (a.importedAt < b.importedAt ? 1 : -1))[0]
+    : undefined;
+  const nabisLabel = nabisHealthLine(latestNabis?.importedAt ?? null, latestNabis?.source ?? null);
   if (ready.state !== 'ok') {
     const absent = ready.state === 'absent';
     return {
@@ -631,6 +664,7 @@ export async function handleHealth(ctx: CrmContext): Promise<CrmResult> {
         reason: absent ? 'CRM storage is not configured.' : 'CRM storage could not be read.',
         detail: absent ? 'schema_absent' : 'read_failed',
         ...adapters,
+        nabisLabel,
       },
     };
   }
@@ -642,8 +676,44 @@ export async function handleHealth(ctx: CrmContext): Promise<CrmResult> {
       storage: 'ready',
       brand: auth.brand,
       ...adapters,
+      nabisLabel,
     },
   };
+}
+
+export async function handleDistributorOrders(ctx: CrmContext, method: 'GET' | 'POST'): Promise<CrmResult> {
+  if (method === 'GET') {
+    const url = new URL(ctx.request.url);
+    const auth = await gate(ctx, url.searchParams.get('brand'));
+    if (isResult(auth)) return auth;
+    const rows = await ctx.store.listDistributorOrders(auth.brand);
+    if (rows.state !== 'ok') return storageBody(auth.brand, rows.state === 'rejected' || rows.state === 'missing' ? 'unavailable' : rows.state);
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, orders: rows.value } };
+  }
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  const orderId = typeof record.orderId === 'string' ? record.orderId : '';
+  if (!parseUuid(orderId)) return { status: 400, body: { ok: false, reason: 'Order was not found in this brand.' } };
+  if (record.action === 'link') {
+    const accountId = typeof record.accountId === 'string' ? record.accountId : '';
+    if (!parseUuid(accountId)) return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+    const linked = await ctx.store.linkDistributorOrder(auth.brand, orderId, accountId);
+    if (linked.state === 'rejected' || linked.state === 'missing') return { status: 400, body: { ok: false, reason: 'That account is not in this brand.' } };
+    if (linked.state !== 'ok') return storageBody(auth.brand, linked.state);
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, order: linked.value } };
+  }
+  if (record.action === 'win') {
+    const opportunityId = typeof record.opportunityId === 'string' ? record.opportunityId : '';
+    if (!parseUuid(opportunityId)) return { status: 400, body: { ok: false, reason: 'Deal was not found in this brand.' } };
+    const won = await ctx.store.markDealWonFromOrder(auth.brand, auth.actorId, orderId, opportunityId);
+    if (won.state === 'rejected' || won.state === 'missing') return { status: 400, body: { ok: false, reason: 'The deal was not marked won. It must be an open deal on the matched account.' } };
+    if (won.state !== 'ok') return storageBody(auth.brand, won.state);
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, order: won.value.order, stage: won.value.stage } };
+  }
+  return { status: 400, body: { ok: false, reason: 'Order action is not recognized.' } };
 }
 
 export async function handleNotes(ctx: CrmContext, method: 'GET' | 'POST'): Promise<CrmResult> {

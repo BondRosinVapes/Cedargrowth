@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, LEAD_SOURCE_LABELS, LEAD_SOURCES, OPPORTUNITY_STAGES, type CrmBrand } from '@/lib/crm/engine';
+import { ORDER_STATUS_LABELS } from '@/lib/crm/distributor';
 import {
   DEAL_STATUSES,
   MONTH_LABELS,
@@ -23,7 +24,7 @@ type DashboardBody = {
   refreshedAt?: string;
   truncated?: boolean;
 };
-type Section = 'overview' | 'reps' | 'accounts' | 'sources' | 'timeline';
+type Section = 'overview' | 'reps' | 'accounts' | 'sources' | 'timeline' | 'distributor';
 type Jump = 'accounts' | 'pipeline' | 'canix' | 'signals';
 
 const SECTIONS: { id: Section; label: string }[] = [
@@ -32,6 +33,7 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: 'accounts', label: 'Account breakdown' },
   { id: 'sources', label: 'Source effectiveness' },
   { id: 'timeline', label: 'Timeline analysis' },
+  { id: 'distributor', label: 'Distributor' },
 ];
 
 // Categorical order from the house tokens, checked for adjacent color-blind separation:
@@ -183,7 +185,7 @@ export function DashboardWing({ brand, brandName }: { brand: CrmBrand; brandName
 
         <dl className="grid grid-cols-2 gap-4 md:grid-cols-5">
           <Kpi label="Deals" value={String(data.kpis.deals)} />
-          <Kpi label="Total deal value" value={money(data.kpis.totalValueCents)} note="Forecast" />
+          <Kpi label="Total deal value" value={money(data.kpis.totalValueCents)} note="Forecast" detail={data.distributor.nabisOrderCount > 0 ? `Invoiced (Nabis): ${money(data.distributor.invoicedNabisCents)}` : undefined} />
           <Kpi label="Win rate" value={percent(data.kpis.winRate)} />
           <Kpi label="Avg response time" value={hours(data.kpis.avgResponseHours)} note={data.kpis.responseSample ? `${data.kpis.responseSample} accounts` : 'First note after a new account'} muted={data.kpis.avgResponseHours === null} />
           <Kpi label="Avg deal value" value={money(data.kpis.avgDealCents)} note="Forecast" />
@@ -261,6 +263,8 @@ export function DashboardWing({ brand, brandName }: { brand: CrmBrand; brandName
           </div>
         ) : null}
 
+        {section === 'distributor' ? <DistributorSection brand={brand} data={data} onChanged={refresh} /> : null}
+
         {section === 'timeline' ? (
           <div className="grid grid-cols-1 gap-4">
             <Card title={`Deals by expected close, ${data.monthsLabel}`} note={data.overdueOpen ? `${data.overdueOpen} open deals are past their close date` : undefined}>
@@ -278,15 +282,105 @@ export function DashboardWing({ brand, brandName }: { brand: CrmBrand; brandName
   );
 }
 
+function DistributorSection({ brand, data, onChanged }: { brand: CrmBrand; data: Dashboard; onChanged: () => void }) {
+  const report = data.distributor;
+  const [accounts, setAccounts] = useState<{ id: string; displayName: string }[]>([]);
+  const [links, setLinks] = useState<Record<string, string>>({});
+  const [message, setMessage] = useState('');
+  useEffect(() => {
+    fetch(`/api/admin/crm/accounts?brand=${brand}`, { headers: { 'x-cedargrowth-crm': '1' }, credentials: 'same-origin' })
+      .then((res) => res.json())
+      .then((json: { accounts?: { id: string; displayName: string }[] }) => setAccounts(json.accounts || []))
+      .catch(() => setAccounts([]));
+  }, [brand]);
+  async function post(body: Record<string, string>) {
+    const res = await fetch('/api/admin/crm/distributor-orders', {
+      method: 'POST',
+      headers: { 'x-cedargrowth-crm': '1', 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ brand, ...body }),
+    });
+    const json = await res.json().catch(() => ({})) as { ok?: boolean; reason?: string };
+    setMessage(json.ok ? 'Saved.' : String(json.reason || 'That change was not saved.'));
+    if (json.ok) onChanged();
+  }
+  const tiles = [
+    ['Orders this month', String(report.ordersThisMonth)],
+    ['Invoiced this month', money(report.invoicedThisMonthCents)],
+    ['Awaiting retailer payment', String(report.awaitingRetailerPayment)],
+    ['Awaiting payout to CedarGrowth', String(report.awaitingPayout)],
+  ] as const;
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-caption text-tertiary">{report.sourceLabel}. These figures are what the distributor reported. They are not a CedarGrowth invoice.</p>
+      {message ? <p role="status" className="border border-hairline bg-bone px-3 py-2 text-body-m text-primary">{message}</p> : null}
+      <dl className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+        {tiles.map(([labelText, value]) => (
+          <div key={labelText} className="border border-hairline bg-clinical px-3 py-4 text-center">
+            <dd className="font-display text-heading-s-m text-primary">{value}</dd>
+            <dt className="text-caption text-secondary">{labelText}</dt>
+            <p className="text-caption text-tertiary">{report.sourceLabel}</p>
+          </div>
+        ))}
+      </dl>
+      <Card title="Orders by status">
+        <ul className="flex flex-col gap-2">
+          {report.byStatus.map((row) => (
+            <li key={row.key} className="flex justify-between gap-3 text-body-m text-primary">
+              <span>{row.label}</span>
+              <span className="font-mono text-data tabular-nums">{row.count}</span>
+            </li>
+          ))}
+        </ul>
+      </Card>
+      <Card title="Unpaid invoices past 30 days">
+        {report.overdueUnpaid.length === 0 ? <p className="text-caption text-tertiary">No unpaid distributor invoices past 30 days.</p> : (
+          <ul className="flex flex-col gap-2">
+            {report.overdueUnpaid.map((row) => (
+              <li key={row.id} className="text-body-m text-primary">{row.retailerName}. {money(row.invoiceCents)}. Ordered {row.orderedOn || 'on an unknown date'}.</li>
+            ))}
+          </ul>
+        )}
+      </Card>
+      <Card title="Reported orders">
+        {report.orders.length === 0 ? <p className="text-caption text-tertiary">No distributor orders imported yet.</p> : (
+          <ul className="flex flex-col gap-3">
+            {report.orders.map((row) => (
+              <li key={row.id} className="flex flex-col gap-2 border border-hairline px-3 py-2">
+                <p className="text-body-m text-primary">{row.retailerName}. {row.orderRef}. {ORDER_STATUS_LABELS[row.orderStatus]}. Invoice {money(row.invoiceCents)}.</p>
+                {!row.accountId ? (
+                  <div className="flex flex-wrap items-end gap-2">
+                    <label className="flex flex-col gap-1 text-caption text-tertiary">Link to account
+                      <select value={links[row.id] || ''} onChange={(event) => setLinks((current) => ({ ...current, [row.id]: event.target.value }))} className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary">
+                        <option value="">Choose</option>
+                        {accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName}</option>)}
+                      </select>
+                    </label>
+                    <button type="button" disabled={!links[row.id]} onClick={() => post({ action: 'link', orderId: row.id, accountId: links[row.id] })} className="border border-ink px-3 py-2 font-mono text-specimen uppercase disabled:opacity-40">Link to account</button>
+                  </div>
+                ) : null}
+                {row.openOpportunityIds.map((opportunityId) => (
+                  <button key={opportunityId} type="button" onClick={() => post({ action: 'win', orderId: row.id, opportunityId })} className="w-fit border border-ink px-3 py-2 font-mono text-specimen uppercase">Mark deal won from this order</button>
+                ))}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 function Notice({ text }: { text: string }) {
   return <p className="border border-hairline bg-clinical px-4 py-3 text-body-m text-secondary">{text}</p>;
 }
 
-function Kpi({ label, value, note, muted }: { label: string; value: string; note?: string; muted?: boolean }) {
+function Kpi({ label, value, note, muted, detail }: { label: string; value: string; note?: string; muted?: boolean; detail?: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-1 border border-hairline bg-clinical px-3 py-5 text-center">
       <dd className={`order-1 font-display tabular-nums ${muted ? 'text-heading-s-m md:text-heading-s text-tertiary' : 'text-heading-m-m md:text-heading-m text-primary'}`}>{value}</dd>
       <dt className="order-2 text-caption text-secondary">{label}{note ? <span className="text-tertiary"> ({note})</span> : null}</dt>
+      {detail ? <p className="order-3 text-caption text-secondary">{detail}</p> : null}
     </div>
   );
 }

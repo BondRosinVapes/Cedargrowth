@@ -5,6 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { mapRows, parseCsv, parseDate, parseMoney } from '../src/lib/crm/importer.ts';
+import { matchDistributorAccount } from '../src/lib/crm/distributor.ts';
 import {
   activePolicy,
   alertDedupeKey,
@@ -52,6 +53,7 @@ import {
   handleCounts,
   handleExport,
   handleHealth,
+  handleDistributorOrders,
   handleNotes,
   handleOpportunityCollection,
   handleReports,
@@ -374,6 +376,7 @@ class MemoryCrm implements CrmStore {
   tasks: Task[] = [];
   notes: Note[] = [];
   activity: Activity[] = [];
+  orders: import('../src/lib/crm/store.ts').DistributorOrder[] = [];
   private n = 0;
   private id() { this.n += 1; return `00000000-0000-4000-8000-${String(this.n).padStart(12, '0')}`; }
   async counts(brand: 'cedargrowth' | 'bond') {
@@ -391,8 +394,8 @@ class MemoryCrm implements CrmStore {
   async listAccounts(brand: 'cedargrowth' | 'bond', filter: { q: string | null; status: Account['status'] | null }) {
     return { state: 'ok' as const, value: this.accounts.filter((row) => row.brand === brand && (!filter.status || row.status === filter.status) && (!filter.q || row.displayName.toLowerCase().includes(filter.q))) };
   }
-  async createAccount(brand: 'cedargrowth' | 'bond', actor: string, input: { displayName: string; status: Account['status']; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: Account['accountType']; leadSource?: Account['leadSource'] }) {
-    const row: Account = { id: this.id(), publicId: `test-only:${brand}:account`, brand, displayName: input.displayName, status: input.status, city: input.city, notes: input.notes, licenseRef: input.licenseRef ?? null, facilityRef: input.facilityRef ?? null, licenseJurisdiction: input.licenseJurisdiction ?? null, licenseExpiry: input.licenseExpiry ?? null, assignedRep: input.assignedRep ?? null, accountType: input.accountType ?? null, leadSource: input.leadSource ?? null, createdAt: 'test-only', updatedAt: 'test-only', createdBy: actor, updatedBy: actor };
+  async createAccount(brand: 'cedargrowth' | 'bond', actor: string, input: { displayName: string; status: Account['status']; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: Account['accountType']; leadSource?: Account['leadSource']; distributor?: Account['distributor']; distributorAccountRef?: string | null }) {
+    const row: Account = { id: this.id(), publicId: `test-only:${brand}:account`, brand, displayName: input.displayName, status: input.status, city: input.city, notes: input.notes, licenseRef: input.licenseRef ?? null, facilityRef: input.facilityRef ?? null, licenseJurisdiction: input.licenseJurisdiction ?? null, licenseExpiry: input.licenseExpiry ?? null, assignedRep: input.assignedRep ?? null, accountType: input.accountType ?? null, leadSource: input.leadSource ?? null, distributor: input.distributor ?? null, distributorAccountRef: input.distributorAccountRef ?? null, createdAt: 'test-only', updatedAt: 'test-only', createdBy: actor, updatedBy: actor };
     this.accounts.push(row);
     return { state: 'ok' as const, value: row };
   }
@@ -445,6 +448,42 @@ class MemoryCrm implements CrmStore {
   }
   async intelligence() { return { state: 'ok' as const, value: { recommendations: [], alerts: [] } }; }
   async applyAlert() { return { state: 'missing' as const }; }
+  async listDistributorOrders(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.orders.filter((row) => row.brand === brand) }; }
+  async upsertDistributorOrder(brand: 'cedargrowth' | 'bond', actor: string, input: { distributor: import('../src/lib/crm/distributor.ts').Distributor; orderRef: string; retailerName: string; orderedOn: string | null; deliveredOn: string | null; orderStatus: import('../src/lib/crm/distributor.ts').OrderStatus; invoiceCents: number | null; retailerPaymentStatus: import('../src/lib/crm/distributor.ts').RetailerPaymentStatus; retailerPaidOn: string | null; payoutStatus: import('../src/lib/crm/distributor.ts').PayoutStatus; payoutCents: number | null; payoutOn: string | null; accountId: string | null }) {
+    const found = this.orders.find((row) => row.brand === brand && row.distributor === input.distributor && row.orderRef === input.orderRef);
+    if (found) {
+      found.orderStatus = input.orderStatus;
+      found.deliveredOn = input.deliveredOn;
+      found.invoiceCents = input.invoiceCents;
+      found.retailerPaymentStatus = input.retailerPaymentStatus;
+      found.retailerPaidOn = input.retailerPaidOn;
+      found.payoutStatus = input.payoutStatus;
+      found.payoutCents = input.payoutCents;
+      found.payoutOn = input.payoutOn;
+      found.importedAt = '2026-11-09T14:14:00Z';
+      this.activity.push({ id: this.id(), publicId: 'test-only:activity', brand, accountId: found.accountId, kind: 'distributor_order_imported', summary: 'Distributor order updated', actor, createdAt: found.importedAt });
+      return { state: 'ok' as const, value: { order: found, action: 'updated' as const } };
+    }
+    const row = { id: this.id(), publicId: 'test-only:order', brand, accountId: input.accountId, distributor: input.distributor, orderRef: input.orderRef, retailerName: input.retailerName, orderedOn: input.orderedOn, deliveredOn: input.deliveredOn, orderStatus: input.orderStatus, invoiceCents: input.invoiceCents, retailerPaymentStatus: input.retailerPaymentStatus, retailerPaidOn: input.retailerPaidOn, payoutStatus: input.payoutStatus, payoutCents: input.payoutCents, payoutOn: input.payoutOn, opportunityId: null, source: 'csv' as const, importedAt: '2026-11-09T14:14:00Z' };
+    this.orders.push(row);
+    this.activity.push({ id: this.id(), publicId: 'test-only:activity', brand, accountId: input.accountId, kind: 'distributor_order_imported', summary: 'Distributor order imported', actor, createdAt: row.importedAt });
+    return { state: 'ok' as const, value: { order: row, action: 'created' as const } };
+  }
+  async linkDistributorOrder(brand: 'cedargrowth' | 'bond', orderId: string, accountId: string) {
+    const account = this.accounts.find((row) => row.id === accountId && row.brand === brand);
+    const order = this.orders.find((row) => row.id === orderId && row.brand === brand);
+    if (!account || !order) return { state: 'rejected' as const };
+    order.accountId = accountId;
+    return { state: 'ok' as const, value: order };
+  }
+  async markDealWonFromOrder(brand: 'cedargrowth' | 'bond', _actor: string, orderId: string, opportunityId: string) {
+    const order = this.orders.find((row) => row.id === orderId && row.brand === brand);
+    const deal = this.opportunities.find((row) => row.id === opportunityId && row.brand === brand);
+    if (!order || !order.accountId || !deal || deal.accountId !== order.accountId || deal.stage === 'won' || deal.stage === 'lost') return { state: 'rejected' as const };
+    deal.stage = 'won';
+    order.opportunityId = opportunityId;
+    return { state: 'ok' as const, value: { order, stage: 'won' as const } };
+  }
 }
 
 const memory = new MemoryCrm();
@@ -545,9 +584,36 @@ const bondImport = await handleImport({ actorId: 'sales-1', grants: salesGrant, 
 assert(bondImport.status === 403, 'import denies a brand the session is not granted');
 const tooMany = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'accounts', commit: false, rows: Array.from({ length: 101 }, (_, i) => ({ line: i + 2, record: { displayName: `x${i}` } })) }), store: memory });
 assert(tooMany.status === 413, 'import rejects oversized batches');
+assert(matchDistributorAccount([{ id: 'a', displayName: 'Shop', licenseRef: 'LIC', distributorAccountRef: 'R-9' }, { id: 'b', displayName: 'Shop', licenseRef: null, distributorAccountRef: null }], { distributorAccountRef: 'R-9', licenseRef: null, retailerName: 'Other' }) === 'a', 'distributor match prefers the distributor account id');
+assert(matchDistributorAccount([{ id: 'a', displayName: 'Shop', licenseRef: 'LIC', distributorAccountRef: null }, { id: 'b', displayName: 'Shop', licenseRef: 'LIC', distributorAccountRef: null }], { distributorAccountRef: null, licenseRef: 'LIC', retailerName: 'Shop' }) === null, 'distributor match does not guess when two accounts share a license');
+const orderRows = mapRows('orders', parseCsv('Order ID,Retailer,License,Status,Invoice Total\nN-1,TEST ONLY synthetic account,LIC-TEST,Delivered,"$90.00"\nN-2,Nobody Retail,NO-LIC,Placed,$10\n')).rows;
+assert(orderRows[0].record?.orderStatus === 'delivered' && orderRows[0].record?.invoiceCents === 9000, 'distributor import maps order headers');
+const accountsBeforeOrders = memory.accounts.length;
+const stageBefore = memory.opportunities.find((row) => row.accountId === accountId)?.stage;
+const salesOrders = await handleImport({ actorId: 'sales-1', grants: salesGrant, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'orders', commit: true, rows: orderRows }), store: memory });
+assert(salesOrders.status === 403 && memory.orders.length === 0, 'a salesperson cannot import distributor orders');
+const orderImport = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'orders', commit: true, rows: orderRows }), store: memory });
+const orderOut = orderImport.body.outcomes as { status: string; orderId?: string }[];
+assert(orderOut[0].status === 'created' && orderOut[1].status === 'unmatched' && memory.accounts.length === accountsBeforeOrders, 'unmatched retailers are not auto-created');
+assert(memory.opportunities.find((row) => row.accountId === accountId)?.stage === stageBefore, 'no deal changes stage without the button');
+const reimportRows = mapRows('orders', parseCsv('Order ID,Retailer,Status,Invoice Total\nN-1,Renamed Retailer,Scheduled,$120\n')).rows;
+const reimport = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'orders', commit: true, rows: reimportRows }), store: memory });
+const stored = memory.orders.filter((row) => row.orderRef === 'N-1');
+assert((reimport.body.outcomes as { status: string }[])[0].status === 'updated' && stored.length === 1 && stored[0].orderStatus === 'scheduled' && stored[0].retailerName === 'TEST ONLY synthetic account' && stored[0].invoiceCents === 12000, 're-import updates and never duplicates');
+const bondOrders = await handleDistributorOrders({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/distributor-orders?brand=bond'), store: memory }, 'GET');
+assert(bondOrders.status === 200 && ((bondOrders.body.orders as unknown[]) || []).length === 0, 'distributor orders stay in their brand');
+const crossLink = await handleDistributorOrders({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/distributor-orders', { brand: 'bond', action: 'link', orderId: orderOut[1].orderId, accountId }), store: memory }, 'POST');
+assert(crossLink.status === 400 && memory.orders.find((row) => row.id === orderOut[1].orderId)?.accountId === null, 'a distributor order cannot be linked to another brand');
+const forecastDash = await handleDashboard({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/dashboard?brand=cedargrowth'), store: memory });
+const forecastBody = forecastDash.body.dashboard as { kpis: { totalValueCents: number | null }; distributor: { invoicedNabisCents: number | null; nabisOrderCount: number } };
+assert(forecastBody.kpis.totalValueCents !== forecastBody.distributor.invoicedNabisCents && forecastBody.distributor.nabisOrderCount === 2 && forecastBody.distributor.invoicedNabisCents === 13000, 'forecast and invoiced totals stay separate');
+const oppId = String((opp.body.opportunity as { id?: string } | undefined)?.id || '');
+const marked = await handleDistributorOrders({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/distributor-orders', { brand: 'cedargrowth', action: 'win', orderId: orderOut[0].orderId, opportunityId: oppId }), store: memory }, 'POST');
+assert(marked.status === 200 && memory.opportunities.find((row) => row.id === oppId)?.stage === 'won' && memory.opportunities.find((row) => row.id === oppId)?.forecastCents === 2500, 'mark deal won is explicit and leaves the forecast unchanged');
 const health = await handleHealth({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/health?brand=cedargrowth'), store: memory });
 const healthCanix = health.body.canix as { connected?: boolean; lastSuccessAt?: unknown };
 assert(health.status === 200 && health.body.storage === 'ready' && health.body.configured === true && healthCanix.connected === false && health.body.adaptersConnected === false, 'ready storage is separate from a disconnected adapter');
+assert(String(health.body.nabisLabel).includes('Nov 9') && String(health.body.nabisLabel).includes('CSV'), 'health names the Nabis CSV import');
 const absentHealth = await handleHealth({
   actorId: 'gary@cedargrowthco.com',
   grants: owner,
