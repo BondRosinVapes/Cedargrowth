@@ -36,6 +36,9 @@ import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
 import { monthStarts, parseCapacityWrite, productionForecast, stageWinRates } from './forecast';
 import { FIELD_BUCKET, READ_URL_SECONDS, isProductLine, isVisitOutcome, mediaPath, roundLocation, validateMediaUpload } from './field';
+import { BATCH_MISS, COA_BUCKET, COA_READ_SECONDS, LINK_MISS, clientIp, coaPath, consumeRate, parseBatchWrite, parseBuyer, parseReorderLines, productIdOk, tokenShapeOk, validateCoaUpload } from './reorder';
+import { PRODUCTS } from '@/lib/products';
+import { sendReorderLink, sendReorderRequest } from '@/lib/email';
 import { getSupabaseServerClient } from '@/lib/supabase';
 import { IMPORT_BATCH, IMPORT_KINDS, type ImportKind } from './importer';
 
@@ -929,6 +932,203 @@ export async function handleNotes(ctx: CrmContext, method: 'GET' | 'POST'): Prom
   if (created.state === 'rejected') return { status: 400, body: { ok: false, reason: 'The related record is not in this brand.' } };
   if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'missing' ? 'unavailable' : created.state);
   return { status: 201, body: { ok: true, configured: true, brand: auth.brand, note: created.value } };
+}
+
+function publicMiss(): CrmResult {
+  return { status: 404, body: { ok: false, reason: LINK_MISS } };
+}
+
+function limited(): CrmResult {
+  return { status: 429, body: { ok: false, reason: 'Too many attempts. Wait and try again.' } };
+}
+
+export async function handleBatches(ctx: CrmContext, method: 'GET' | 'POST' | 'PATCH'): Promise<CrmResult> {
+  if (method === 'GET') {
+    const url = new URL(ctx.request.url);
+    const auth = await gate(ctx, url.searchParams.get('brand'));
+    if (isResult(auth)) return auth;
+    const rows = await ctx.store.listBatches(auth.brand);
+    if (rows.state !== 'ok') return storageBody(auth.brand, rows.state === 'rejected' || rows.state === 'missing' ? 'unavailable' : rows.state);
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, batches: rows.value } };
+  }
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Only an owner or administrator can manage batches.' } };
+  if (method === 'PATCH') {
+    const id = typeof record.id === 'string' ? record.id : '';
+    if (!parseUuid(id)) return { status: 400, body: { ok: false, reason: 'Batch was not found in this brand.' } };
+    const saved = await ctx.store.releaseBatch(auth.brand, id);
+    if (saved.state === 'missing' || saved.state === 'rejected') return { status: 400, body: { ok: false, reason: 'Batch was not found in this brand, or it has no lab report.' } };
+    if (saved.state !== 'ok') return storageBody(auth.brand, saved.state);
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, batch: saved.value } };
+  }
+  const parsed = parseBatchWrite(record);
+  if (!parsed.ok) return { status: 400, body: { ok: false, reason: parsed.reason } };
+  const file = validateCoaUpload(record);
+  if (!file.ok) return { status: 400, body: { ok: false, reason: file.reason } };
+  const id = crypto.randomUUID();
+  const path = coaPath(auth.brand, id);
+  const created = await ctx.store.createBatch(auth.brand, auth.actorId, { id, ...parsed.value, coaStoragePath: path });
+  if (created.state === 'rejected') return { status: 400, body: { ok: false, reason: 'That batch number is already recorded in this brand.' } };
+  if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'missing' ? 'unavailable' : created.state);
+  const client = getSupabaseServerClient();
+  if (!client) return { status: 201, body: { ok: true, configured: false, brand: auth.brand, batch: created.value, uploadUrl: null, token: null } };
+  const signed = await client.storage.from(COA_BUCKET).createSignedUploadUrl(path);
+  if (signed.error || !signed.data) return { status: 503, body: { ok: false, reason: 'The upload could not be signed.' } };
+  return { status: 201, body: { ok: true, configured: true, brand: auth.brand, batch: created.value, uploadUrl: signed.data.signedUrl, token: signed.data.token, path } };
+}
+
+export async function handleReorderLinks(ctx: CrmContext, method: 'GET' | 'POST' | 'PATCH'): Promise<CrmResult> {
+  if (method === 'GET') {
+    const url = new URL(ctx.request.url);
+    const auth = await gate(ctx, url.searchParams.get('brand'));
+    if (isResult(auth)) return auth;
+    const accountId = url.searchParams.get('accountId') || '';
+    if (!parseUuid(accountId)) return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+    const rows = await ctx.store.listReorderLinks(auth.brand, accountId);
+    if (rows.state !== 'ok') return storageBody(auth.brand, rows.state === 'rejected' || rows.state === 'missing' ? 'unavailable' : rows.state);
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, links: rows.value.map((row) => ({ id: row.id, accountId: row.accountId, expiresAt: row.expiresAt, revokedAt: row.revokedAt, createdAt: row.createdAt })) } };
+  }
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  if (method === 'PATCH') {
+    const id = typeof record.id === 'string' ? record.id : '';
+    if (!parseUuid(id)) return { status: 400, body: { ok: false, reason: 'Reorder link was not found in this brand.' } };
+    const saved = await ctx.store.revokeReorderLink(auth.brand, id, Date.now());
+    if (saved.state === 'missing' || saved.state === 'rejected') return { status: 404, body: { ok: false, reason: 'Reorder link was not found in this brand.' } };
+    if (saved.state !== 'ok') return storageBody(auth.brand, saved.state);
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, link: { id: saved.value.id, revokedAt: saved.value.revokedAt } } };
+  }
+  const accountId = typeof record.accountId === 'string' ? record.accountId : '';
+  if (!parseUuid(accountId)) return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+  const created = await ctx.store.createReorderLink(auth.brand, auth.actorId, accountId, Date.now());
+  if (created.state === 'rejected') return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
+  if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'missing' ? 'unavailable' : created.state);
+  const origin = new URL(ctx.request.url).origin;
+  const url = `${origin}/reorder/${created.value.token}`;
+  const email = typeof record.email === 'string' ? record.email.trim() : '';
+  let emailed = false;
+  if (email) {
+    const account = await ctx.store.listAccounts(auth.brand, { q: null, status: null });
+    const name = account.state === 'ok' ? account.value.find((row) => row.id === accountId)?.displayName || 'Account' : 'Account';
+    emailed = await sendReorderLink({ to: email, accountName: name, url });
+  }
+  return { status: 201, body: { ok: true, configured: true, brand: auth.brand, url, expiresAt: created.value.link.expiresAt, emailed } };
+}
+
+function catalog(accountName: string, batches: { id: string; productId: string; batchNumber: string; labName: string; testedOn: string }[]) {
+  return {
+    ok: true,
+    accountName,
+    products: PRODUCTS.map((product) => {
+      const batch = batches.find((row) => row.productId === product.slug) ?? null;
+      return {
+        productId: product.slug,
+        name: product.name,
+        spec: product.spec,
+        batch: batch ? { id: batch.id, batchNumber: batch.batchNumber, labName: batch.labName, testedOn: batch.testedOn } : null,
+      };
+    }),
+  };
+}
+
+export async function handlePublicReorder(store: CrmStore, request: Request, token: string, method: 'GET' | 'POST'): Promise<CrmResult> {
+  const now = Date.now();
+  const ip = clientIp(request.headers.get('x-forwarded-for'));
+  const ipLimited = consumeRate(`ip:${ip}`, now);
+  if (!tokenShapeOk(token)) return ipLimited ? limited() : publicMiss();
+  if (ipLimited || consumeRate(`reorder:${token}`, now)) return limited();
+  if (method === 'POST') {
+    const origin = request.headers.get('origin');
+    const site = request.headers.get('sec-fetch-site');
+    if (site && site !== 'same-origin') return { status: 403, body: { ok: false, reason: 'Request was rejected.' } };
+    if (!origin || origin !== new URL(request.url).origin) return { status: 403, body: { ok: false, reason: 'Request was rejected.' } };
+  }
+  const opened = await store.openReorder(token, now);
+  if (opened.state !== 'ok') return storageBody('cedargrowth', opened.state === 'rejected' || opened.state === 'missing' ? 'unavailable' : opened.state);
+  if (opened.value.status !== 'ok') return publicMiss();
+  if (method === 'GET') return { status: 200, body: catalog(opened.value.accountName, opened.value.batches) };
+  const body = await readBody(request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const buyer = parseBuyer(record);
+  if (!buyer.ok) return { status: 400, body: { ok: false, reason: buyer.reason } };
+  const lines = parseReorderLines(record.lines, opened.value.batches);
+  if (!lines.ok) return { status: 400, body: { ok: false, reason: lines.reason } };
+  const saved = await store.submitReorder(token, now, { lines: lines.lines, buyerName: buyer.buyerName, buyerEmail: buyer.buyerEmail, note: buyer.note });
+  if (saved.state === 'closed') return publicMiss();
+  if (saved.state === 'rejected') return { status: 400, body: { ok: false, reason: 'That batch is not available.' } };
+  if (saved.state !== 'ok') return storageBody('cedargrowth', saved.state === 'absent' ? 'absent' : 'unavailable');
+  const recipients = [process.env.RESERVATION_ALERT_TO || ''];
+  if (opened.value.assignedRep && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(opened.value.assignedRep)) recipients.push(opened.value.assignedRep);
+  await sendReorderRequest({
+    to: recipients,
+    accountName: opened.value.accountName,
+    buyerName: buyer.buyerName,
+    buyerEmail: buyer.buyerEmail,
+    lines: lines.lines.map((line) => ({ name: PRODUCTS.find((product) => product.slug === line.productId)?.name || line.productId, batchNumber: line.batchNumber, quantityUnits: line.quantityUnits })),
+  });
+  return { status: 201, body: { ok: true, confirmation: saved.value.confirmation, request: true } };
+}
+
+export async function handleReorderReport(store: CrmStore, request: Request, token: string): Promise<CrmResult> {
+  const now = Date.now();
+  const ip = clientIp(request.headers.get('x-forwarded-for'));
+  const ipLimited = consumeRate(`ip:${ip}`, now);
+  if (!tokenShapeOk(token)) return ipLimited ? limited() : publicMiss();
+  if (ipLimited || consumeRate(`reorder:${token}`, now)) return limited();
+  const opened = await store.openReorder(token, now);
+  if (opened.state !== 'ok') return storageBody('cedargrowth', opened.state === 'rejected' || opened.state === 'missing' ? 'unavailable' : opened.state);
+  if (opened.value.status !== 'ok') return publicMiss();
+  const batchId = new URL(request.url).searchParams.get('batchId') || '';
+  const batch = opened.value.batches.find((row) => row.id === batchId && row.released && row.coaStoragePath);
+  if (!batch || !batch.coaStoragePath) return { status: 404, body: { ok: false, reason: BATCH_MISS } };
+  const client = getSupabaseServerClient();
+  if (!client) return storageBody('cedargrowth', 'absent');
+  const signed = await client.storage.from(COA_BUCKET).createSignedUrl(batch.coaStoragePath, COA_READ_SECONDS);
+  if (signed.error || !signed.data?.signedUrl) return { status: 503, body: { ok: false, reason: 'The lab report could not be signed.' } };
+  return { status: 200, body: { ok: true, url: signed.data.signedUrl, expiresIn: COA_READ_SECONDS } };
+}
+
+export async function handleTransparencyBatch(store: CrmStore, request: Request): Promise<CrmResult> {
+  const now = Date.now();
+  const ip = clientIp(request.headers.get('x-forwarded-for'));
+  if (consumeRate(`transparency:${ip}`, now)) return limited();
+  const url = new URL(request.url);
+  const batchNumber = (url.searchParams.get('number') || '').trim();
+  if (batchNumber.length < 1 || batchNumber.length > 40) return { status: 200, body: { ok: true, found: false, reason: BATCH_MISS } };
+  const found = await store.lookupReleasedBatch('cedargrowth', batchNumber);
+  if (found.state !== 'ok') return storageBody('cedargrowth', found.state === 'rejected' || found.state === 'missing' ? 'unavailable' : found.state);
+  if (!found.value || !found.value.released || !productIdOk(found.value.productId)) return { status: 200, body: { ok: true, found: false, reason: BATCH_MISS } };
+  const product = PRODUCTS.find((item) => item.slug === found.value?.productId);
+  if (url.searchParams.get('sign') === '1') {
+    if (!found.value.coaStoragePath) return { status: 200, body: { ok: true, found: false, reason: BATCH_MISS } };
+    const client = getSupabaseServerClient();
+    if (!client) return storageBody('cedargrowth', 'absent');
+    const signed = await client.storage.from(COA_BUCKET).createSignedUrl(found.value.coaStoragePath, COA_READ_SECONDS);
+    if (signed.error || !signed.data?.signedUrl) return { status: 503, body: { ok: false, reason: 'The lab report could not be signed.' } };
+    return { status: 200, body: { ok: true, found: true, url: signed.data.signedUrl, expiresIn: COA_READ_SECONDS } };
+  }
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      found: true,
+      batch: {
+        id: found.value.id,
+        batchNumber: found.value.batchNumber,
+        product: product?.name || found.value.productId,
+        labName: found.value.labName,
+        testedOn: found.value.testedOn,
+      },
+    },
+  };
 }
 
 export function staffAudience(hasCedarSalesMembership: boolean): Audience {

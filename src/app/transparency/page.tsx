@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Eyebrow } from '@/components/atoms/Eyebrow';
 import { Unknown } from '@/components/atoms/Unknown';
+import { BatchLookup } from './BatchLookup';
 
 export const metadata: Metadata = {
   title: 'Transparency',
@@ -34,33 +35,7 @@ export default function TransparencyPage() {
         </div>
       </section>
 
-      {/* Batch lookup, disabled */}
-      <section className="bg-clinical py-16 md:py-24">
-        <div className="mx-auto max-w-content px-page-margin-mobile md:px-page-margin">
-          <div className="reveal flex max-w-editorial flex-col gap-6">
-            <Eyebrow>Batch lookup</Eyebrow>
-            <div className="flex flex-col gap-3">
-              <label
-                htmlFor="transparency-batch"
-                className="font-mono text-specimen uppercase tracking-specimen text-tertiary"
-              >
-                Batch number
-              </label>
-              <input
-                id="transparency-batch"
-                name="batch"
-                disabled
-                placeholder="BATCH ID"
-                autoComplete="off"
-                className="border-b border-hairline bg-transparent py-2 font-mono text-data uppercase tracking-specimen text-primary placeholder:text-tertiary focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60"
-              />
-              <p className="text-caption-m md:text-caption text-tertiary">
-                Batch lookup opens with the first published batch.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
+      <BatchLookup />
 
       {/* What is tested and why */}
       <section className="bg-parchment py-16 md:py-24">
