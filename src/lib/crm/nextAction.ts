@@ -12,6 +12,7 @@ export type ActionAccount = {
   county: string | null;
   assignedRep: string | null;
   licenseExpiry: string | null;
+  recordMarker?: 'test' | null;
 };
 
 export type ActionTask = { id: string; brand: string; accountId: string | null; title: string; status: string; dueOn: string | null; ownerActor: string | null };
@@ -74,11 +75,12 @@ export function nextBestActions(input: {
   const brand = input.brand;
   const rep = input.rep;
   const today = input.today;
-  const accounts = input.accounts.filter((row) => row.brand === brand);
+  const hiddenAccounts = new Set(input.accounts.filter((row) => row.brand === brand && row.recordMarker === 'test').map((row) => row.id));
+  const accounts = input.accounts.filter((row) => row.brand === brand && row.recordMarker !== 'test');
   const mine = accounts.filter((row) => (row.assignedRep || '').trim() === rep);
   const byId = new Map(accounts.map((row) => [row.id, row]));
-  const tasks = input.tasks.filter((row) => row.brand === brand);
-  const deals = input.deals.filter((row) => row.brand === brand);
+  const tasks = input.tasks.filter((row) => row.brand === brand && (!row.accountId || !hiddenAccounts.has(row.accountId)));
+  const deals = input.deals.filter((row) => row.brand === brand && !hiddenAccounts.has(row.accountId));
   const ranked: { rule: number; rank: number; action: NextAction }[] = [];
   const inactive: InactiveRule[] = [];
   const push = (rule: number, rank: number, key: string, reason: string) => {

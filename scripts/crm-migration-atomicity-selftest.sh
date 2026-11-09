@@ -106,6 +106,44 @@ echo 'ok: audit_note execute matches the older revoke and pins search_path'
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "set role service_role; insert into public.crm_notes (brand, account_id, body, actor) select 'cedargrowth', id, 'TEST ONLY service role note', 'test-only' from public.crm_accounts limit 1;" >/dev/null
 echo 'ok: service_role can still append a note through the pinned function'
 
+KINDS=$(sudo -u postgres psql -d "$DB" -tA -c "select pg_get_constraintdef(oid) from pg_constraint where conname = 'crm_activity_kind_check';")
+echo "$KINDS" | grep -q 'digest_sent' && echo "$KINDS" | grep -q 'inquiry_received' || { echo 'FAIL: activity kinds'; exit 1; }
+echo 'ok: activity kinds keep digest_sent and add inquiry_received'
+RECV=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('11111111-1111-4111-8111-111111111111'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'North Store', 'Ada Buyer', 'ada@northstore.test', null, 'OCM-1', '1 Main', 'Buffalo', '14201', 'Erie', 'Hello plain', 'v1:0123456789abcdef', false)::text;")
+REPLAY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('11111111-1111-4111-8111-111111111111'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'North Store', 'Ada Buyer', 'ada@northstore.test', null, 'OCM-1', '1 Main', 'Buffalo', '14201', 'Erie', 'Hello plain', 'v1:0123456789abcdef', false)::text;")
+DUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('22222222-2222-4222-8222-222222222222'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Other Shop', 'Bea Buyer', 'bea@other.test', null, 'OCM-1', '2 Main', 'Buffalo', '14201', 'Erie', null, 'v1:0123456789abcdef', false)::text;")
+COUNTS=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_accounts where brand = 'bond' and lead_source = 'bond_inquiry') || ',' || (select o.stage || ':' || coalesce(o.forecast_cents::text, 'null') || ':' || a.ocm_status from public.crm_opportunities o join public.crm_accounts a on a.id = o.account_id where o.brand = 'bond' limit 1) || ',' || (select body from public.crm_notes where brand = 'bond' and body = 'Hello plain') || ',' || (select count(*) from public.crm_activity where summary like '%ada@northstore.test%' or summary like '%Hello plain%') || ',' || (select count(*) from public.crm_intake_log);")
+if [ "$RECV" != '{"ok": true, "duplicate": false}' ] || [ "$REPLAY" != '{"ok": true, "duplicate": true}' ] || [ "$DUP" != '{"ok": true, "duplicate": false}' ] || [ "$COUNTS" != "1,lead:null:unverified,Hello plain,0,2" ]; then
+  echo "FAIL: bond intake ${RECV} ${REPLAY} ${DUP} ${COUNTS}"
+  exit 1
+fi
+echo 'ok: bond intake creates one lead, replays, and flags a weak duplicate'
+EMAIL_COLS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'crm_intake_deletions' and column_name like '%email%';")
+DELETED=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_delete_bond_inquiry('11111111-1111-4111-8111-111111111111'::uuid)::text;")
+LEFT=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_accounts where brand = 'bond') || ',' || (select count(*) from public.crm_intake_log) || ',' || (select contact_name from public.crm_intake_deletions limit 1) || ',' || (select count(*) from public.crm_notes where body like '%ada@%');")
+if [ "$EMAIL_COLS" != "0" ] || [ "$DELETED" != '{"ok": true, "deleted": true}' ] || [ "$LEFT" != "0,0,bond,0" ]; then
+  echo "FAIL: intake deletion ${DELETED} ${LEFT}"
+  exit 1
+fi
+echo 'ok: intake deletion removes the lead and records bond with no mailbox'
+OLD=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('33333333-3333-4333-8333-333333333333'::uuid, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Old Shop', 'Cara Buyer', 'cara@old.test', null, 'OLD-1', '3 Main', 'Buffalo', '14201', 'Erie', null, 'v1:0123456789abcdef', false)::text;")
+KEPT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('44444444-4444-4444-8444-444444444444'::uuid, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Kept Shop', 'Dan Buyer', 'dan@kept.test', null, 'KEPT-1', '4 Main', 'Buffalo', '14201', 'Erie', null, 'v1:0123456789abcdef', false)::text;")
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update public.crm_accounts set ocm_status = 'verified' where display_name = 'Kept Shop';" >/dev/null
+PURGED=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_inquiries('2026-11-09T15:00:00Z'::timestamptz)::text;")
+AFTER=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_accounts where display_name = 'Old Shop') || ',' || (select count(*) from public.crm_accounts where display_name = 'Kept Shop') || ',' || (select ocm_status from public.crm_accounts where display_name = 'Kept Shop');")
+if [ "$OLD" != '{"ok": true, "duplicate": false}' ] || [ "$KEPT" != '{"ok": true, "duplicate": false}' ] || [ "$PURGED" != '{"ok": true, "purged": 1}' ] || [ "$AFTER" != "0,1,verified" ]; then
+  echo "FAIL: intake purge ${OLD} ${KEPT} ${PURGED} ${AFTER}"
+  exit 1
+fi
+echo 'ok: purge removes an unverified lead and keeps a verified one'
+EXEC=$(sudo -u postgres psql -d "$DB" -tA -c "select has_function_privilege('anon', 'public.crm_receive_bond_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean)', 'execute')::text || ',' || has_function_privilege('service_role', 'public.crm_receive_bond_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean)', 'execute')::text || ',' || has_table_privilege('service_role', 'public.crm_intake_log', 'insert')::text;")
+if [ "$EXEC" != "false,true,false" ]; then
+  echo "FAIL: intake grants ${EXEC}"
+  exit 1
+fi
+echo 'ok: intake log is writable only through the service role function'
+expect_fail 'note delete after intake' "delete from public.crm_notes where body like 'TEST ONLY%';"
+
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${DB};" >/dev/null
 
 UP=crm_suite_upgrade

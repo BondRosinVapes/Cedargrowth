@@ -207,9 +207,10 @@ export function buildDigest(input: {
 }): DigestModel {
   const week = nyWeek(input.nowMs);
   const brand = input.brand;
-  const accounts = input.accounts.filter((row) => row.brand === brand);
-  const opportunities = input.opportunities.filter((row) => row.brand === brand);
-  const tasks = input.tasks.filter((row) => row.brand === brand);
+  const hidden = new Set(input.accounts.filter((row) => row.brand === brand && row.recordMarker === 'test').map((row) => row.id));
+  const accounts = input.accounts.filter((row) => row.brand === brand && row.recordMarker !== 'test');
+  const opportunities = input.opportunities.filter((row) => row.brand === brand && !hidden.has(row.accountId));
+  const tasks = input.tasks.filter((row) => row.brand === brand && (!row.accountId || !hidden.has(row.accountId)));
   const events = (input.events ?? []).filter((row) => row.brand === brand);
   const visits = (input.visits ?? []).filter((row) => row.brand === brand);
   const orders = (input.orders ?? []).filter((row) => row.brand === brand && row.distributor === 'nabis');
@@ -295,7 +296,7 @@ export function buildDigest(input: {
         brand,
         rep: row.rep,
         today: week.today,
-        accounts: accounts.map((account) => ({ id: account.id, brand: account.brand, displayName: account.displayName || account.id, status: account.status, county: account.county ?? null, assignedRep: account.assignedRep, licenseExpiry: account.licenseExpiry ?? null })),
+        accounts: accounts.map((account) => ({ id: account.id, brand: account.brand, displayName: account.displayName || account.id, status: account.status, county: account.county ?? null, assignedRep: account.assignedRep, licenseExpiry: account.licenseExpiry ?? null, recordMarker: account.recordMarker ?? null })),
         tasks: tasks.map((task) => ({ id: task.id || task.title || 'task', brand: task.brand, accountId: task.accountId ?? null, title: task.title || '', status: task.status, dueOn: task.dueOn, ownerActor: task.ownerActor ?? null })),
         deals: opportunities.map((deal) => ({ id: deal.id || deal.accountId, brand: deal.brand, accountId: deal.accountId, name: deal.name || 'Deal', stage: deal.stage, expectedCloseOn: deal.expectedCloseOn })),
         notes: (input.notes ?? []).filter((note) => note.brand === brand),

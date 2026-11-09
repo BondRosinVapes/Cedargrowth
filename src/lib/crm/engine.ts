@@ -47,7 +47,7 @@ export const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
   cultivator: 'Cultivator',
   other: 'Other',
 };
-export const LEAD_SOURCES = ['referral', 'leaflink', 'trade_show', 'cold_outreach', 'website', 'hoodie', 'existing_relationship', 'other'] as const;
+export const LEAD_SOURCES = ['referral', 'leaflink', 'trade_show', 'cold_outreach', 'website', 'hoodie', 'existing_relationship', 'other', 'bond_inquiry'] as const;
 export type LeadSource = (typeof LEAD_SOURCES)[number];
 export const LEAD_SOURCE_LABELS: Record<LeadSource, string> = {
   referral: 'Referral',
@@ -58,6 +58,7 @@ export const LEAD_SOURCE_LABELS: Record<LeadSource, string> = {
   hoodie: 'Hoodie',
   existing_relationship: 'Existing relationship',
   other: 'Other',
+  bond_inquiry: 'Bond inquiry',
 };
 
 const ACCOUNT_STATUS: readonly AccountStatus[] = ['prospect', 'active', 'paused', 'closed'];

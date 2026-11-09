@@ -23,6 +23,7 @@ import { DISTRIBUTORS, ORDER_SOURCES, ORDER_STATUSES, PAYOUT_STATUSES, RETAILER_
 import { sampleTaskTitle, type MediaKind, type VisitOutcome } from './field';
 import { confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, reorderDeal, type ReleasedBatch, type ReorderLine } from './reorder';
 import { knownEmailEvent, type EmailEvent } from './emailStatus';
+import { intakeTestMarker, type IntakeLead } from './intake';
 
 export type StoreResult<T> =
   | { state: 'ok'; value: T }
@@ -47,6 +48,15 @@ export type Account = {
   assignedRep: string | null;
   accountType: AccountType | null;
   leadSource: LeadSource | null;
+  street?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
+  consentVersion?: string | null;
+  consentReceivedAt?: string | null;
+  intakeSubmittedAt?: string | null;
+  ocmStatus?: 'unverified' | 'verified' | null;
+  recordMarker?: 'test' | null;
+  sourceInquiryId?: string | null;
   distributor: Distributor | null;
   distributorAccountRef: string | null;
   createdAt: string;
@@ -89,6 +99,7 @@ export type Opportunity = {
   productLine: ProductLine | null;
   quantityUnits: number | null;
   updatedAt: string;
+  sourceInquiryId?: string | null;
 };
 
 export type Task = {
@@ -103,6 +114,7 @@ export type Task = {
   notes: string;
   ownerActor: string | null;
   completedAt: string | null;
+  sourceInquiryId?: string | null;
 };
 
 export type Note = {
@@ -113,6 +125,7 @@ export type Note = {
   body: string;
   actor: string;
   createdAt: string;
+  sourceInquiryId?: string | null;
 };
 
 export type Activity = {
@@ -343,9 +356,12 @@ export interface CrmStore {
   insertMarketRetailers(brand: CrmBrand, rows: { licenseNumber: string; name: string; county: string; licenseType: string }[], uploadedAt: string): Promise<StoreResult<{ count: number }>>;
   listDismissals(brand: CrmBrand): Promise<StoreResult<{ id: string; brand: CrmBrand; repActor: string; actionKey: string; until: string }[]>>;
   upsertDismissal(brand: CrmBrand, repActor: string, actionKey: string, until: string): Promise<StoreResult<{ id: string; brand: CrmBrand; repActor: string; actionKey: string; until: string }>>;
+  receiveBondInquiry(lead: IntakeLead, receivedAt: string): Promise<StoreResult<{ duplicate: boolean }>>;
+  deleteBondInquiry(inquiryId: string): Promise<StoreResult<{ deleted: boolean }>>;
+  purgeBondInquiries(nowIso: string): Promise<StoreResult<{ purged: number }>>;
 }
 
-const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,created_at,updated_at,created_by,updated_by';
+const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,street,state,postal_code,consent_version,consent_received_at,intake_submitted_at,ocm_status,record_marker,source_inquiry_id,created_at,updated_at,created_by,updated_by';
 const ORDER_COLS = 'id,public_id,brand,account_id,distributor,order_ref,retailer_name,ordered_on,delivered_on,order_status,invoice_cents,retailer_payment_status,retailer_paid_on,payout_status,payout_cents,payout_on,opportunity_id,source,imported_at';
 const CONTACT_COLS = 'id,public_id,brand,account_id,name,title,email,phone,notes,preference,created_at,updated_at';
 const OPP_COLS = 'id,public_id,brand,account_id,name,stage,forecast_cents,expected_close_on,notes,loss_reason,next_action,next_action_on,product_line,quantity_units,updated_at';
@@ -380,6 +396,15 @@ function mapAccount(row: Record<string, unknown>): Account | null {
     assignedRep: row.assigned_rep ? String(row.assigned_rep) : null,
     accountType: (ACCOUNT_TYPES as readonly string[]).includes(String(row.account_type)) ? (row.account_type as AccountType) : null,
     leadSource: (LEAD_SOURCES as readonly string[]).includes(String(row.lead_source)) ? (row.lead_source as LeadSource) : null,
+    street: row.street ? String(row.street) : null,
+    state: row.state ? String(row.state) : null,
+    postalCode: row.postal_code ? String(row.postal_code) : null,
+    consentVersion: row.consent_version ? String(row.consent_version) : null,
+    consentReceivedAt: row.consent_received_at ? String(row.consent_received_at) : null,
+    intakeSubmittedAt: row.intake_submitted_at ? String(row.intake_submitted_at) : null,
+    ocmStatus: row.ocm_status === 'unverified' || row.ocm_status === 'verified' ? row.ocm_status : null,
+    recordMarker: row.record_marker === 'test' ? 'test' : null,
+    sourceInquiryId: row.source_inquiry_id ? String(row.source_inquiry_id) : null,
     distributor: (DISTRIBUTORS as readonly string[]).includes(String(row.distributor)) ? (row.distributor as Distributor) : null,
     distributorAccountRef: row.distributor_account_ref ? String(row.distributor_account_ref) : null,
     createdAt: String(row.created_at ?? ''),
@@ -1448,6 +1473,46 @@ class SupabaseCrmStore implements CrmStore {
     const { data, error } = await this.db.from('crm_action_dismissals').insert({ brand, rep_actor: repActor, action_key: actionKey, until }).select('id,brand,rep_actor,action_key,until').maybeSingle();
     if (error || !data) return { state: 'unavailable' as const };
     return { state: 'ok' as const, value: { id: String(data.id), brand, repActor: String(data.rep_actor), actionKey: String(data.action_key), until: String(data.until).slice(0, 10) } };
+  }
+
+  async receiveBondInquiry(lead: IntakeLead, receivedAt: string) {
+    const { data, error } = await this.db.rpc('crm_receive_bond_inquiry', {
+      p_inquiry_id: lead.inquiryId,
+      p_submitted_at: lead.submittedAt,
+      p_received_at: receivedAt,
+      p_business_name: lead.businessName,
+      p_contact_name: lead.contactName,
+      p_contact_email: lead.contactEmail,
+      p_contact_phone: lead.contactPhone,
+      p_license_number: lead.licenseNumber,
+      p_street: lead.street,
+      p_city: lead.city,
+      p_postal_code: lead.postalCode,
+      p_county: lead.county,
+      p_message: lead.message,
+      p_consent_version: lead.consentVersion,
+      p_test: intakeTestMarker(lead.businessName, lead.licenseNumber),
+    });
+    if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
+    const payload = data as { ok?: boolean; duplicate?: boolean } | null;
+    if (error || !payload || payload.ok !== true) return { state: 'unavailable' as const };
+    return { state: 'ok' as const, value: { duplicate: payload.duplicate === true } };
+  }
+
+  async deleteBondInquiry(inquiryId: string) {
+    const { data, error } = await this.db.rpc('crm_delete_bond_inquiry', { p_inquiry_id: inquiryId });
+    if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
+    const payload = data as { ok?: boolean; deleted?: boolean } | null;
+    if (error || !payload || payload.ok !== true) return { state: 'unavailable' as const };
+    return { state: 'ok' as const, value: { deleted: payload.deleted === true } };
+  }
+
+  async purgeBondInquiries(nowIso: string) {
+    const { data, error } = await this.db.rpc('crm_purge_bond_inquiries', { p_now: nowIso });
+    if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
+    const payload = data as { ok?: boolean; purged?: number } | null;
+    if (error || !payload || payload.ok !== true) return { state: 'unavailable' as const };
+    return { state: 'ok' as const, value: { purged: Number(payload.purged) || 0 } };
   }
 
   private one<T extends { brand: CrmBrand }>(

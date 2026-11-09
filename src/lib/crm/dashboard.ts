@@ -47,6 +47,7 @@ export type DashboardAccountRow = {
   accountType?: AccountType | null;
   leadSource?: LeadSource | null;
   createdAt?: string;
+  recordMarker?: 'test' | null;
 };
 export type DashboardNoteRow = { brand: CrmBrand; accountId: string; createdAt: string };
 export type DashboardOpportunityRow = {
@@ -57,7 +58,7 @@ export type DashboardOpportunityRow = {
   forecastCents: number | null;
   expectedCloseOn: string | null;
 };
-export type DashboardTaskRow = { brand: CrmBrand; status: string; dueOn: string | null };
+export type DashboardTaskRow = { brand: CrmBrand; status: string; dueOn: string | null; accountId?: string | null };
 export type DashboardActivityRow = { brand: CrmBrand; createdAt: string };
 
 export type DashboardFilter = {
@@ -182,11 +183,12 @@ export function buildDashboard(input: {
   visits?: readonly { brand: CrmBrand; repActor: string; checkedInAt: string }[];
 }): Dashboard {
   const { brand, today, filter } = input;
-  const accounts = input.accounts.filter((row) => row.brand === brand);
+  const hidden = new Set(input.accounts.filter((row) => row.brand === brand && row.recordMarker === 'test').map((row) => row.id));
+  const accounts = input.accounts.filter((row) => row.brand === brand && row.recordMarker !== 'test');
   const repOf = (row: DashboardAccountRow | undefined) => row?.assignedRep?.trim() || UNASSIGNED_REP;
   const regionOf = (row: DashboardAccountRow | undefined) => row?.city?.trim() || NO_REGION;
 
-  const allOpps = input.opportunities.filter((row) => row.brand === brand);
+  const allOpps = input.opportunities.filter((row) => row.brand === brand && !hidden.has(row.accountId));
   const thisYear = Number(today.slice(0, 4));
   const years = Array.from(new Set([
     thisYear,
@@ -304,7 +306,7 @@ export function buildDashboard(input: {
     cents: null,
   }));
 
-  const tasks = input.tasks.filter((row) => row.brand === brand);
+  const tasks = input.tasks.filter((row) => row.brand === brand && (!row.accountId || !hidden.has(row.accountId)));
   const openTasks = tasks.filter((row) => row.status === 'open');
   const since = new Date(Date.parse(`${today}T00:00:00Z`) - 30 * 86400000).toISOString();
 
