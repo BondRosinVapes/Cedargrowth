@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Menu, ShoppingBag } from 'lucide-react';
-import { PRIMARY_NAV, UTILITY_LEFT, UTILITY_RIGHT } from '@/lib/nav';
+import { MASTHEAD_MEDIA, PRIMARY_NAV, UTILITY_LEFT, UTILITY_RIGHT } from '@/lib/nav';
 import { useReservation } from '@/components/reserve/ReservationProvider';
 import { Wordmark } from './Wordmark';
 import { MobileMenu } from './MobileMenu';
@@ -35,11 +35,11 @@ export function Header() {
     menuBtnRef.current?.focus();
   }, []);
 
-  // The compact menu is hidden from 1024px up, but hiding it in CSS leaves the
-  // open state and the body scroll lock in place. Close it when that row takes
-  // over, and move focus to the visible Sales link rather than the hidden button.
+  // The phone menu is hidden once the section row is shown. Hiding it in CSS
+  // leaves the open state and the body scroll lock in place. Close it when
+  // that row takes over, and move focus to the visible Sales link.
   useEffect(() => {
-    const desktop = window.matchMedia('(min-width: 1024px)');
+    const desktop = window.matchMedia(MASTHEAD_MEDIA);
     const onChange = () => {
       if (!desktop.matches) return;
       setMobileOpen((open) => {
@@ -57,34 +57,33 @@ export function Header() {
 
   return (
     <header className="bg-parchment">
-      {/* Desktop masthead from 1024px. Three columns: Sales and Access left,
-          wordmark centre, Manufacturing then Reserve right. Below that width
-          the same links stay in the menu, because the centred wordmark and
-          the right-hand pair collide. */}
-      <div className="hidden lg:block">
+      {/* Section row from 880px. Sales and Access sit left, the wordmark stays
+          centred, Manufacturing sits immediately left of Reserve. Below 1280
+          the same tokens step down so the row fits a laptop content box. */}
+      <div className="hidden min-[880px]:block">
         <div className="border-b border-hairline">
-          <div className="mx-auto grid max-w-content grid-cols-3 items-center px-page-margin py-4">
-            <ul className="flex items-center gap-6">
+          <div className="mx-auto grid max-w-content grid-cols-[1fr_auto_1fr] items-center px-3 py-3 min-[1280px]:px-page-margin min-[1280px]:py-4">
+            <ul className="flex items-center gap-2 min-[1280px]:gap-6">
               {UTILITY_LEFT.map((link) => (
                 <li key={link.href}>
                   <Link
                     href={link.href}
-                    className="cedar-underline text-caption uppercase tracking-eyebrow text-tertiary"
+                    className="cedar-underline text-caption-m uppercase tracking-caption text-tertiary min-[1280px]:text-caption min-[1280px]:tracking-eyebrow"
                   >
                     {link.label}
                   </Link>
                 </li>
               ))}
             </ul>
-            <div className="flex justify-center">
-              <Wordmark />
+            <div className="flex justify-center px-3">
+              <Wordmark masthead />
             </div>
-            <ul className="flex items-center justify-end gap-6">
+            <ul className="flex items-center justify-end gap-2 min-[1280px]:gap-6">
               {UTILITY_RIGHT.map((link) => (
                 <li key={link.href}>
                   <Link
                     href={link.href}
-                    className="cedar-underline text-caption uppercase tracking-eyebrow text-tertiary"
+                    className="cedar-underline text-caption-m uppercase tracking-caption text-tertiary min-[1280px]:text-caption min-[1280px]:tracking-eyebrow"
                   >
                     {link.label}
                   </Link>
@@ -93,11 +92,11 @@ export function Header() {
               <li>
                 <Link
                   href="/reserve"
-                  className="flex items-center gap-2 text-caption uppercase tracking-eyebrow text-tertiary cedar-underline"
+                  className="flex items-center gap-2 text-caption-m uppercase tracking-caption text-tertiary cedar-underline min-[1280px]:text-caption min-[1280px]:tracking-eyebrow"
                 >
                   <ShoppingBag size={16} strokeWidth={1.5} aria-hidden="true" />
                   Reserve
-                  <span className="font-mono text-data lowercase tracking-normal">
+                  <span className="font-mono text-data-m lowercase tracking-normal min-[1280px]:text-data">
                     ({reserveCount})
                   </span>
                 </Link>
@@ -107,12 +106,12 @@ export function Header() {
         </div>
 
         <nav aria-label="Primary" className="border-b border-hairline">
-          <ul className="mx-auto flex max-w-content items-center justify-center gap-8 px-page-margin py-4">
+          <ul className="mx-auto flex max-w-content items-center justify-center gap-3 px-3 py-3 min-[1280px]:gap-8 min-[1280px]:px-page-margin min-[1280px]:py-4">
             {PRIMARY_NAV.map((item) => (
               <li key={item.label}>
                 <Link
                   href={item.href}
-                  className="cedar-underline text-body-m tracking-nav text-primary"
+                  className="cedar-underline text-caption tracking-nav text-primary min-[1280px]:text-body-m"
                 >
                   {item.label}
                 </Link>
@@ -122,10 +121,9 @@ export function Header() {
         </nav>
       </div>
 
-      {/* Compact bar. Equal side columns keep the wordmark centred. Sales,
-          Access, and Manufacturing stay in the menu, which is already keyboard
-          reachable. Reserve stays tappable. */}
-      <div className="border-b border-hairline lg:hidden">
+      {/* Phone bar below 880px. Equal side columns keep the wordmark centred.
+          Section links stay in the menu. Reserve stays tappable. */}
+      <div className="border-b border-hairline min-[880px]:hidden">
         <div className="grid grid-cols-[1fr_auto_1fr] items-center px-page-margin-mobile py-4">
           <button
             ref={menuBtnRef}
