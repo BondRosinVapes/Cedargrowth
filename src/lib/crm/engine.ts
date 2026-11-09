@@ -31,11 +31,13 @@ export const INTEL_BOUNDARIES = [
 ] as const;
 
 export type AccountStatus = 'prospect' | 'active' | 'paused' | 'closed';
-export type OpportunityStage = 'lead' | 'qualified' | 'proposal' | 'committed' | 'closed_won' | 'closed_lost';
+export type OpportunityStage = 'lead' | 'qualification' | 'licensed_buyer_review' | 'proposal' | 'won' | 'lost';
 export type TaskStatus = 'open' | 'done';
 
 const ACCOUNT_STATUS: readonly AccountStatus[] = ['prospect', 'active', 'paused', 'closed'];
-const STAGES: readonly OpportunityStage[] = ['lead', 'qualified', 'proposal', 'committed', 'closed_won', 'closed_lost'];
+export const OPPORTUNITY_STAGES: readonly OpportunityStage[] = ['lead', 'qualification', 'licensed_buyer_review', 'proposal', 'won', 'lost'];
+const STAGES = OPPORTUNITY_STAGES;
+export const OPEN_STAGES: readonly OpportunityStage[] = ['lead', 'qualification', 'licensed_buyer_review', 'proposal'];
 const TASK_STATUS: readonly TaskStatus[] = ['open', 'done'];
 
 export function parseBrand(value: unknown): CrmBrand | null {
@@ -228,7 +230,7 @@ function textField(value: unknown, max: number, required: boolean): string | nul
 export function parseAccountWrite(
   body: unknown,
   mode: 'create' | 'update',
-): { ok: true; value: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string } } | { ok: false; reason: string } {
+): { ok: true; value: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null } } | { ok: false; reason: string } {
   if (!body || typeof body !== 'object') return { ok: false, reason: 'Account could not be read.' };
   const b = body as Record<string, unknown>;
   const displayName = textField(b.displayName, 160, mode === 'create');
@@ -255,10 +257,53 @@ export function parseAccountWrite(
     if (n === null) return { ok: false, reason: 'Notes are too long.' };
     notes = n ?? '';
   }
-  if (mode === 'update' && displayName === undefined && status === undefined && city === undefined && notes === undefined) {
+  let licenseRef: string | null | undefined;
+  let facilityRef: string | null | undefined;
+  let licenseJurisdiction: string | null | undefined;
+  let licenseExpiry: string | null | undefined;
+  let assignedRep: string | null | undefined;
+  if (b.licenseRef !== undefined) {
+    if (b.licenseRef === null || b.licenseRef === '') licenseRef = null;
+    else {
+      const v = textField(b.licenseRef, 120, false);
+      if (v === null) return { ok: false, reason: 'License reference is too long.' };
+      licenseRef = v || null;
+    }
+  }
+  if (b.facilityRef !== undefined) {
+    if (b.facilityRef === null || b.facilityRef === '') facilityRef = null;
+    else {
+      const v = textField(b.facilityRef, 120, false);
+      if (v === null) return { ok: false, reason: 'Facility reference is too long.' };
+      facilityRef = v || null;
+    }
+  }
+  if (b.licenseJurisdiction !== undefined) {
+    if (b.licenseJurisdiction === null || b.licenseJurisdiction === '') licenseJurisdiction = null;
+    else {
+      const v = textField(b.licenseJurisdiction, 80, false);
+      if (v === null) return { ok: false, reason: 'Jurisdiction is too long.' };
+      licenseJurisdiction = v || null;
+    }
+  }
+  if (b.licenseExpiry !== undefined) {
+    if (b.licenseExpiry === null || b.licenseExpiry === '') licenseExpiry = null;
+    else if (typeof b.licenseExpiry !== 'string' || !parseIsoDate(b.licenseExpiry)) return { ok: false, reason: 'License expiry must be a calendar date.' };
+    else licenseExpiry = b.licenseExpiry;
+  }
+  if (b.assignedRep !== undefined) {
+    if (b.assignedRep === null || b.assignedRep === '') assignedRep = null;
+    else {
+      const v = textField(b.assignedRep, 200, false);
+      if (v === null) return { ok: false, reason: 'Assigned rep is too long.' };
+      assignedRep = v || null;
+    }
+  }
+  if (mode === 'update' && displayName === undefined && status === undefined && city === undefined && notes === undefined
+    && licenseRef === undefined && facilityRef === undefined && licenseJurisdiction === undefined && licenseExpiry === undefined && assignedRep === undefined) {
     return { ok: false, reason: 'Nothing to update.' };
   }
-  return { ok: true, value: { displayName: displayName || undefined, status, city, notes } };
+  return { ok: true, value: { displayName: displayName || undefined, status, city, notes, licenseRef, facilityRef, licenseJurisdiction, licenseExpiry, assignedRep } };
 }
 
 export function dollarsToCents(input: string): number | null | 'invalid' {
@@ -283,6 +328,93 @@ export function formatForecast(cents: number | null): string {
   return `Forecast ${dollars.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}`;
 }
 
+export type FieldOwner = 'crm' | 'stored_reference' | 'canix_unverified' | 'hoodie_unverified';
+
+export type FieldRecord = {
+  entity: string;
+  field: string;
+  owner: FieldOwner;
+  editableInCrm: boolean;
+  certifiesValidity: false;
+  connected: boolean;
+};
+
+// connected is whether this desk stores the field. Canix and Hoodie rows stay false.
+export const FIELD_REGISTRY: readonly FieldRecord[] = [
+  { entity: 'account', field: 'displayName', owner: 'crm', editableInCrm: true, certifiesValidity: false, connected: true },
+  { entity: 'account', field: 'licenseRef', owner: 'stored_reference', editableInCrm: true, certifiesValidity: false, connected: true },
+  { entity: 'account', field: 'facilityRef', owner: 'stored_reference', editableInCrm: true, certifiesValidity: false, connected: true },
+  { entity: 'account', field: 'assignedRep', owner: 'crm', editableInCrm: true, certifiesValidity: false, connected: true },
+  { entity: 'contact', field: 'preference', owner: 'crm', editableInCrm: true, certifiesValidity: false, connected: true },
+  { entity: 'opportunity', field: 'forecastCents', owner: 'crm', editableInCrm: true, certifiesValidity: false, connected: true },
+  { entity: 'opportunity', field: 'lossReason', owner: 'crm', editableInCrm: true, certifiesValidity: false, connected: true },
+  { entity: 'mirror.order', field: 'status', owner: 'canix_unverified', editableInCrm: false, certifiesValidity: false, connected: false },
+  { entity: 'mirror.inventory', field: 'quantity', owner: 'canix_unverified', editableInCrm: false, certifiesValidity: false, connected: false },
+  { entity: 'mirror.hoodie', field: 'coverage', owner: 'hoodie_unverified', editableInCrm: false, certifiesValidity: false, connected: false },
+];
+
+export type MirrorContract = {
+  connected: false;
+  schemaVerified: false;
+  orders: null;
+  invoicedCents: null;
+  paidCents: null;
+  lastSuccessAt: null;
+  reason: string;
+};
+
+export function mirrorContract(): MirrorContract {
+  return {
+    connected: false,
+    schemaVerified: false,
+    orders: null,
+    invoicedCents: null,
+    paidCents: null,
+    lastSuccessAt: null,
+    reason: 'Canix not connected. No live schema was verified, so the operational mirror has no rows.',
+  };
+}
+
+export type ReportRow = { brand: CrmBrand; stage: OpportunityStage; expectedCloseOn: string | null; synthetic?: boolean };
+export type WorkRow = { brand: CrmBrand; ownerActor: string | null; status: TaskStatus; synthetic?: boolean };
+
+export function buildFunnel(rows: readonly ReportRow[], brand: CrmBrand): { ok: true; synthetic: boolean; stages: { stage: OpportunityStage; count: number }[]; invoicedCents: null; paidCents: null } | { ok: false } {
+  if (rows.some((row) => row.brand !== brand)) return { ok: false };
+  const stages = OPPORTUNITY_STAGES.map((stage) => ({ stage, count: rows.filter((row) => row.stage === stage).length }));
+  return { ok: true, synthetic: rows.some((row) => row.synthetic === true), stages, invoicedCents: null, paidCents: null };
+}
+
+export function buildAging(rows: readonly ReportRow[], brand: CrmBrand, today: string): { ok: true; synthetic: boolean; aged: number } | { ok: false } {
+  if (!parseIsoDate(today) || rows.some((row) => row.brand !== brand)) return { ok: false };
+  const aged = rows.filter((row) => OPEN_STAGES.indexOf(row.stage) >= 0 && row.expectedCloseOn !== null && row.expectedCloseOn < today).length;
+  return { ok: true, synthetic: rows.some((row) => row.synthetic === true), aged };
+}
+
+export function buildWorkload(rows: readonly WorkRow[], brand: CrmBrand): { ok: true; synthetic: boolean; owners: { ownerActor: string; openTasks: number }[] } | { ok: false } {
+  if (rows.some((row) => row.brand !== brand)) return { ok: false };
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (row.status !== 'open') continue;
+    const key = row.ownerActor || 'unassigned';
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return {
+    ok: true,
+    synthetic: rows.some((row) => row.synthetic === true),
+    owners: [...counts.entries()].map(([ownerActor, openTasks]) => ({ ownerActor, openTasks })),
+  };
+}
+
+export function parseNote(body: unknown): { ok: true; accountId: string; text: string } | { ok: false; reason: string } {
+  if (!body || typeof body !== 'object') return { ok: false, reason: 'Note could not be read.' };
+  const b = body as Record<string, unknown>;
+  const accountId = parseUuid(b.accountId);
+  const text = textField(b.text, 2000, true);
+  if (!accountId) return { ok: false, reason: 'Choose an account in this brand.' };
+  if (!text) return { ok: false, reason: 'Enter the note.' };
+  return { ok: true, accountId, text };
+}
+
 export type OpportunityWrite = {
   accountId?: string;
   name?: string;
@@ -290,6 +422,9 @@ export type OpportunityWrite = {
   forecastCents?: number | null;
   expectedCloseOn?: string | null;
   notes?: string;
+  lossReason?: string | null;
+  nextAction?: string | null;
+  nextActionOn?: string | null;
 };
 
 export function parseOpportunityWrite(
@@ -331,8 +466,32 @@ export function parseOpportunityWrite(
     if (n === null) return { ok: false, reason: 'Notes are too long.' };
     value.notes = n ?? '';
   }
+  if (b.lossReason !== undefined) {
+    if (b.lossReason === null || b.lossReason === '') value.lossReason = null;
+    else {
+      const v = textField(b.lossReason, 400, false);
+      if (v === null) return { ok: false, reason: 'Loss reason is too long.' };
+      value.lossReason = v || null;
+    }
+  }
+  if (b.nextAction !== undefined) {
+    if (b.nextAction === null || b.nextAction === '') value.nextAction = null;
+    else {
+      const v = textField(b.nextAction, 200, false);
+      if (v === null) return { ok: false, reason: 'Next action is too long.' };
+      value.nextAction = v || null;
+    }
+  }
+  if (b.nextActionOn !== undefined) {
+    if (b.nextActionOn === null || b.nextActionOn === '') value.nextActionOn = null;
+    else if (typeof b.nextActionOn !== 'string' || !parseIsoDate(b.nextActionOn)) return { ok: false, reason: 'Next action date must be a calendar date.' };
+    else value.nextActionOn = b.nextActionOn;
+  }
+  if (value.stage === 'lost' && !value.lossReason) return { ok: false, reason: 'A lost opportunity needs a loss reason.' };
   return { ok: true, value };
 }
+
+export type ContactPreference = 'unspecified' | 'store_only' | 'do_not_contact';
 
 export type ContactWrite = {
   accountId?: string;
@@ -341,6 +500,7 @@ export type ContactWrite = {
   email?: string | null;
   phone?: string | null;
   notes?: string;
+  preference?: ContactPreference;
 };
 
 export function parseContactWrite(
@@ -387,6 +547,12 @@ export function parseContactWrite(
     if (n === null) return { ok: false, reason: 'Notes are too long.' };
     value.notes = n ?? '';
   }
+  if (b.preference !== undefined) {
+    if (b.preference !== 'unspecified' && b.preference !== 'store_only' && b.preference !== 'do_not_contact') {
+      return { ok: false, reason: 'Contact preference is not recognized.' };
+    }
+    value.preference = b.preference;
+  }
   return { ok: true, value };
 }
 
@@ -397,6 +563,7 @@ export type TaskWrite = {
   dueOn?: string | null;
   status?: TaskStatus;
   notes?: string;
+  ownerActor?: string | null;
 };
 
 export function parseTaskWrite(
@@ -442,6 +609,14 @@ export function parseTaskWrite(
     const n = textField(b.notes, 4000, false);
     if (n === null) return { ok: false, reason: 'Notes are too long.' };
     value.notes = n ?? '';
+  }
+  if (b.ownerActor !== undefined) {
+    if (b.ownerActor === null || b.ownerActor === '') value.ownerActor = null;
+    else {
+      const v = textField(b.ownerActor, 200, false);
+      if (v === null) return { ok: false, reason: 'Task owner is too long.' };
+      value.ownerActor = v || null;
+    }
   }
   return { ok: true, value };
 }

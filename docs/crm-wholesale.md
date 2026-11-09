@@ -35,7 +35,9 @@ where auth_user_id = '<existing auth user uuid>' and brand = 'cedargrowth' and r
 
 ## What works before Canix and Hoodie
 
-- Admin-gated accounts, contacts, opportunities, tasks, and append-only activity, once migration `0120` is applied by a later reviewed step.
+- Admin-gated accounts, contacts, preferences, assigned-rep labels, opportunities, tasks, append-only activity, and append-only notes, once `0120` through `0123` are applied together.
+- Opportunity stages are lead, qualification, licensed buyer review, proposal, won, and lost. Lost requires a loss reason. Forecast is not invoiced or paid.
+- Reports return funnel, aging, and rep workload from stored rows. Health states Canix and Hoodie are not connected. Missing source data stays null.
 - Forecast amounts are labeled forecast. Invoiced and paid amounts are null.
 - If the tables or the server client are absent, the desk says storage is not configured. It does not keep a browser copy.
 - Canix and Hoodie adapters are disconnected. They do not call the network.
@@ -47,7 +49,7 @@ where auth_user_id = '<existing auth user uuid>' and brand = 'cedargrowth' and r
 - Canix access, schema, entitlements, and write filters are unverified until Tuesday 10 Nov 2026 at the earliest. No live read was attempted.
 - Hoodie licensing, lawful coverage, freshness, and API shape are unverified. No Hoodie call was attempted.
 - Calibration, recipients, channels, and cadence are not settings. Email, text, and Slack are not sent.
-- Migrations `0120` and `0121` are files only. Applying them creates empty tables and new RLS. It does not change existing tables. Rollback is `docs/crm-wholesale-rollback.sql`, manual, and only after those migrations exist in the database.
+- Migrations `0120`, `0121`, `0122`, and `0123` are files only. They are not applied to the hosted project. `0120`, `0121`, and `0122` are not atomic if a hosted runner commits each file and then fails. The operator boundary is `psql --single-transaction -f scripts/crm-apply-bundle.sql`. That script is outside `supabase/migrations`, so `db push` does not run it. Rollback is `docs/crm-wholesale-rollback.sql`, manual, and only after those tables exist. It drops `crm_notes` before the account tables.
 - LITMUS, SENTINEL, VERNIER, and Gary's candidate approval have not been passed by this change.
 
 ## Storage risk
