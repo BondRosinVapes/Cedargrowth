@@ -37,7 +37,7 @@ export function Header() {
 
   // The phone menu is hidden once the section row is shown. Hiding it in CSS
   // leaves the open state and the body scroll lock in place. Close it when
-  // that row takes over, and move focus to the visible Sales link.
+  // that row takes over, and move focus to the visible Agents link.
   useEffect(() => {
     const desktop = window.matchMedia(MASTHEAD_MEDIA);
     const onChange = () => {
@@ -58,7 +58,7 @@ export function Header() {
   return (
     <header className="bg-parchment">
       {/* Section row from 880px. The phone bar below that width is unchanged.
-          Sales and Access sit left, the wordmark stays centred, Manufacturing
+          Agents and Team sit left, the wordmark stays centred, Manufacturing
           sits immediately left of Reserve. The section links share the row. */}
       <div className="hidden min-[880px]:block">
         <div className="border-b border-hairline">
