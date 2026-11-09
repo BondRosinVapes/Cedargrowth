@@ -4,7 +4,7 @@
 
 import { readFileSync } from 'node:fs';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
-import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, parseDate, parseMoney } from '../src/lib/crm/importer.ts';
+import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, parseDate, parseMoney, skipRepeatedImportRows } from '../src/lib/crm/importer.ts';
 import { matchDistributorAccount } from '../src/lib/crm/distributor.ts';
 import { productionForecast, stageWinRates } from '../src/lib/crm/forecast.ts';
 import { roundLocation, sampleTaskTitle, validateMediaUpload } from '../src/lib/crm/field.ts';
@@ -925,6 +925,16 @@ const chainImport = await handleImport({ actorId: 'gary@cedargrowthco.com', gran
 assert((chainImport.body.outcomes as { status: string }[]).every((row) => row.status === 'created') && memory.accounts.filter((row) => row.displayName === 'Chain Store TEST ONLY').length === 2, 'two locations with the same name import when their license numbers differ');
 const chainAgain = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'accounts', commit: false, rows: chainRows }), store: memory });
 assert((chainAgain.body.outcomes as { status: string }[]).every((row) => row.status === 'skipped'), 're-importing the same license numbers skips them');
+const caseLicense = mapRows('accounts', parseCsv('Account name,License number\nTEST ONLY Case Copy, lic-chain-1 \nTEST ONLY Case Twin,LIC-CHAIN-1\n')).rows;
+const caseImport = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'accounts', commit: true, rows: caseLicense }), store: memory });
+const caseOutcomes = caseImport.body.outcomes as { status: string; reason?: string }[];
+assert(caseOutcomes[0].status === 'skipped' && caseOutcomes[1].status === 'skipped' && String(caseOutcomes[0].reason).includes('license') && memory.accounts.filter((row) => (row.licenseRef || '').trim().toLowerCase() === 'lic-chain-1').length === 1, 'a license match ignores case and spaces');
+const freshDup = mapRows('accounts', parseCsv('Account name,License number\nTEST ONLY Fresh,LIC-FRESH-1\nTEST ONLY Fresh Two, lic-fresh-1 \n')).rows;
+const freshImport = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'accounts', commit: true, rows: freshDup }), store: memory });
+const freshOutcomes = freshImport.body.outcomes as { status: string }[];
+assert(freshOutcomes[0].status === 'created' && freshOutcomes[1].status === 'skipped' && memory.accounts.filter((row) => (row.licenseRef || '').trim().toLowerCase() === 'lic-fresh-1').length === 1, 'a repeated license in one upload is stored once');
+const repeatedFile = skipRepeatedImportRows('accounts', caseLicense);
+assert(repeatedFile.send.length === 1 && repeatedFile.skipped.length === 1 && repeatedFile.skipped[0].reason.includes('license'), 'one upload keeps the first license and skips the repeat before posting');
 const sameNameNewLicense = mapRows('accounts', parseCsv('Account name,License number\nTEST ONLY synthetic account,LIC-NEW\n')).rows;
 const sameNameImport = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'accounts', commit: true, rows: sameNameNewLicense }), store: memory });
 assert((sameNameImport.body.outcomes as { status: string }[])[0].status === 'created', 'a different license imports even when the account name already exists');
@@ -941,6 +951,10 @@ const savedContact = (await memory.exportBrand('cedargrowth')).value.contacts.fi
 assert(savedContact?.email === 'buyer@example.com' && savedContact?.preference === 'unspecified', 'imported contacts keep an unspecified contact preference');
 const contactAgain = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'contacts', commit: false, rows: contactRows.slice(0, 1) }), store: memory });
 assert((contactAgain.body.outcomes as { status: string }[])[0].status === 'skipped', 're-importing a contact skips it');
+const sameEmail = mapRows('contacts', parseCsv('Contact name,Email,Account license\nTEST ONLY Other Buyer,BUYER@example.com,LIC-CHAIN-2\n')).rows;
+const beforeSameEmail = memory.contacts.length;
+const sameEmailImport = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'contacts', commit: true, rows: sameEmail }), store: memory });
+assert((sameEmailImport.body.outcomes as { status: string; reason?: string }[])[0].status === 'skipped' && String((sameEmailImport.body.outcomes as { reason?: string }[])[0].reason).includes('email') && memory.contacts.length === beforeSameEmail, 'a contact email already on the account is skipped');
 assert(matchDistributorAccount([{ id: 'a', displayName: 'Shop', licenseRef: 'LIC', distributorAccountRef: 'R-9' }, { id: 'b', displayName: 'Shop', licenseRef: null, distributorAccountRef: null }], { distributorAccountRef: 'R-9', licenseRef: null, retailerName: 'Other' }) === 'a', 'distributor match prefers the distributor account id');
 assert(matchDistributorAccount([{ id: 'a', displayName: 'Shop', licenseRef: 'LIC', distributorAccountRef: null }, { id: 'b', displayName: 'Shop', licenseRef: 'LIC', distributorAccountRef: null }], { distributorAccountRef: null, licenseRef: 'LIC', retailerName: 'Shop' }) === null, 'distributor match does not guess when two accounts share a license');
 const orderRows = mapRows('orders', parseCsv('Order ID,Retailer,License,Status,Invoice Total\nN-1,TEST ONLY synthetic account,LIC-TEST,Delivered,"$90.00"\nN-2,Nobody Retail,NO-LIC,Placed,$10\n')).rows;

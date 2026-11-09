@@ -372,6 +372,41 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
   return { rows, missing: [], unmatched, truncated, rowCount: body.length };
 }
 
+const licenseKey = (value: string) => value.trim().toLowerCase();
+
+export function skipRepeatedImportRows(kind: ImportKind, rows: readonly ImportRow[]): { send: ImportRow[]; skipped: { line: number; status: 'skipped'; reason: string }[] } {
+  const seenLicenses = new Set<string>();
+  const seenEmails = new Set<string>();
+  const send: ImportRow[] = [];
+  const skipped: { line: number; status: 'skipped'; reason: string }[] = [];
+  for (const row of rows) {
+    if (kind === 'accounts' && row.record) {
+      const license = typeof row.record.licenseRef === 'string' ? licenseKey(row.record.licenseRef) : '';
+      if (license) {
+        if (seenLicenses.has(license)) {
+          skipped.push({ line: row.line, status: 'skipped', reason: 'An account with this license number already exists.' });
+          continue;
+        }
+        seenLicenses.add(license);
+      }
+    }
+    if (kind === 'contacts' && row.record) {
+      const email = typeof row.record.email === 'string' ? licenseKey(row.record.email) : '';
+      const link = licenseKey(row.accountLicense || row.accountName || '');
+      if (email && link) {
+        const token = `${link}|${email}`;
+        if (seenEmails.has(token)) {
+          skipped.push({ line: row.line, status: 'skipped', reason: 'This account already has this email.' });
+          continue;
+        }
+        seenEmails.add(token);
+      }
+    }
+    send.push(row);
+  }
+  return { send, skipped };
+}
+
 export const TEMPLATES: Record<ImportKind, string> = {
   accounts: 'Account name,Status,Account type,Lead source,Sales rep,City,County,License number,License expiry,Address,ZIP,Region,Phone,Email,Website,License status,Operating,Notes\n',
   retailers: 'License number,Name,County,License type\n',
