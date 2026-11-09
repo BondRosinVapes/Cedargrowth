@@ -86,28 +86,30 @@ export function TerritoryMap({ brand, canAssign, territory, onSelect }: { brand:
           );
         })}
       </svg>
-      <table className="w-full border-collapse text-left">
-        <thead>
-          <tr className="font-mono text-specimen uppercase text-tertiary">
-            <th className="border-b border-hairline py-2">Region</th>
-            <th className="border-b border-hairline py-2">Value</th>
-            <th className="border-b border-hairline py-2">Coverage</th>
-            <th className="border-b border-hairline py-2">Dollar share</th>
-            <th className="border-b border-hairline py-2">Rep</th>
-          </tr>
-        </thead>
-        <tbody>
-          {(data?.tiles || []).map((tile) => (
-            <tr key={tile.region}>
-              <td className="border-b border-hairline py-2 text-body-m text-primary">{tile.region}</td>
-              <td className="border-b border-hairline py-2 font-mono text-data text-primary">{tile.text}</td>
-              <td className="border-b border-hairline py-2 text-body-m text-primary">{data?.coverage?.find((row) => row.region === tile.region)?.label}</td>
-              <td className="border-b border-hairline py-2 text-body-m text-primary">{data?.marketShare || NEEDS_HOODIE}</td>
-              <td className="border-b border-hairline py-2 text-body-m text-primary">{tile.rep || (tile.unassigned ? 'No rep' : 'None')}</td>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-left">
+          <thead>
+            <tr className="font-mono text-specimen uppercase tracking-specimen text-tertiary">
+              <th className="border-b border-hairline py-2 font-normal">Region</th>
+              <th className="border-b border-hairline py-2 font-normal">Value</th>
+              <th className="border-b border-hairline py-2 font-normal">Coverage</th>
+              <th className="border-b border-hairline py-2 font-normal">Dollar share</th>
+              <th className="border-b border-hairline py-2 font-normal">Rep</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {(data?.tiles || []).map((tile) => (
+              <tr key={tile.region}>
+                <td className="border-b border-hairline py-2 align-top text-caption-m text-primary md:text-caption">{tile.region}</td>
+                <td className="border-b border-hairline py-2 align-top font-mono text-caption-m tabular-nums text-primary md:text-caption">{tile.text}</td>
+                <td className="border-b border-hairline py-2 align-top text-caption-m text-primary md:text-caption">{data?.coverage?.find((row) => row.region === tile.region)?.label}</td>
+                <td className="border-b border-hairline py-2 align-top text-caption-m text-primary md:text-caption">{data?.marketShare || NEEDS_HOODIE}</td>
+                <td className="border-b border-hairline py-2 align-top text-caption-m text-primary md:text-caption">{tile.rep || (tile.unassigned ? 'No rep' : 'None')}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       <p className="text-caption text-tertiary">{data?.coverageSource}</p>
       <p className="text-caption text-tertiary">Dollar market share: {data?.marketShare || NEEDS_HOODIE}.</p>
       {(data?.unknown || []).length ? (
