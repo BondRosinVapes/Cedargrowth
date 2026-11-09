@@ -9,7 +9,10 @@ import { matchDistributorAccount } from '../src/lib/crm/distributor.ts';
 import { productionForecast, stageWinRates } from '../src/lib/crm/forecast.ts';
 import { roundLocation, sampleTaskTitle, validateMediaUpload } from '../src/lib/crm/field.ts';
 import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, rateLimited, reorderDeal } from '../src/lib/crm/reorder.ts';
-import { buildDigest, hoodieSignals, nextBestActions, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
+import { buildDigest, hoodieSignals, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
+import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, parseCounty, regionForCounty } from '../src/lib/crm/nyRegions.ts';
+import { coverageLabel } from '../src/lib/crm/territory.ts';
+import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { reorderLinkHtml } from '../src/lib/email.ts';
 import {
@@ -72,6 +75,7 @@ import {
   handleDigestPreview,
   handleDigestSend,
   handleEmailStatusRefresh,
+  handleTerritoryAssign,
   useDigestDelivery,
   useReorderDelivery,
   useEmailLookup,
@@ -417,8 +421,8 @@ class MemoryCrm implements CrmStore {
   async listAccounts(brand: 'cedargrowth' | 'bond', filter: { q: string | null; status: Account['status'] | null }) {
     return { state: 'ok' as const, value: this.accounts.filter((row) => row.brand === brand && (!filter.status || row.status === filter.status) && (!filter.q || row.displayName.toLowerCase().includes(filter.q))) };
   }
-  async createAccount(brand: 'cedargrowth' | 'bond', actor: string, input: { displayName: string; status: Account['status']; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: Account['accountType']; leadSource?: Account['leadSource']; distributor?: Account['distributor']; distributorAccountRef?: string | null }) {
-    const row: Account = { id: this.id(), publicId: `test-only:${brand}:account`, brand, displayName: input.displayName, status: input.status, city: input.city, notes: input.notes, licenseRef: input.licenseRef ?? null, facilityRef: input.facilityRef ?? null, licenseJurisdiction: input.licenseJurisdiction ?? null, licenseExpiry: input.licenseExpiry ?? null, assignedRep: input.assignedRep ?? null, accountType: input.accountType ?? null, leadSource: input.leadSource ?? null, distributor: input.distributor ?? null, distributorAccountRef: input.distributorAccountRef ?? null, createdAt: 'test-only', updatedAt: 'test-only', createdBy: actor, updatedBy: actor };
+  async createAccount(brand: 'cedargrowth' | 'bond', actor: string, input: { displayName: string; status: Account['status']; city: string | null; county?: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: Account['accountType']; leadSource?: Account['leadSource']; distributor?: Account['distributor']; distributorAccountRef?: string | null }) {
+    const row: Account = { id: this.id(), publicId: `test-only:${brand}:account`, brand, displayName: input.displayName, status: input.status, city: input.city, county: input.county ?? null, notes: input.notes, licenseRef: input.licenseRef ?? null, facilityRef: input.facilityRef ?? null, licenseJurisdiction: input.licenseJurisdiction ?? null, licenseExpiry: input.licenseExpiry ?? null, assignedRep: input.assignedRep ?? null, accountType: input.accountType ?? null, leadSource: input.leadSource ?? null, distributor: input.distributor ?? null, distributorAccountRef: input.distributorAccountRef ?? null, createdAt: 'test-only', updatedAt: 'test-only', createdBy: actor, updatedBy: actor };
     this.accounts.push(row);
     return { state: 'ok' as const, value: row };
   }
@@ -649,6 +653,34 @@ class MemoryCrm implements CrmStore {
     if (!row) return { state: 'missing' as const };
     row.lastEvent = lastEvent;
     row.lastEventAt = lastEventAt;
+    return { state: 'ok' as const, value: row };
+  }
+  territories: { id: string; brand: 'cedargrowth' | 'bond'; region: string; repActor: string }[] = [];
+  retailers: { id: string; brand: 'cedargrowth' | 'bond'; licenseNumber: string; name: string; county: string; licenseType: string; uploadedAt: string }[] = [];
+  dismissals: { id: string; brand: 'cedargrowth' | 'bond'; repActor: string; actionKey: string; until: string }[] = [];
+  async listTerritories(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.territories.filter((row) => row.brand === brand) }; }
+  async assignTerritory(brand: 'cedargrowth' | 'bond', region: string, repActor: string) {
+    const found = this.territories.find((row) => row.brand === brand && row.region === region);
+    if (found) { found.repActor = repActor; return { state: 'ok' as const, value: found }; }
+    const row = { id: this.id(), brand, region, repActor };
+    this.territories.push(row);
+    return { state: 'ok' as const, value: row };
+  }
+  async clearTerritory(brand: 'cedargrowth' | 'bond', region: string) {
+    this.territories = this.territories.filter((row) => !(row.brand === brand && row.region === region));
+    return { state: 'ok' as const, value: { cleared: true as const } };
+  }
+  async listMarketRetailers(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.retailers.filter((row) => row.brand === brand) }; }
+  async insertMarketRetailers(brand: 'cedargrowth' | 'bond', rows: { licenseNumber: string; name: string; county: string; licenseType: string }[], uploadedAt: string) {
+    for (const row of rows) this.retailers.push({ id: this.id(), brand, ...row, uploadedAt });
+    return { state: 'ok' as const, value: { count: rows.length } };
+  }
+  async listDismissals(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.dismissals.filter((row) => row.brand === brand) }; }
+  async upsertDismissal(brand: 'cedargrowth' | 'bond', repActor: string, actionKey: string, until: string) {
+    const found = this.dismissals.find((row) => row.brand === brand && row.repActor === repActor && row.actionKey === actionKey);
+    if (found) { found.until = until; return { state: 'ok' as const, value: found }; }
+    const row = { id: this.id(), brand, repActor, actionKey, until };
+    this.dismissals.push(row);
     return { state: 'ok' as const, value: row };
   }
 }
@@ -910,7 +942,37 @@ const digestText = renderDigestText(digest);
 const digestHtml = renderDigestHtml(digest);
 assert(digest.winRate === digestDash.kpis.winRate && digest.openPipelineCents === (digestDash.byStatus.find((row) => row.key === 'open')?.cents ?? null), 'digest numbers match the dashboard builder for the same rows');
 assert(!digestText.includes('BOND ONLY SHOP') && !digestText.includes('999999') && !digestText.includes('quiet@example.com') && !digestText.includes('555-0199') && !digestText.includes('Quiet Person'), 'Bond data and contact details never appear in a CedarGrowth digest');
-assert(digest.shorts[0] === 'Vape is short by 1,200 units in Mar 27' && digest.reps.every((row) => row.nextActions.length === 0) && nextBestActions('Ada').length === 0 && hoodieSignals().length === 0, 'forecast words are copied and 7B and 6C stay empty');
+assert(digest.shorts[0] === 'Vape is short by 1,200 units in Mar 27' && digestText.includes('Hoodie not connected') && digestText.includes('Not active yet') && hoodieSignals().length === 0, 'forecast words are copied and Hoodie stays unconnected');
+assert(NY_COUNTIES.length === 62 && new Set(NY_COUNTIES.map((county) => COUNTY_REGION[county])).size === 10 && NY_REGIONS.every((region) => Object.values(COUNTY_REGION).includes(region)), 'every county maps to exactly one of the 10 regions');
+assert(!parseCounty('Brooklyn').ok && regionForCounty(null) === 'Region unknown' && regionForCounty('Erie') === 'Western New York', 'an unknown county is reported and not guessed');
+const blankCoverage = coverageLabel({ region: 'Western New York', accounts: [], retailers: [] });
+const zeroDenom = coverageLabel({ region: 'Western New York', accounts: [{ brand: 'cedargrowth', id: 'a', displayName: 'Shop', status: 'active', county: 'Erie', assignedRep: 'Ada' }], retailers: [{ county: 'Erie', licenseType: 'Adult-Use Cultivator', uploadedAt: '2026-11-01T00:00:00Z' }] });
+const oneCoverage = coverageLabel({ region: 'Western New York', accounts: [{ brand: 'cedargrowth', id: 'a', displayName: 'Shop', status: 'active', county: 'Erie', assignedRep: 'Ada' }], retailers: [{ county: 'Erie', licenseType: 'Adult-Use Retail Dispensary', uploadedAt: '2026-11-01T00:00:00Z' }] });
+assert(blankCoverage === COVERAGE_UPLOAD && zeroDenom === 'no data yet' && oneCoverage === '1 / 1' && NEEDS_HOODIE === 'Needs Hoodie', 'coverage asks for the state list and never divides by zero');
+const actionToday = '2026-11-09';
+const actionAccount = { id: 'acct', brand: 'cedargrowth', displayName: 'Shop', status: 'active', county: 'Erie', assignedRep: 'Ada', licenseExpiry: '2026-11-20' };
+const bondAccount = { ...actionAccount, id: 'bond-acct', brand: 'bond', displayName: 'Bond Shop' };
+const emptyActions = { brand: 'cedargrowth', rep: 'Ada', today: actionToday, accounts: [actionAccount, bondAccount], tasks: [], deals: [], notes: [] as { brand: string; accountId: string; createdAt: string }[], visits: [] as { brand: string; accountId: string; checkedInAt: string }[], events: [] as { brand: string; opportunityId: string; at: string }[], orders: [] as { brand: string; accountId: string | null; distributor: string; orderStatus: string; deliveredOn: string | null; orderedOn: string | null; retailerPaymentStatus: string }[], territories: [{ brand: 'cedargrowth', region: 'Western New York', repActor: 'Ada' }], dismissals: [] as { brand: string; repActor: string; actionKey: string; until: string }[] };
+const overdue = nextBestActions({ ...emptyActions, tasks: [{ id: 't1', brand: 'cedargrowth', accountId: 'acct', title: 'Call', status: 'open', dueOn: '2026-11-01', ownerActor: 'Ada' }, { id: 'tb', brand: 'bond', accountId: 'bond-acct', title: 'Bond task', status: 'open', dueOn: '2026-11-01', ownerActor: 'Ada' }] });
+const sample = nextBestActions({ ...emptyActions, tasks: [{ id: 't2', brand: 'cedargrowth', accountId: 'acct', title: 'Follow up on samples at Shop', status: 'open', dueOn: '2026-11-09', ownerActor: 'Ada' }] });
+const lateDeal = nextBestActions({ ...emptyActions, deals: [{ id: 'd', brand: 'cedargrowth', accountId: 'acct', name: 'Late', stage: 'proposal', expectedCloseOn: '2026-11-01' }] });
+const quietDeal = nextBestActions({ ...emptyActions, deals: [{ id: 'd', brand: 'cedargrowth', accountId: 'acct', name: 'Quiet', stage: 'proposal', expectedCloseOn: '2026-12-01' }] });
+const quietMissing = nextBestActions({ ...emptyActions, notes: null, visits: null, events: null, deals: [{ id: 'd', brand: 'cedargrowth', accountId: 'acct', name: 'Quiet', stage: 'proposal', expectedCloseOn: '2026-12-01' }] });
+const notVisited = nextBestActions({ ...emptyActions, visits: [] });
+const reorder = nextBestActions({ ...emptyActions, visits: [{ brand: 'cedargrowth', accountId: 'acct', checkedInAt: '2026-11-08T00:00:00Z' }], orders: [
+  { brand: 'cedargrowth', accountId: 'acct', distributor: 'nabis', orderStatus: 'delivered', deliveredOn: '2026-08-01', orderedOn: '2026-08-01', retailerPaymentStatus: 'paid' },
+  { brand: 'cedargrowth', accountId: 'acct', distributor: 'nabis', orderStatus: 'delivered', deliveredOn: '2026-09-01', orderedOn: '2026-09-01', retailerPaymentStatus: 'paid' },
+  { brand: 'cedargrowth', accountId: 'acct', distributor: 'nabis', orderStatus: 'delivered', deliveredOn: '2026-10-01', orderedOn: '2026-10-01', retailerPaymentStatus: 'paid' },
+] });
+const unpaid = nextBestActions({ ...emptyActions, orders: [{ brand: 'cedargrowth', accountId: 'acct', distributor: 'nabis', orderStatus: 'delivered', deliveredOn: '2026-08-01', orderedOn: '2026-08-01', retailerPaymentStatus: 'unpaid' }] });
+const prospect = nextBestActions({ ...emptyActions, accounts: [{ ...actionAccount, status: 'prospect' }] });
+const snoozed = nextBestActions({ ...emptyActions, tasks: [{ id: 't1', brand: 'cedargrowth', accountId: 'acct', title: 'Call', status: 'open', dueOn: '2026-11-01', ownerActor: 'Ada' }], dismissals: [{ brand: 'cedargrowth', repActor: 'Ada', actionKey: '1:t1', until: '2026-11-16' }] });
+assert(overdue.actions.some((row) => row.rule === 1) && !overdue.actions.some((row) => row.reason.includes('Bond')) && sample.actions.some((row) => row.rule === 2) && lateDeal.actions.some((row) => row.rule === 3) && quietDeal.actions.some((row) => row.rule === 4) && quietMissing.actions.every((row) => row.rule !== 4) && quietMissing.inactive.some((row) => row.reason.includes('not connected')), 'overdue, sample, late, and quiet rules fire only with their data');
+assert(notVisited.actions.some((row) => row.key.startsWith('5:visit')) && reorder.actions.some((row) => row.key.startsWith('5:reorder')) && unpaid.actions.some((row) => row.reason.startsWith('Mention to Nabis rep')) && !unpaid.actions.some((row) => row.reason.toLowerCase().includes('collect payment')) && nextBestActions(emptyActions).actions.some((row) => row.rule === 8) && prospect.actions.some((row) => row.rule === 9), 'visit, reorder, Nabis wording, license, and prospect rules fire on a minimal case');
+assert(snoozed.actions.every((row) => row.key !== '1:t1') && overdue.inactive.some((row) => row.reason === 'Hoodie not connected.') && nextBestActions({ ...emptyActions, orders: null, visits: null }).inactive.some((row) => row.reason.includes('not connected')), 'a snoozed action stays hidden and a missing source is not active');
+const salesTerritory = await handleTerritoryAssign({ actorId: 'sales-1', grants: salesGrant, request: crmReq('PUT', '/api/admin/crm/territory', { brand: 'cedargrowth', region: 'Western New York', repActor: 'Ada' }), store: memory });
+const bondTerritory = await handleTerritoryAssign({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('PUT', '/api/admin/crm/territory', { brand: 'bond', region: 'Long Island', repActor: 'Bond Rep' }), store: memory });
+assert(salesTerritory.status === 403 && bondTerritory.status === 200 && memory.territories.every((row) => row.brand === 'bond' || row.region !== 'Long Island'), 'a salesperson cannot assign a territory and Bond stays in its brand');
 const reorderHtml = reorderLinkHtml('Shop', 'https://cedargrowth.example/reorder/token');
 assert(digestHtml.includes('Georgia') && !digestHtml.includes('<img') && !reorderHtml.includes('<img') && !digestHtml.includes('pixel') && !reorderHtml.includes('pixel') && !digestHtml.includes('—') && !digestHtml.includes('–'), 'the digest email is plain html without images or dashes');
 assert(emailStatusLabel('delivered') === 'Delivered' && emailStatusLabel('opened') === 'Opened (approximate)' && emailStatusLabel('clicked') === 'Opened (approximate)' && emailStatusLabel('bounced') === 'Bounced' && emailStatusLabel(null) === 'Not yet reported' && emailStatusLabel('sent') === 'Not yet reported', 'status labels stay plain and an open is approximate');

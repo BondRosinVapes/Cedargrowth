@@ -20,6 +20,7 @@ import {
 import { STAGE_LABELS } from '@/lib/crm/dashboard';
 import { DISTRIBUTOR_LABELS } from '@/lib/crm/distributor';
 import { VISIT_OUTCOME_LABELS, type VisitOutcome } from '@/lib/crm/field';
+import { NY_COUNTIES, regionForCounty } from '@/lib/crm/nyRegions';
 import { DashboardWing } from './DashboardWing';
 import { BatchesWing } from './BatchesWing';
 
@@ -31,6 +32,7 @@ type Account = {
   displayName: string;
   status: string;
   city: string | null;
+  county?: string | null;
   notes: string;
   licenseRef?: string | null;
   facilityRef?: string | null;
@@ -300,6 +302,7 @@ export function CrmConsole({
         displayName: String(form.get('displayName') || ''),
         status: String(form.get('status') || 'prospect'),
         city: String(form.get('city') || '') || null,
+        county: String(form.get('county') || '') || null,
         notes: String(form.get('notes') || ''),
         licenseRef: String(form.get('licenseRef') || '') || null,
         facilityRef: String(form.get('facilityRef') || '') || null,
@@ -494,6 +497,7 @@ export function CrmConsole({
               <p className="text-body-m text-secondary">License reference: {selected.licenseRef || 'None stored'}. A stored reference is not a validity certification.</p>
               <p className="text-body-m text-secondary">Facility reference: {selected.facilityRef || 'None stored'}. This is not a certified facility record.</p>
               <p className="text-body-m text-secondary">Account type: {selected.accountType ? ACCOUNT_TYPE_LABELS[selected.accountType] : 'Not set'}. Lead source: {selected.leadSource ? LEAD_SOURCE_LABELS[selected.leadSource] : 'Not set'}.</p>
+              <p className="text-body-m text-secondary">County: {selected.county || 'Not set'}. Region: {regionForCounty(selected.county)}.</p>
               <p className="text-body-m text-secondary">Assigned rep: {selected.assignedRep || 'None'}. Assignment does not grant a login or a role.</p>
               <p className="text-body-m text-secondary">Distributor: {selected.distributor ? DISTRIBUTOR_LABELS[selected.distributor] : 'Not set'}. Distributor account ID: {selected.distributorAccountRef || 'None stored'}.</p>
               <ul className="flex flex-col gap-1">
@@ -572,6 +576,12 @@ export function CrmConsole({
                 </select>
               </label>
               <Field name="city" label="City or region" />
+              <label className="flex flex-col gap-1 text-caption text-tertiary">County
+                <select name="county" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="">
+                  <option value="">Not set</option>
+                  {NY_COUNTIES.map((county) => <option key={county} value={county}>{county}</option>)}
+                </select>
+              </label>
               <Field name="licenseRef" label="License number (reference only)" />
               <Field name="facilityRef" label="Facility reference" />
               <Field name="licenseJurisdiction" label="Jurisdiction" />

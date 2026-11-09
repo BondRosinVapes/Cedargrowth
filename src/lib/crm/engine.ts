@@ -2,6 +2,8 @@
 // Synthetic fixtures stay in tests. This module never treats a fixture as an
 // account finding, and it never calls Canix or Hoodie.
 
+import { parseCounty } from './nyRegions';
+
 export const CRM_BRANDS = ['cedargrowth', 'bond'] as const;
 export type CrmBrand = (typeof CRM_BRANDS)[number];
 
@@ -266,7 +268,7 @@ function textField(value: unknown, max: number, required: boolean): string | nul
 export function parseAccountWrite(
   body: unknown,
   mode: 'create' | 'update',
-): { ok: true; value: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: 'nabis' | 'other' | 'self' | null; distributorAccountRef?: string | null } } | { ok: false; reason: string } {
+): { ok: true; value: { displayName?: string; status?: AccountStatus; city?: string | null; county?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: 'nabis' | 'other' | 'self' | null; distributorAccountRef?: string | null } } | { ok: false; reason: string } {
   if (!body || typeof body !== 'object') return { ok: false, reason: 'Account could not be read.' };
   const b = body as Record<string, unknown>;
   const displayName = textField(b.displayName, 160, mode === 'create');
@@ -278,6 +280,12 @@ export function parseAccountWrite(
     }
     status = b.status as AccountStatus;
   } else if (mode === 'create') status = 'prospect';
+  let county: string | null | undefined;
+  if (b.county !== undefined) {
+    const parsed = parseCounty(b.county);
+    if (!parsed.ok) return parsed;
+    county = parsed.county;
+  }
   let city: string | null | undefined;
   if (b.city !== undefined) {
     if (b.city === null) city = null;
@@ -362,12 +370,12 @@ export function parseAccountWrite(
       distributorAccountRef = v || null;
     }
   }
-  if (mode === 'update' && displayName === undefined && status === undefined && city === undefined && notes === undefined
+  if (mode === 'update' && displayName === undefined && status === undefined && city === undefined && county === undefined && notes === undefined
     && licenseRef === undefined && facilityRef === undefined && licenseJurisdiction === undefined && licenseExpiry === undefined && assignedRep === undefined
     && accountType === undefined && leadSource === undefined && distributor === undefined && distributorAccountRef === undefined) {
     return { ok: false, reason: 'Nothing to update.' };
   }
-  return { ok: true, value: { displayName: displayName || undefined, status, city, notes, licenseRef, facilityRef, licenseJurisdiction, licenseExpiry, assignedRep, accountType, leadSource, distributor, distributorAccountRef } };
+  return { ok: true, value: { displayName: displayName || undefined, status, city, county, notes, licenseRef, facilityRef, licenseJurisdiction, licenseExpiry, assignedRep, accountType, leadSource, distributor, distributorAccountRef } };
 }
 
 export function dollarsToCents(input: string): number | null | 'invalid' {

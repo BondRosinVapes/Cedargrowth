@@ -207,6 +207,7 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
             <option value="accounts">Accounts (stores and buyers)</option>
             <option value="deals">Deals</option>
             <option value="orders">Distributor orders</option>
+            <option value="retailers">State dispensary list</option>
           </select>
         </label>
         <label className={label}>CSV file
@@ -216,10 +217,12 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
       </div>
       <p className="text-caption text-tertiary">
         {kind === 'accounts'
-          ? 'Needs an Account name column. Optional: Status, Account type, Lead source, Sales rep, City, License number, License expiry, Notes. Accounts that already exist by name are skipped.'
+          ? 'Needs an Account name column. Optional: Status, Account type, Lead source, Sales rep, City, County, License number, License expiry, Notes. County must be a New York county. Accounts that already exist by name are skipped.'
           : kind === 'orders'
             ? 'Needs Order ID and Retailer. Optional: License, Order Date, Delivery Date, Status, Invoice Total, Payment Status, Paid Date, Payout, Payout Date. A repeat Order ID updates that order. Unmatched retailers are not created.'
-            : 'Needs Account and Deal name columns. Optional: Stage, Amount, Close date, Product line, Quantity, Next action, Loss reason, Notes. Import accounts first; each deal is matched to an account by name.'}
+            : kind === 'retailers'
+              ? 'Needs License number, Name, and County. License type is optional. County must be a New York county. This list is the coverage denominator, not a set of CRM accounts.'
+              : 'Needs Account and Deal name columns. Optional: Stage, Amount, Close date, Product line, Quantity, Next action, Loss reason, Notes. Import accounts first; each deal is matched to an account by name.'}
         {' '}Nothing is saved until you press Import.
       </p>
       {problems.map((text) => <p key={text} role="alert" className="border border-attention px-3 py-2 text-body-m text-primary">{text}</p>)}

@@ -36,6 +36,9 @@ import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
 import { monthStarts, parseCapacityWrite, productionForecast, stageWinRates } from './forecast';
 import { buildDigest, digestConfigured, digestFromAddress, digestRecipients, digestSummary, nyWeek, renderDigestHtml, renderDigestText, secretMatches } from './digest';
+import { COVERAGE_UPLOAD, NEEDS_HOODIE, NY_REGIONS } from './nyRegions';
+import { coverageLabel, territoryTiles, TERRITORY_METRICS, type TerritoryMetric } from './territory';
+import { nextBestActions, snoozeUntil } from './nextAction';
 import { readResendEvent, sendDigestEmail, sendReorderLink } from '@/lib/email';
 import { FIELD_BUCKET, READ_URL_SECONDS, isProductLine, isVisitOutcome, mediaPath, roundLocation, validateMediaUpload } from './field';
 import { BATCH_MISS, COA_BUCKET, COA_READ_SECONDS, LINK_MISS, clientIp, coaPath, consumeRate, parseBatchWrite, parseBuyer, parseReorderLines, productIdOk, tokenShapeOk, validateCoaUpload } from './reorder';
@@ -160,6 +163,7 @@ export async function handleAccountCollection(ctx: CrmContext, method: 'GET' | '
     displayName: parsed.value.displayName,
     status: parsed.value.status,
     city: parsed.value.city ?? null,
+    county: parsed.value.county ?? null,
     notes: parsed.value.notes ?? '',
     licenseRef: parsed.value.licenseRef ?? null,
     facilityRef: parsed.value.facilityRef ?? null,
@@ -584,11 +588,23 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
   const dealKeys = new Set(existing.value.opportunities.filter((row) => row.brand === auth.brand).map((row) => `${row.accountId}|${key(row.name)}`));
 
   const outcomes: ImportOutcome[] = [];
+  const pendingRetailers: { licenseNumber: string; name: string; county: string; licenseType: string }[] = [];
   for (const raw of rows) {
     const item = (raw ?? {}) as { line?: unknown; record?: unknown; accountName?: unknown };
     const line = typeof item.line === 'number' ? item.line : 0;
     const fields = item.record && typeof item.record === 'object' ? { ...(item.record as Record<string, unknown>) } : null;
     if (!fields) { outcomes.push({ line, status: 'error', reason: 'Row could not be read.' }); continue; }
+    if (kind === 'retailers') {
+      const licenseNumber = typeof fields.licenseNumber === 'string' ? fields.licenseNumber : '';
+      const name = typeof fields.name === 'string' ? fields.name : '';
+      const county = typeof fields.county === 'string' ? fields.county : '';
+      const licenseType = typeof fields.licenseType === 'string' ? fields.licenseType : '';
+      if (!licenseNumber || !name || !county) { outcomes.push({ line, status: 'error', reason: 'Retailer row is incomplete.' }); continue; }
+      if (!commit) { outcomes.push({ line, status: 'ready' }); continue; }
+      pendingRetailers.push({ licenseNumber, name, county, licenseType: licenseType || 'Unspecified' });
+      outcomes.push({ line, status: 'created' });
+      continue;
+    }
     if (kind === 'accounts') {
       const parsed = parseAccountWrite(fields, 'create');
       if (!parsed.ok || !parsed.value.displayName) { outcomes.push({ line, status: 'error', reason: parsed.ok ? 'Account name is empty.' : parsed.reason }); continue; }
@@ -599,6 +615,7 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
         displayName: parsed.value.displayName,
         status: parsed.value.status ?? 'prospect',
         city: parsed.value.city ?? null,
+        county: parsed.value.county ?? null,
         notes: parsed.value.notes ?? '',
         licenseRef: parsed.value.licenseRef ?? null,
         licenseExpiry: parsed.value.licenseExpiry ?? null,
@@ -643,6 +660,10 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
     if (!commit) { outcomes.push({ line, status: 'ready' }); continue; }
     const created = await ctx.store.createOpportunity(auth.brand, auth.actorId, { ...parsed.value, accountId, name: parsed.value.name, stage: parsed.value.stage });
     outcomes.push(created.state === 'ok' ? { line, status: 'created' } : { line, status: 'error', reason: 'Storage did not accept this row.' });
+  }
+  if (commit && pendingRetailers.length) {
+    const saved = await ctx.store.insertMarketRetailers(auth.brand, pendingRetailers, new Date().toISOString());
+    if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'rejected' || saved.state === 'missing' ? 'unavailable' : saved.state);
   }
   return { status: 200, body: { ok: true, configured: true, brand: auth.brand, kind, commit, outcomes } };
 }
@@ -1322,6 +1343,132 @@ export async function handleEmailStatusRefresh(ctx: CrmContext): Promise<CrmResu
     if (saved.state === 'ok' && saved.value.brand === auth.brand) updated += 1;
   }
   return { status: 200, body: { ok: true, configured: true, updated, capped: rows.value.length > EMAIL_STATUS_CAP } };
+}
+
+async function territoryBundle(store: CrmStore, brand: CrmBrand) {
+  const [all, notes, orders, visits, events, territories, retailers, dismissals] = await Promise.all([
+    store.exportBrand(brand),
+    store.listNotes(brand, null),
+    store.listDistributorOrders(brand),
+    store.listVisits(brand),
+    store.listStageEvents(brand),
+    store.listTerritories(brand),
+    store.listMarketRetailers(brand),
+    store.listDismissals(brand),
+  ]);
+  if (all.state !== 'ok') return storageBody(brand, all.state === 'rejected' || all.state === 'missing' ? 'unavailable' : all.state);
+  return {
+    accounts: all.value.accounts,
+    deals: all.value.opportunities,
+    tasks: all.value.tasks,
+    notes: notes.state === 'ok' ? notes.value : null,
+    orders: orders.state === 'ok' ? orders.value : null,
+    visits: visits.state === 'ok' ? visits.value : null,
+    events: events.state === 'ok' ? events.value : null,
+    territories: territories.state === 'ok' ? territories.value : [],
+    retailers: retailers.state === 'ok' ? retailers.value : [],
+    dismissals: dismissals.state === 'ok' ? dismissals.value : [],
+  };
+}
+
+export async function handleTerritory(ctx: CrmContext): Promise<CrmResult> {
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  const metric = (TERRITORY_METRICS as readonly string[]).includes(url.searchParams.get('metric') || '') ? url.searchParams.get('metric') as TerritoryMetric : 'accounts';
+  const loaded = await territoryBundle(ctx.store, auth.brand);
+  if ('status' in loaded) return loaded;
+  const today = new Date().toISOString().slice(0, 10);
+  const view = territoryTiles({
+    brand: auth.brand,
+    metric,
+    today,
+    accounts: loaded.accounts,
+    deals: loaded.deals,
+    orders: loaded.orders,
+    visits: loaded.visits,
+    territories: loaded.territories,
+  });
+  const latest = loaded.retailers.map((row) => row.uploadedAt).sort().at(-1) ?? null;
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      configured: true,
+      brand: auth.brand,
+      metric,
+      tiles: view.tiles,
+      invoicedLabel: view.invoicedLabel,
+      unknown: view.unknown.map((row) => ({ id: row.id, displayName: row.displayName, county: row.county })),
+      coverage: NY_REGIONS.map((region) => ({ region, label: coverageLabel({ region, accounts: loaded.accounts, retailers: loaded.retailers }) })),
+      coverageSource: latest ? `From state list uploaded ${latest.slice(0, 10)}` : COVERAGE_UPLOAD,
+      marketShare: NEEDS_HOODIE,
+      territories: loaded.territories,
+    },
+  };
+}
+
+export async function handleTerritoryAssign(ctx: CrmContext): Promise<CrmResult> {
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Only an owner or administrator can assign a territory.' } };
+  const region = typeof record.region === 'string' ? record.region : '';
+  if (!(NY_REGIONS as readonly string[]).includes(region)) return { status: 400, body: { ok: false, reason: 'Region is not recognized.' } };
+  const rep = typeof record.repActor === 'string' ? record.repActor.trim() : '';
+  if (!rep) {
+    const cleared = await ctx.store.clearTerritory(auth.brand, region);
+    if (cleared.state !== 'ok') return storageBody(auth.brand, cleared.state === 'rejected' || cleared.state === 'missing' ? 'unavailable' : cleared.state);
+    return { status: 200, body: { ok: true, brand: auth.brand, cleared: true } };
+  }
+  const saved = await ctx.store.assignTerritory(auth.brand, region, rep);
+  if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'rejected' || saved.state === 'missing' ? 'unavailable' : saved.state);
+  return { status: 200, body: { ok: true, brand: auth.brand, territory: saved.value } };
+}
+
+export async function handleActions(ctx: CrmContext, method: 'GET' | 'POST'): Promise<CrmResult> {
+  if (method === 'POST') {
+    const body = await readBody(ctx.request);
+    if (isCrmResult(body)) return body;
+    const record = (body ?? {}) as Record<string, unknown>;
+    const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+    if (isResult(auth)) return auth;
+    const rep = typeof record.repActor === 'string' ? record.repActor.trim() : auth.actorId;
+    if (!canExport(auth.role) && rep !== auth.actorId) return { status: 403, body: { ok: false, reason: 'You can snooze only your own actions.' } };
+    const actionKey = typeof record.actionKey === 'string' ? record.actionKey.trim() : '';
+    const mode = record.mode === 'done' ? 'done' : record.mode === 'snooze' ? 'snooze' : null;
+    if (!actionKey || !mode) return { status: 400, body: { ok: false, reason: 'Action could not be read.' } };
+    const today = new Date().toISOString().slice(0, 10);
+    const saved = await ctx.store.upsertDismissal(auth.brand, rep, actionKey, snoozeUntil(today, mode));
+    if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'rejected' || saved.state === 'missing' ? 'unavailable' : saved.state);
+    return { status: 200, body: { ok: true, brand: auth.brand, dismissal: saved.value } };
+  }
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  const loaded = await territoryBundle(ctx.store, auth.brand);
+  if ('status' in loaded) return loaded;
+  const today = new Date().toISOString().slice(0, 10);
+  const requested = url.searchParams.get('rep');
+  const reps = requested ? [requested] : [...new Set(loaded.accounts.map((row) => (row.assignedRep || '').trim()).filter(Boolean))];
+  const visible = canExport(auth.role) ? reps : [auth.actorId];
+  const reports = visible.map((rep) => nextBestActions({
+    brand: auth.brand,
+    rep,
+    today,
+    accounts: loaded.accounts,
+    tasks: loaded.tasks,
+    deals: loaded.deals,
+    notes: loaded.notes,
+    visits: loaded.visits,
+    events: loaded.events,
+    orders: loaded.orders,
+    territories: loaded.territories,
+    dismissals: loaded.dismissals,
+  }));
+  return { status: 200, body: { ok: true, brand: auth.brand, today, reps: visible.map((rep, index) => ({ rep, actions: reports[index].actions })), inactive: reports[0]?.inactive ?? [{ title: 'Out of stock alerts', reason: 'Hoodie not connected.' }] } };
 }
 
 export function staffAudience(hasCedarSalesMembership: boolean): Audience {
