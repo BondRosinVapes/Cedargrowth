@@ -15,6 +15,7 @@ import {
   type RepRow,
 } from '@/lib/crm/dashboard';
 import { QuickAdd, SpreadsheetUpload } from './DataIntake';
+import { DigestPanel } from './DigestPanel';
 
 type Source = { connected: boolean; label: string };
 type DashboardBody = {
@@ -196,6 +197,7 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false }: { b
           </div>
         </div>
 
+        <DigestPanel brand={brand} canSend={canEditCapacity} />
         {panel === 'add' ? <QuickAdd brand={brand} onSaved={refresh} /> : null}
         {panel === 'upload' ? <SpreadsheetUpload brand={brand} onSaved={refresh} /> : null}
 

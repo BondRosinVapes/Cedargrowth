@@ -9,6 +9,7 @@ import { matchDistributorAccount } from '../src/lib/crm/distributor.ts';
 import { productionForecast, stageWinRates } from '../src/lib/crm/forecast.ts';
 import { roundLocation, sampleTaskTitle, validateMediaUpload } from '../src/lib/crm/field.ts';
 import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, rateLimited, reorderDeal } from '../src/lib/crm/reorder.ts';
+import { buildDigest, hoodieSignals, nextBestActions, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
 import {
   activePolicy,
   alertDedupeKey,
@@ -66,6 +67,9 @@ import {
   handleReorderLinks,
   handlePublicReorder,
   handleTransparencyBatch,
+  handleDigestPreview,
+  handleDigestSend,
+  useDigestDelivery,
   handleNotes,
   handleOpportunityCollection,
   handleReports,
@@ -614,6 +618,15 @@ class MemoryCrm implements CrmStore {
     const batch = this.batches.find((row) => row.brand === brand && row.batchNumber === batchNumber && row.released && row.coaStoragePath) ?? null;
     return { state: 'ok' as const, value: batch };
   }
+  async findDigestSend(brand: 'cedargrowth' | 'bond', summary: string) {
+    const row = [...this.activity].reverse().find((item) => item.brand === brand && item.kind === 'digest_sent' && item.summary === summary);
+    return { state: 'ok' as const, value: row ? { createdAt: row.createdAt } : null };
+  }
+  async recordDigest(brand: 'cedargrowth' | 'bond', actor: string, summary: string) {
+    const row = { id: this.id(), publicId: 'test-only:activity', brand, accountId: null, kind: 'digest_sent', summary, actor, createdAt: '2026-11-09T18:00:00Z' };
+    this.activity.push(row);
+    return { state: 'ok' as const, value: { id: row.id } };
+  }
 }
 
 const memory = new MemoryCrm();
@@ -844,6 +857,64 @@ const bondBefore = memory.opportunities.filter((row) => row.brand === 'bond').le
 const submitted = await handlePublicReorder(memory, crmReq('POST', `/api/reorder/${openToken}`, { buyerName: 'Buyer', buyerEmail: 'buyer@example.com', note: '', lines: [{ productId: 'vape-1g', batchNumber: 'CG-1', quantityUnits: 4 }] }), openToken, 'POST');
 const cedarDeals = memory.opportunities.filter((row) => row.brand === 'cedargrowth' && row.name.startsWith('Reorder '));
 assert(submitted.status === 201 && submitted.body.confirmation === NABIS_CONFIRMATION && memory.requests.filter((row) => row.brand === 'cedargrowth').length === 1 && cedarDeals.length === 1 && cedarDeals[0].stage === 'proposal' && cedarDeals[0].productLine === 'vape' && cedarDeals[0].quantityUnits === 4 && cedarDeals[0].forecastCents === null && memory.opportunities.filter((row) => row.brand === 'bond').length === bondBefore && memory.opportunities.filter((row) => row.brand === 'cedargrowth').length === dealsBefore + 1, 'a submission creates exactly one request and one deal in the right brand');
+const sundayNight = Date.parse('2026-11-09T04:30:00.000Z');
+const mondayMorning = Date.parse('2026-11-09T05:30:00.000Z');
+assert(nyWeek(sundayNight).key === '2026-11-02' && nyWeek(mondayMorning).key === '2026-11-09', 'week boundary is Monday in New York');
+const digestAccounts = [
+  { brand: 'cedargrowth' as const, id: '00000000-0000-4000-8000-0000000000aa', status: 'active', city: 'Buffalo', assignedRep: 'Ada', createdAt: '2026-11-10T15:00:00.000Z' },
+  { brand: 'bond' as const, id: '00000000-0000-4000-8000-0000000000bb', status: 'active', city: 'Albany', assignedRep: 'BOND ONLY SHOP', createdAt: '2026-11-10T15:00:00.000Z' },
+];
+const digestDeals = [
+  { brand: 'cedargrowth' as const, id: 'd1', accountId: digestAccounts[0].id, stage: 'won' as const, forecastCents: 5000, expectedCloseOn: '2026-11-20' },
+  { brand: 'cedargrowth' as const, id: 'd2', accountId: digestAccounts[0].id, stage: 'proposal' as const, forecastCents: 2500, expectedCloseOn: '2026-11-01' },
+  { brand: 'bond' as const, id: 'd3', accountId: digestAccounts[1].id, stage: 'won' as const, forecastCents: 999999, expectedCloseOn: '2026-11-20' },
+];
+const digestTasks = [{ brand: 'cedargrowth' as const, status: 'open', dueOn: '2026-11-01', ownerActor: 'Ada', title: 'Follow up on samples at Ada Shop' }];
+const digestNow = Date.parse('2026-11-11T15:00:00.000Z');
+const digestDash = buildDashboard({ brand: 'cedargrowth', today: '2026-11-11', filter: { year: null, month: null, rep: null, region: null, accountType: null, leadSource: null, stage: null, status: null }, accounts: digestAccounts, opportunities: digestDeals, tasks: digestTasks, activity: [] });
+const digest = buildDigest({
+  brand: 'cedargrowth',
+  nowMs: digestNow,
+  accounts: digestAccounts,
+  opportunities: digestDeals,
+  tasks: digestTasks,
+  events: [{ id: 'e1', brand: 'cedargrowth', opportunityId: 'd1', fromStage: 'proposal', toStage: 'won', at: '2026-11-10T18:00:00.000Z' }],
+  contacts: [{ brand: 'cedargrowth', name: 'Quiet Person', email: 'quiet@example.com', phone: '555-0199', preference: 'do_not_contact' }],
+  shorts: ['Vape is short by 1,200 units in Mar 27'],
+});
+const digestText = renderDigestText(digest);
+const digestHtml = renderDigestHtml(digest);
+assert(digest.winRate === digestDash.kpis.winRate && digest.openPipelineCents === (digestDash.byStatus.find((row) => row.key === 'open')?.cents ?? null), 'digest numbers match the dashboard builder for the same rows');
+assert(!digestText.includes('BOND ONLY SHOP') && !digestText.includes('999999') && !digestText.includes('quiet@example.com') && !digestText.includes('555-0199') && !digestText.includes('Quiet Person'), 'Bond data and contact details never appear in a CedarGrowth digest');
+assert(digest.shorts[0] === 'Vape is short by 1,200 units in Mar 27' && digest.reps.every((row) => row.nextActions.length === 0) && nextBestActions('Ada').length === 0 && hoodieSignals().length === 0, 'forecast words are copied and 7B and 6C stay empty');
+assert(digestHtml.includes('Georgia') && !digestHtml.includes('<img') && !digestHtml.includes('—') && !digestHtml.includes('–'), 'the digest email is plain html without images or dashes');
+const digestBefore = memory.activity.filter((row) => row.kind === 'digest_sent').length;
+const salesDigest = await handleDigestSend({ actorId: 'sales-1', grants: salesGrant, request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth' }), store: memory });
+const missingSecret = await handleDigestSend({ actorId: null, grants: [], request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth' }, { 'x-crm-digest-secret': 'wrong-secret' }), store: memory });
+const unconfigured = await handleDigestSend({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth' }), store: memory });
+assert(salesDigest.status === 403 && missingSecret.status === 401 && unconfigured.status === 200 && unconfigured.body.sent === false && unconfigured.body.reason === 'Email is not configured.' && memory.activity.filter((row) => row.kind === 'digest_sent').length === digestBefore, 'a salesperson cannot send, a bad secret is rejected, and missing configuration sends nothing');
+const savedDigestEnv = {
+  key: process.env.RESEND_API_KEY,
+  to: process.env.CRM_DIGEST_TO,
+  from: process.env.CRM_DIGEST_FROM,
+  secret: process.env.CRM_DIGEST_SECRET,
+};
+process.env.RESEND_API_KEY = 'test-digest-key';
+process.env.CRM_DIGEST_TO = 'desk@example.com';
+process.env.CRM_DIGEST_FROM = 'digest@example.com';
+process.env.CRM_DIGEST_SECRET = 'digest-secret-value';
+useDigestDelivery(async () => true);
+const firstDigest = await handleDigestSend({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth' }), store: memory });
+const secondDigest = await handleDigestSend({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth' }), store: memory });
+const adminForce = await handleDigestSend({ actorId: 'admin@example.com', grants: [{ brand: 'cedargrowth', role: 'administrator' }], request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth', force: true }), store: memory });
+const ownerForce = await handleDigestSend({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth', force: true }), store: memory });
+const preview = await handleDigestPreview({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/digest/preview?brand=cedargrowth'), store: memory });
+assert(firstDigest.status === 200 && firstDigest.body.sent === true && secondDigest.status === 409 && adminForce.status === 403 && ownerForce.status === 200 && preview.status === 200 && typeof preview.body.html === 'string' && memory.activity.filter((row) => row.kind === 'digest_sent').length === digestBefore + 2, 'a second send in the same week is refused without force');
+useDigestDelivery(null);
+if (savedDigestEnv.key === undefined) delete process.env.RESEND_API_KEY; else process.env.RESEND_API_KEY = savedDigestEnv.key;
+if (savedDigestEnv.to === undefined) delete process.env.CRM_DIGEST_TO; else process.env.CRM_DIGEST_TO = savedDigestEnv.to;
+if (savedDigestEnv.from === undefined) delete process.env.CRM_DIGEST_FROM; else process.env.CRM_DIGEST_FROM = savedDigestEnv.from;
+if (savedDigestEnv.secret === undefined) delete process.env.CRM_DIGEST_SECRET; else process.env.CRM_DIGEST_SECRET = savedDigestEnv.secret;
 const absentHealth = await handleHealth({
   actorId: 'gary@cedargrowthco.com',
   grants: owner,

@@ -35,6 +35,8 @@ import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
 import { monthStarts, parseCapacityWrite, productionForecast, stageWinRates } from './forecast';
+import { buildDigest, digestConfigured, digestFromAddress, digestRecipients, digestSummary, nyWeek, renderDigestHtml, renderDigestText, secretMatches } from './digest';
+import { sendDigestEmail } from '@/lib/email';
 import { FIELD_BUCKET, READ_URL_SECONDS, isProductLine, isVisitOutcome, mediaPath, roundLocation, validateMediaUpload } from './field';
 import { BATCH_MISS, COA_BUCKET, COA_READ_SECONDS, LINK_MISS, clientIp, coaPath, consumeRate, parseBatchWrite, parseBuyer, parseReorderLines, productIdOk, tokenShapeOk, validateCoaUpload } from './reorder';
 import { PRODUCTS } from '@/lib/products';
@@ -1129,6 +1131,110 @@ export async function handleTransparencyBatch(store: CrmStore, request: Request)
       },
     },
   };
+}
+
+let deliverDigest = sendDigestEmail;
+export function useDigestDelivery(fn: ((data: { to: string[]; from: string; subject: string; html: string; text: string }) => Promise<boolean>) | null): void {
+  deliverDigest = fn ?? sendDigestEmail;
+}
+
+async function loadDigest(store: CrmStore, brand: CrmBrand, nowMs: number): Promise<{ model: ReturnType<typeof buildDigest> } | CrmResult> {
+  const [all, notes, orders, visits, events, capacity] = await Promise.all([
+    store.exportBrand(brand),
+    store.listNotes(brand, null),
+    store.listDistributorOrders(brand),
+    store.listVisits(brand),
+    store.listStageEvents(brand),
+    store.listCapacity(brand),
+  ]);
+  if (all.state !== 'ok') return storageBody(brand, all.state === 'rejected' || all.state === 'missing' ? 'unavailable' : all.state);
+  if (notes.state !== 'ok') return storageBody(brand, notes.state === 'rejected' || notes.state === 'missing' ? 'unavailable' : notes.state);
+  if (events.state !== 'ok' && events.state !== 'absent') return storageBody(brand, events.state === 'rejected' || events.state === 'missing' ? 'unavailable' : events.state);
+  if (capacity.state !== 'ok' && capacity.state !== 'absent') return storageBody(brand, capacity.state === 'rejected' || capacity.state === 'missing' ? 'unavailable' : capacity.state);
+  const today = nyWeek(nowMs).today;
+  const forecast = events.state === 'ok' && capacity.state === 'ok'
+    ? productionForecast({ opportunities: all.value.opportunities, capacity: capacity.value, rates: stageWinRates(events.value, all.value.opportunities), months: monthStarts(today, 6) })
+    : { shorts: [] as string[] };
+  const model = buildDigest({
+    brand,
+    nowMs,
+    accounts: all.value.accounts,
+    opportunities: all.value.opportunities,
+    tasks: all.value.tasks,
+    activity: all.value.activity,
+    notes: notes.value,
+    visits: visits.state === 'ok' ? visits.value : [],
+    orders: orders.state === 'ok' ? orders.value : [],
+    events: events.state === 'ok' ? events.value : [],
+    contacts: all.value.contacts.map((row) => ({ brand: row.brand, name: row.name, email: row.email, phone: row.phone, preference: row.preference })),
+    shorts: forecast.shorts,
+  });
+  return { model };
+}
+
+export async function handleDigestPreview(ctx: CrmContext): Promise<CrmResult> {
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Only an owner or administrator can preview the digest.' } };
+  const loaded = await loadDigest(ctx.store, auth.brand, Date.now());
+  if ('status' in loaded) return loaded;
+  const prior = await ctx.store.findDigestSend(auth.brand, digestSummary(loaded.model.weekKey));
+  if (prior.state !== 'ok') return storageBody(auth.brand, prior.state === 'rejected' || prior.state === 'missing' ? 'unavailable' : prior.state);
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      configured: digestConfigured(auth.brand),
+      recipients: digestRecipients(auth.brand),
+      lastSent: prior.value?.createdAt ?? null,
+      weekLabel: loaded.model.weekLabel,
+      html: renderDigestHtml(loaded.model),
+      text: renderDigestText(loaded.model),
+    },
+  };
+}
+
+export async function handleDigestSend(ctx: CrmContext): Promise<CrmResult> {
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const brand = parseBrand(typeof record.brand === 'string' ? record.brand : null);
+  if (!brand) return { status: 400, body: { ok: false, reason: 'Brand is required.' } };
+  const secretOk = secretMatches(ctx.request.headers.get('x-crm-digest-secret'), process.env.CRM_DIGEST_SECRET);
+  let actor = 'digest schedule';
+  let owner = false;
+  if (!secretOk) {
+    if (!ctx.actorId) return { status: 401, body: { ok: false, reason: 'The digest secret was rejected.' } };
+    const auth = await gate(ctx, brand);
+    if (isResult(auth)) return auth.status === 404 ? { status: 401, body: { ok: false, reason: 'The digest secret was rejected.' } } : auth;
+    if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Only an owner or administrator can send the digest.' } };
+    actor = auth.actorId;
+    owner = auth.role === 'owner';
+  }
+  if (record.force === true && !owner) return { status: 403, body: { ok: false, reason: 'Only an owner can send the digest again for this week.' } };
+  if (!digestConfigured(brand)) return { status: 200, body: { ok: true, sent: false, reason: 'Email is not configured.' } };
+  const from = digestFromAddress();
+  const recipients = digestRecipients(brand);
+  if (!from) return { status: 200, body: { ok: true, sent: false, reason: 'Email is not configured.' } };
+  const loaded = await loadDigest(ctx.store, brand, Date.now());
+  if ('status' in loaded) return loaded;
+  const summary = digestSummary(loaded.model.weekKey);
+  const prior = await ctx.store.findDigestSend(brand, summary);
+  if (prior.state !== 'ok') return storageBody(brand, prior.state === 'rejected' || prior.state === 'missing' ? 'unavailable' : prior.state);
+  if (prior.value && record.force !== true) return { status: 409, body: { ok: false, reason: 'This week was already sent.' } };
+  const brandName = brand === 'bond' ? 'Bond' : 'CedarGrowth';
+  const sent = await deliverDigest({
+    to: recipients,
+    from,
+    subject: `${brandName} weekly digest, ${loaded.model.weekLabel}`,
+    html: renderDigestHtml(loaded.model),
+    text: renderDigestText(loaded.model),
+  });
+  if (!sent) return { status: 502, body: { ok: false, sent: false, reason: 'The digest was not sent.' } };
+  const saved = await ctx.store.recordDigest(brand, actor, summary);
+  if (saved.state !== 'ok') return storageBody(brand, saved.state === 'rejected' || saved.state === 'missing' ? 'unavailable' : saved.state);
+  return { status: 200, body: { ok: true, sent: true, weekKey: loaded.model.weekKey } };
 }
 
 export function staffAudience(hasCedarSalesMembership: boolean): Audience {
