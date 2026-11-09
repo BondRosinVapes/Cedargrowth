@@ -33,6 +33,7 @@ import {
 } from './engine';
 import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
+import { IMPORT_BATCH, IMPORT_KINDS, type ImportKind } from './importer';
 
 export type CrmResult = { status: number; body: Record<string, unknown> };
 
@@ -502,19 +503,16 @@ export async function handleDashboard(ctx: CrmContext): Promise<CrmResult> {
   const url = new URL(ctx.request.url);
   const auth = await gate(ctx, url.searchParams.get('brand'));
   if (isResult(auth)) return auth;
-  const [accounts, opps, tasks, activity, notes] = await Promise.all([
-    ctx.store.listAccounts(auth.brand, { q: null, status: null }),
-    ctx.store.listOpportunities(auth.brand),
-    ctx.store.listTasks(auth.brand, null),
-    ctx.store.listActivity(auth.brand),
-    ctx.store.listNotes(auth.brand, null),
-  ]);
-  for (const result of [accounts, opps, tasks, activity, notes]) {
+  // exportBrand reads every row in this brand (up to its cap), not the 100 most recent.
+  const [all, notes] = await Promise.all([ctx.store.exportBrand(auth.brand), ctx.store.listNotes(auth.brand, null)]);
+  for (const result of [all, notes]) {
     if (result.state !== 'ok') return storageBody(auth.brand, result.state === 'rejected' || result.state === 'missing' ? 'unavailable' : result.state);
   }
-  if (accounts.state !== 'ok' || opps.state !== 'ok' || tasks.state !== 'ok' || activity.state !== 'ok' || notes.state !== 'ok') {
-    return storageBody(auth.brand, 'unavailable');
-  }
+  if (all.state !== 'ok' || notes.state !== 'ok') return storageBody(auth.brand, 'unavailable');
+  const accounts = { value: all.value.accounts };
+  const opps = { value: all.value.opportunities };
+  const tasks = { value: all.value.tasks };
+  const activity = { value: all.value.activity };
   const dashboard = buildDashboard({
     brand: auth.brand,
     today: new Date().toISOString().slice(0, 10),
@@ -539,9 +537,75 @@ export async function handleDashboard(ctx: CrmContext): Promise<CrmResult> {
         canix: { connected: false, label: CANIX_NOT_CONNECTED },
         hoodie: { connected: false, label: HOODIE_NOT_CONNECTED },
       },
+      truncated: all.value.truncated,
+      refreshedAt: new Date().toISOString(),
       dashboard,
     },
   };
+}
+
+type ImportOutcome = { line: number; status: 'ready' | 'created' | 'skipped' | 'error'; reason?: string };
+
+export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Only an owner or administrator can import.' } };
+  const kind = (IMPORT_KINDS as readonly string[]).includes(String(record.kind)) ? (record.kind as ImportKind) : null;
+  const rows = Array.isArray(record.rows) ? record.rows : null;
+  if (!kind || !rows) return { status: 400, body: { ok: false, reason: 'Import could not be read.' } };
+  if (rows.length > IMPORT_BATCH) return { status: 413, body: { ok: false, reason: `Send at most ${IMPORT_BATCH} rows at a time.` } };
+  const commit = record.commit === true;
+
+  const existing = await ctx.store.exportBrand(auth.brand);
+  if (existing.state !== 'ok') return storageBody(auth.brand, existing.state === 'rejected' || existing.state === 'missing' ? 'unavailable' : existing.state);
+  const key = (value: string) => value.trim().toLowerCase();
+  const accountsByName = new Map(existing.value.accounts.filter((row) => row.brand === auth.brand).map((row) => [key(row.displayName), row.id]));
+  const dealKeys = new Set(existing.value.opportunities.filter((row) => row.brand === auth.brand).map((row) => `${row.accountId}|${key(row.name)}`));
+
+  const outcomes: ImportOutcome[] = [];
+  for (const raw of rows) {
+    const item = (raw ?? {}) as { line?: unknown; record?: unknown; accountName?: unknown };
+    const line = typeof item.line === 'number' ? item.line : 0;
+    const fields = item.record && typeof item.record === 'object' ? { ...(item.record as Record<string, unknown>) } : null;
+    if (!fields) { outcomes.push({ line, status: 'error', reason: 'Row could not be read.' }); continue; }
+    if (kind === 'accounts') {
+      const parsed = parseAccountWrite(fields, 'create');
+      if (!parsed.ok || !parsed.value.displayName) { outcomes.push({ line, status: 'error', reason: parsed.ok ? 'Account name is empty.' : parsed.reason }); continue; }
+      const name = key(parsed.value.displayName);
+      if (accountsByName.has(name)) { outcomes.push({ line, status: 'skipped', reason: 'An account with this name already exists.' }); continue; }
+      if (!commit) { accountsByName.set(name, 'pending'); outcomes.push({ line, status: 'ready' }); continue; }
+      const created = await ctx.store.createAccount(auth.brand, auth.actorId, {
+        displayName: parsed.value.displayName,
+        status: parsed.value.status ?? 'prospect',
+        city: parsed.value.city ?? null,
+        notes: parsed.value.notes ?? '',
+        licenseRef: parsed.value.licenseRef ?? null,
+        licenseExpiry: parsed.value.licenseExpiry ?? null,
+        assignedRep: parsed.value.assignedRep ?? null,
+        accountType: parsed.value.accountType ?? null,
+        leadSource: parsed.value.leadSource ?? null,
+      });
+      if (created.state !== 'ok') { outcomes.push({ line, status: 'error', reason: 'Storage did not accept this row.' }); continue; }
+      accountsByName.set(name, created.value.id);
+      outcomes.push({ line, status: 'created' });
+      continue;
+    }
+    const accountName = typeof item.accountName === 'string' ? key(item.accountName) : '';
+    const accountId = accountsByName.get(accountName);
+    if (!accountId) { outcomes.push({ line, status: 'error', reason: 'No account with this name. Import or add the account first.' }); continue; }
+    const parsed = parseOpportunityWrite({ ...fields, accountId }, 'create');
+    if (!parsed.ok || !parsed.value.name || !parsed.value.stage) { outcomes.push({ line, status: 'error', reason: parsed.ok ? 'Deal name is empty.' : parsed.reason }); continue; }
+    const dealKey = `${accountId}|${key(parsed.value.name)}`;
+    if (dealKeys.has(dealKey)) { outcomes.push({ line, status: 'skipped', reason: 'This account already has a deal with this name.' }); continue; }
+    dealKeys.add(dealKey);
+    if (!commit) { outcomes.push({ line, status: 'ready' }); continue; }
+    const created = await ctx.store.createOpportunity(auth.brand, auth.actorId, { ...parsed.value, accountId, name: parsed.value.name, stage: parsed.value.stage });
+    outcomes.push(created.state === 'ok' ? { line, status: 'created' } : { line, status: 'error', reason: 'Storage did not accept this row.' });
+  }
+  return { status: 200, body: { ok: true, configured: true, brand: auth.brand, kind, commit, outcomes } };
 }
 
 export async function handleHealth(ctx: CrmContext): Promise<CrmResult> {

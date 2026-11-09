@@ -4,6 +4,7 @@
 
 import { readFileSync } from 'node:fs';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
+import { mapRows, parseCsv, parseDate, parseMoney } from '../src/lib/crm/importer.ts';
 import {
   activePolicy,
   alertDedupeKey,
@@ -55,6 +56,7 @@ import {
   handleOpportunityCollection,
   handleReports,
   handleDashboard,
+  handleImport,
   handleSearch,
   handleTaskCollection,
 } from '../src/lib/crm/handlers.ts';
@@ -518,6 +520,31 @@ const responseOnly = buildDashboard({
 assert(responseOnly.kpis.avgResponseHours === 12 && responseOnly.kpis.responseSample === 1, 'response time uses the first note on each account in this brand only');
 const bondDash = await handleDashboard({ actorId: 'sales-1', grants: salesGrant, request: crmReq('GET', '/api/admin/crm/dashboard?brand=bond'), store: memory });
 assert(bondDash.status === 403, 'route dashboard denies the other brand');
+const csv = parseCsv('\ufeffCustomer,Type,Lead Source,Rep,City\r\n"Leaf, Inc.",Dispensary,Trade show,Nick,Albany\n"Quote ""Shop""",Micro,Billboard,,\n,,,,\n');
+assert(csv.length === 3 && csv[1][0] === 'Leaf, Inc.' && csv[2][0] === 'Quote "Shop"', 'csv parser handles BOM, quotes, commas, and blank lines');
+const mappedAccounts = mapRows('accounts', csv);
+assert(mappedAccounts.rows[0].record?.accountType === 'adult_use_dispensary' && mappedAccounts.rows[0].record?.leadSource === 'trade_show' && mappedAccounts.rows[0].record?.assignedRep === 'Nick', 'import maps header aliases and value synonyms');
+assert(!!mappedAccounts.rows[1].error && mappedAccounts.rows[1].error.includes('Billboard'), 'import reports an unknown lead source instead of guessing');
+assert(mapRows('deals', parseCsv('Deal name,Stage\nX,Lead\n')).missing.includes('Account'), 'import reports a missing required column');
+assert(parseDate('3/14/26') === '2026-03-14' && parseDate('2026-02-30') === 'invalid' && parseMoney('$1,234.50') === 123450 && parseMoney('12abc') === 'invalid', 'import parses dates and dollar amounts strictly');
+const importRows = mapRows('accounts', parseCsv('Account name,Lead source\nTEST ONLY import store,Referral\nTEST ONLY synthetic account,Referral\n')).rows;
+const salesImport = await handleImport({ actorId: 'sales-1', grants: salesGrant, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'accounts', commit: true, rows: importRows }), store: memory });
+assert(salesImport.status === 403, 'a salesperson cannot bulk import');
+const dryRun = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'accounts', commit: false, rows: importRows }), store: memory });
+const dryOutcomes = dryRun.body.outcomes as { status: string }[];
+const beforeImport = (await memory.exportBrand('cedargrowth')).value.accounts.length;
+assert(dryRun.status === 200 && dryOutcomes[0].status === 'ready' && dryOutcomes[1].status === 'skipped', 'dry run marks new rows ready and existing names skipped');
+assert((await memory.exportBrand('cedargrowth')).value.accounts.length === beforeImport, 'dry run writes nothing');
+const committed = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'accounts', commit: true, rows: importRows }), store: memory });
+assert((committed.body.outcomes as { status: string }[])[0].status === 'created' && (await memory.exportBrand('cedargrowth')).value.accounts.length === beforeImport + 1, 'commit creates only the new account');
+const dealRows = mapRows('deals', parseCsv('Account,Deal name,Stage,Amount,Close date\ntest only import store,First order,Proposal Sent,"$2,500",12/1/2026\nNo Such Store,Ghost,Lead,,\n')).rows;
+const dealImport = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'deals', commit: true, rows: dealRows }), store: memory });
+const dealOutcomes = dealImport.body.outcomes as { status: string }[];
+assert(dealOutcomes[0].status === 'created' && dealOutcomes[1].status === 'error', 'deals match accounts by name and unmatched accounts are reported');
+const bondImport = await handleImport({ actorId: 'sales-1', grants: salesGrant, request: crmReq('POST', '/api/admin/crm/import', { brand: 'bond', kind: 'accounts', commit: true, rows: importRows }), store: memory });
+assert(bondImport.status === 403, 'import denies a brand the session is not granted');
+const tooMany = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'accounts', commit: false, rows: Array.from({ length: 101 }, (_, i) => ({ line: i + 2, record: { displayName: `x${i}` } })) }), store: memory });
+assert(tooMany.status === 413, 'import rejects oversized batches');
 const health = await handleHealth({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/health?brand=cedargrowth'), store: memory });
 const healthCanix = health.body.canix as { connected?: boolean; lastSuccessAt?: unknown };
 assert(health.status === 200 && health.body.storage === 'ready' && health.body.configured === true && healthCanix.connected === false && health.body.adaptersConnected === false, 'ready storage is separate from a disconnected adapter');

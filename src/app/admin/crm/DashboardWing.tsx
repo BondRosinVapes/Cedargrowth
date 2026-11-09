@@ -11,6 +11,7 @@ import {
   type Dashboard,
   type RepRow,
 } from '@/lib/crm/dashboard';
+import { QuickAdd, SpreadsheetUpload } from './DataIntake';
 
 type Source = { connected: boolean; label: string };
 type DashboardBody = {
@@ -19,6 +20,8 @@ type DashboardBody = {
   reason?: string;
   sources?: { crm: Source; canix: Source; hoodie: Source };
   dashboard?: Dashboard;
+  refreshedAt?: string;
+  truncated?: boolean;
 };
 type Section = 'overview' | 'reps' | 'accounts' | 'sources' | 'timeline';
 type Jump = 'accounts' | 'pipeline' | 'canix' | 'signals';
@@ -69,25 +72,42 @@ function topWithOther(rows: Bucket[]): Bucket[] {
   ];
 }
 
-export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; brandName: string; onOpen: (wing: Jump) => void }) {
+export function DashboardWing({ brand, brandName }: { brand: CrmBrand; brandName: string; onOpen?: (wing: Jump) => void }) {
   const [section, setSection] = useState<Section>('overview');
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [body, setBody] = useState<DashboardBody | null>(null);
   const [failed, setFailed] = useState(false);
+  const [tick, setTick] = useState(0);
+  const [panel, setPanel] = useState<'none' | 'add' | 'upload'>('none');
+
+  // Live refresh: every 60 seconds while the tab is visible, when the tab regains focus,
+  // and right after anything is added or imported from this screen.
+  useEffect(() => {
+    const bump = () => { if (document.visibilityState === 'visible') setTick((value) => value + 1); };
+    const timer = window.setInterval(bump, 60_000);
+    window.addEventListener('focus', bump);
+    document.addEventListener('visibilitychange', bump);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', bump);
+      document.removeEventListener('visibilitychange', bump);
+    };
+  }, []);
 
   useEffect(() => {
     let cancel = false;
     const params = new URLSearchParams({ brand });
     for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
-    setFailed(false);
-    fetch(`/api/admin/crm/dashboard?${params.toString()}`, { headers: { 'x-cedargrowth-crm': '1' }, credentials: 'same-origin' })
+    fetch(`/api/admin/crm/dashboard?${params.toString()}`, { headers: { 'x-cedargrowth-crm': '1' }, credentials: 'same-origin', cache: 'no-store' })
       .then((res) => res.json())
-      .then((json: DashboardBody) => { if (!cancel) setBody(json); })
+      .then((json: DashboardBody) => { if (!cancel) { setBody(json); setFailed(false); } })
       .catch(() => { if (!cancel) setFailed(true); });
     return () => { cancel = true; };
-  }, [brand, filters]);
+  }, [brand, filters, tick]);
 
-  if (failed) return <Notice text="The dashboard could not be read. Try again in a moment." />;
+  const refresh = () => setTick((value) => value + 1);
+
+  if (failed && !body) return <Notice text="The dashboard could not be read. Try again in a moment." />;
   if (!body) return <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Loading dashboard</p>;
   if (body.configured === false || !body.dashboard) return <Notice text={body.reason || 'CRM storage is not configured.'} />;
 
@@ -146,6 +166,21 @@ export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; b
           <div className="mt-4">{filterPanel}</div>
         </details>
 
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary" aria-live="polite">
+            {failed ? 'Refresh failed, showing last data' : body.refreshedAt ? `Live. Updated ${new Date(body.refreshedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : 'Live'}
+            {body.truncated ? '. Showing the first 2,000 records' : ''}
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <button type="button" onClick={refresh} className="border border-hairline bg-clinical px-3 py-2 font-mono text-specimen uppercase text-primary">Refresh</button>
+            <button type="button" aria-expanded={panel === 'add'} onClick={() => setPanel(panel === 'add' ? 'none' : 'add')} className={`border px-3 py-2 font-mono text-specimen uppercase ${panel === 'add' ? 'border-ink bg-ink text-inverse' : 'border-ink text-primary'}`}>+ Quick add</button>
+            <button type="button" aria-expanded={panel === 'upload'} onClick={() => setPanel(panel === 'upload' ? 'none' : 'upload')} className={`border px-3 py-2 font-mono text-specimen uppercase ${panel === 'upload' ? 'border-ink bg-ink text-inverse' : 'border-ink text-primary'}`}>Upload spreadsheet</button>
+          </div>
+        </div>
+
+        {panel === 'add' ? <QuickAdd brand={brand} onSaved={refresh} /> : null}
+        {panel === 'upload' ? <SpreadsheetUpload brand={brand} onSaved={refresh} /> : null}
+
         <dl className="grid grid-cols-2 gap-4 md:grid-cols-5">
           <Kpi label="Deals" value={String(data.kpis.deals)} />
           <Kpi label="Total deal value" value={money(data.kpis.totalValueCents)} note="Forecast" />
@@ -157,12 +192,12 @@ export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; b
         {empty ? (
           <div className="flex flex-col gap-3 border border-hairline bg-clinical p-4 md:flex-row md:items-center md:justify-between">
             <p className="text-body-m text-secondary">
-              {filtered ? 'Nothing matches these filters.' : `No ${brandName} records yet. Charts fill in as deals are added and when Canix and Hoodie connect.`}
+              {filtered ? 'Nothing matches these filters.' : `No ${brandName} records yet. Add one with Quick add, or upload a spreadsheet of accounts and deals. The charts update live.`}
             </p>
-            {!filtered ? (
+            {!filtered && panel === 'none' ? (
               <div className="flex shrink-0 gap-3">
-                <button type="button" onClick={() => onOpen('accounts')} className="border border-ink bg-ink px-4 py-2 font-mono text-specimen uppercase text-inverse">Add account</button>
-                <button type="button" onClick={() => onOpen('pipeline')} className="border border-ink px-4 py-2 font-mono text-specimen uppercase text-primary">Add deal</button>
+                <button type="button" onClick={() => setPanel('add')} className="border border-ink bg-ink px-4 py-2 font-mono text-specimen uppercase text-inverse">Quick add</button>
+                <button type="button" onClick={() => setPanel('upload')} className="border border-ink px-4 py-2 font-mono text-specimen uppercase text-primary">Upload spreadsheet</button>
               </div>
             ) : null}
           </div>
