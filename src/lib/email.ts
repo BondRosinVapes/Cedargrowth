@@ -140,43 +140,64 @@ export async function sendSignupAlert(data: SignupEmailData): Promise<void> {
   }
 }
 
-export async function sendDigestEmail(data: { to: string[]; from: string; subject: string; html: string; text: string }): Promise<boolean> {
+export type SentMail = { recipient: string; id: string | null };
+
+export async function sendDigestEmail(data: { to: string[]; from: string; subject: string; html: string; text: string }): Promise<{ sent: boolean; messages: SentMail[] }> {
   const resend = getResend();
   const recipients = [...new Set(data.to.map((item) => item.trim()).filter(Boolean))];
-  if (!resend || !data.from || recipients.length === 0) return false;
-  try {
-    await resend.emails.send({
-      from: data.from,
-      to: recipients,
-      subject: data.subject,
-      html: data.html,
-      text: data.text,
-    });
-    return true;
-  } catch (err) {
-    console.error('Weekly digest email failed', err);
-    return false;
+  if (!resend || !data.from || recipients.length === 0) return { sent: false, messages: [] };
+  const messages: SentMail[] = [];
+  for (const recipient of recipients) {
+    try {
+      const result = await resend.emails.send({
+        from: data.from,
+        to: recipient,
+        subject: data.subject,
+        html: data.html,
+        text: data.text,
+      });
+      messages.push({ recipient, id: result.data?.id ?? null });
+    } catch {
+      console.error('Weekly digest email failed');
+      messages.push({ recipient, id: null });
+    }
   }
+  return { sent: messages.some((message) => message.id !== null), messages };
 }
 
-export async function sendReorderLink(data: { to: string; accountName: string; url: string }): Promise<boolean> {
+export function reorderLinkHtml(accountName: string, url: string): string {
+  return `<p>A reorder link for ${escapeHtml(accountName)}.</p>`
+    + `<p><a href="${escapeHtml(url)}">${escapeHtml(url)}</a></p>`
+    + `<p>This link opens a request. It is not an order and no payment is taken.</p>`;
+}
+
+export async function sendReorderLink(data: { to: string; accountName: string; url: string }): Promise<{ sent: boolean; id: string | null }> {
   const resend = getResend();
   const from = process.env.RESERVATION_ALERT_FROM;
-  if (!resend || !from || !data.to) return false;
+  if (!resend || !from || !data.to) return { sent: false, id: null };
   try {
-    await resend.emails.send({
+    const result = await resend.emails.send({
       from,
       to: data.to,
       subject: `CedarGrowth reorder link, ${data.accountName}`,
-      html:
-        `<p>A reorder link for ${escapeHtml(data.accountName)}.</p>` +
-        `<p><a href="${escapeHtml(data.url)}">${escapeHtml(data.url)}</a></p>` +
-        `<p>This link opens a request. It is not an order and no payment is taken.</p>`,
+      html: reorderLinkHtml(data.accountName, data.url),
     });
-    return true;
-  } catch (err) {
-    console.error('Reorder link email failed', err);
-    return false;
+    return { sent: Boolean(result.data?.id), id: result.data?.id ?? null };
+  } catch {
+    console.error('Reorder link email failed');
+    return { sent: false, id: null };
+  }
+}
+
+export async function readResendEvent(id: string): Promise<string | null> {
+  const resend = getResend();
+  if (!resend || !id) return null;
+  try {
+    const result = await resend.emails.get(id);
+    return result.data?.last_event ?? null;
+  } catch {
+    console.error('Email status could not be read');
+    return null;
   }
 }
 

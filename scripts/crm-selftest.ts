@@ -10,6 +10,8 @@ import { productionForecast, stageWinRates } from '../src/lib/crm/forecast.ts';
 import { roundLocation, sampleTaskTitle, validateMediaUpload } from '../src/lib/crm/field.ts';
 import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, rateLimited, reorderDeal } from '../src/lib/crm/reorder.ts';
 import { buildDigest, hoodieSignals, nextBestActions, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
+import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
+import { reorderLinkHtml } from '../src/lib/email.ts';
 import {
   activePolicy,
   alertDedupeKey,
@@ -69,7 +71,10 @@ import {
   handleTransparencyBatch,
   handleDigestPreview,
   handleDigestSend,
+  handleEmailStatusRefresh,
   useDigestDelivery,
+  useReorderDelivery,
+  useEmailLookup,
   handleNotes,
   handleOpportunityCollection,
   handleReports,
@@ -627,6 +632,25 @@ class MemoryCrm implements CrmStore {
     this.activity.push(row);
     return { state: 'ok' as const, value: { id: row.id } };
   }
+  emailLogs: import('../src/lib/crm/store.ts').EmailLog[] = [];
+  failEmailLog = false;
+  async insertEmailLog(brand: 'cedargrowth' | 'bond', actor: string, input: { kind: 'digest' | 'reorder_link'; resendId: string; recipient: string; accountId: string | null }) {
+    if (this.failEmailLog) return { state: 'rejected' as const };
+    if (this.emailLogs.some((row) => row.resendId === input.resendId)) return { state: 'rejected' as const };
+    const row = { id: this.id(), brand, kind: input.kind, resendId: input.resendId, recipient: input.recipient, accountId: input.accountId, sentAt: '2026-11-09T18:00:00Z', lastEvent: null, lastEventAt: null, createdBy: actor };
+    this.emailLogs.push(row);
+    return { state: 'ok' as const, value: row };
+  }
+  async listEmailLogs(brand: 'cedargrowth' | 'bond', sinceIso: string, accountId?: string | null) {
+    return { state: 'ok' as const, value: this.emailLogs.filter((row) => row.brand === brand && row.sentAt >= sinceIso && (!accountId || row.accountId === accountId)) };
+  }
+  async updateEmailLog(brand: 'cedargrowth' | 'bond', id: string, lastEvent: import('../src/lib/crm/emailStatus.ts').EmailEvent, lastEventAt: string) {
+    const row = this.emailLogs.find((item) => item.id === id && item.brand === brand);
+    if (!row) return { state: 'missing' as const };
+    row.lastEvent = lastEvent;
+    row.lastEventAt = lastEventAt;
+    return { state: 'ok' as const, value: row };
+  }
 }
 
 const memory = new MemoryCrm();
@@ -887,7 +911,9 @@ const digestHtml = renderDigestHtml(digest);
 assert(digest.winRate === digestDash.kpis.winRate && digest.openPipelineCents === (digestDash.byStatus.find((row) => row.key === 'open')?.cents ?? null), 'digest numbers match the dashboard builder for the same rows');
 assert(!digestText.includes('BOND ONLY SHOP') && !digestText.includes('999999') && !digestText.includes('quiet@example.com') && !digestText.includes('555-0199') && !digestText.includes('Quiet Person'), 'Bond data and contact details never appear in a CedarGrowth digest');
 assert(digest.shorts[0] === 'Vape is short by 1,200 units in Mar 27' && digest.reps.every((row) => row.nextActions.length === 0) && nextBestActions('Ada').length === 0 && hoodieSignals().length === 0, 'forecast words are copied and 7B and 6C stay empty');
-assert(digestHtml.includes('Georgia') && !digestHtml.includes('<img') && !digestHtml.includes('—') && !digestHtml.includes('–'), 'the digest email is plain html without images or dashes');
+const reorderHtml = reorderLinkHtml('Shop', 'https://cedargrowth.example/reorder/token');
+assert(digestHtml.includes('Georgia') && !digestHtml.includes('<img') && !reorderHtml.includes('<img') && !digestHtml.includes('pixel') && !reorderHtml.includes('pixel') && !digestHtml.includes('—') && !digestHtml.includes('–'), 'the digest email is plain html without images or dashes');
+assert(emailStatusLabel('delivered') === 'Delivered' && emailStatusLabel('opened') === 'Opened (approximate)' && emailStatusLabel('clicked') === 'Opened (approximate)' && emailStatusLabel('bounced') === 'Bounced' && emailStatusLabel(null) === 'Not yet reported' && emailStatusLabel('sent') === 'Not yet reported', 'status labels stay plain and an open is approximate');
 const digestBefore = memory.activity.filter((row) => row.kind === 'digest_sent').length;
 const salesDigest = await handleDigestSend({ actorId: 'sales-1', grants: salesGrant, request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth' }), store: memory });
 const missingSecret = await handleDigestSend({ actorId: null, grants: [], request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth' }, { 'x-crm-digest-secret': 'wrong-secret' }), store: memory });
@@ -903,13 +929,43 @@ process.env.RESEND_API_KEY = 'test-digest-key';
 process.env.CRM_DIGEST_TO = 'desk@example.com';
 process.env.CRM_DIGEST_FROM = 'digest@example.com';
 process.env.CRM_DIGEST_SECRET = 'digest-secret-value';
-useDigestDelivery(async () => true);
+let digestSends = 0;
+useDigestDelivery(async (data) => {
+  digestSends += 1;
+  return { sent: true, messages: data.to.map((recipient) => ({ recipient, id: `re_digest_${digestSends}_${recipient}` })) };
+});
+const logsBefore = memory.emailLogs.length;
 const firstDigest = await handleDigestSend({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth' }), store: memory });
+const loggedOnce = memory.emailLogs.filter((row) => row.kind === 'digest' && row.brand === 'cedargrowth').length;
 const secondDigest = await handleDigestSend({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth' }), store: memory });
 const adminForce = await handleDigestSend({ actorId: 'admin@example.com', grants: [{ brand: 'cedargrowth', role: 'administrator' }], request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth', force: true }), store: memory });
 const ownerForce = await handleDigestSend({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth', force: true }), store: memory });
 const preview = await handleDigestPreview({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/digest/preview?brand=cedargrowth'), store: memory });
-assert(firstDigest.status === 200 && firstDigest.body.sent === true && secondDigest.status === 409 && adminForce.status === 403 && ownerForce.status === 200 && preview.status === 200 && typeof preview.body.html === 'string' && memory.activity.filter((row) => row.kind === 'digest_sent').length === digestBefore + 2, 'a second send in the same week is refused without force');
+assert(firstDigest.status === 200 && firstDigest.body.sent === true && firstDigest.body.logFailed !== true && loggedOnce === logsBefore + 1 && secondDigest.status === 409 && adminForce.status === 403 && ownerForce.status === 200 && preview.status === 200 && typeof preview.body.html === 'string' && memory.activity.filter((row) => row.kind === 'digest_sent').length === digestBefore + 2, 'a second send in the same week is refused without force');
+memory.failEmailLog = true;
+const failedLog = await handleDigestSend({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/digest/send', { brand: 'cedargrowth', force: true }), store: memory });
+assert(failedLog.status === 200 && failedLog.body.sent === true && failedLog.body.logFailed === true && failedLog.body.reason === 'The email was sent. The status log was not saved.' && memory.emailLogs.filter((row) => row.kind === 'digest').length === loggedOnce + 1, 'a log write failure is reported');
+memory.failEmailLog = false;
+useReorderDelivery(async () => ({ sent: true, id: 're_link_once' }));
+const mailedLink = await handleReorderLinks({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/reorder-links', { brand: 'cedargrowth', accountId: activeId, email: 'buyer@example.com' }), store: memory }, 'POST');
+assert(mailedLink.status === 201 && mailedLink.body.emailed === true && memory.emailLogs.filter((row) => row.kind === 'reorder_link' && row.resendId === 're_link_once' && row.accountId === activeId).length === 1, 'a reorder link email writes one log row');
+useReorderDelivery(null);
+const bondLog = await memory.insertEmailLog('bond', 'gary@cedargrowthco.com', { kind: 'digest', resendId: 're_bond_only', recipient: 'bond@example.com', accountId: null });
+const cedarLog = memory.emailLogs.find((row) => row.resendId.startsWith('re_digest_'));
+const looked: string[] = [];
+useEmailLookup(async (id) => { looked.push(id); return id.startsWith('re_digest_') ? 'opened' : 'delivered'; });
+const savedKey = process.env.RESEND_API_KEY;
+delete process.env.RESEND_API_KEY;
+clearEmailRefreshRates();
+const salesRefresh = await handleEmailStatusRefresh({ actorId: 'sales-1', grants: salesGrant, request: crmReq('POST', '/api/admin/crm/email-status/refresh?brand=cedargrowth'), store: memory });
+const quietRefresh = await handleEmailStatusRefresh({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/email-status/refresh?brand=cedargrowth'), store: memory });
+assert(salesRefresh.status === 403 && quietRefresh.status === 200 && quietRefresh.body.configured === false && quietRefresh.body.updated === 0 && cedarLog?.lastEvent === null && bondLog.state === 'ok' && bondLog.value.lastEvent === null, 'a salesperson cannot refresh and missing configuration changes nothing');
+process.env.RESEND_API_KEY = 'test-digest-key';
+clearEmailRefreshRates();
+const cedarRefresh = await handleEmailStatusRefresh({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/email-status/refresh?brand=cedargrowth'), store: memory });
+assert(cedarRefresh.status === 200 && cedarRefresh.body.updated === memory.emailLogs.filter((row) => row.brand === 'cedargrowth' && row.sentAt >= '2026-10-01').length && looked.every((id) => !id.startsWith('re_bond')) && bondLog.value.lastEvent === null && cedarLog?.lastEvent === 'opened' && emailStatusLabel(cedarLog?.lastEvent) === 'Opened (approximate)', 'refresh stays in the brand');
+useEmailLookup(null);
+if (savedKey === undefined) delete process.env.RESEND_API_KEY; else process.env.RESEND_API_KEY = savedKey;
 useDigestDelivery(null);
 if (savedDigestEnv.key === undefined) delete process.env.RESEND_API_KEY; else process.env.RESEND_API_KEY = savedDigestEnv.key;
 if (savedDigestEnv.to === undefined) delete process.env.CRM_DIGEST_TO; else process.env.CRM_DIGEST_TO = savedDigestEnv.to;

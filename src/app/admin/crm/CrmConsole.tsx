@@ -108,27 +108,40 @@ async function crmFetch(path: string, init?: RequestInit): Promise<{ status: num
 
 function ReorderLinks({ brand, accountId, accountName }: { brand: CrmBrand; accountId: string; accountName: string }) {
   const [links, setLinks] = useState<{ id: string; expiresAt: string; revokedAt: string | null }[]>([]);
+  const [statuses, setStatuses] = useState<{ recipient: string; label: string; lastEventAt: string | null }[]>([]);
   const [url, setUrl] = useState('');
   const [email, setEmail] = useState('');
   const [notice, setNotice] = useState('');
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     let cancel = false;
     crmFetch(`/api/admin/crm/reorder-links?brand=${brand}&accountId=${accountId}`).then((res) => {
-      if (!cancel) setLinks((res.body.links as { id: string; expiresAt: string; revokedAt: string | null }[]) || []);
+      if (cancel) return;
+      setLinks((res.body.links as { id: string; expiresAt: string; revokedAt: string | null }[]) || []);
+      setStatuses((res.body.emailStatus as { recipient: string; label: string; lastEventAt: string | null }[]) || []);
+      setConfigured(res.body.configured === true);
     }).catch(() => { if (!cancel) setNotice('Reorder links could not be read.'); });
     return () => { cancel = true; };
-  }, [brand, accountId, url]);
+  }, [brand, accountId, url, tick]);
 
   async function create(event: React.FormEvent) {
     event.preventDefault();
     const res = await crmFetch('/api/admin/crm/reorder-links', { method: 'POST', body: JSON.stringify({ brand, accountId, email }) });
     if (typeof res.body.url === 'string') {
       setUrl(res.body.url);
-      setNotice(res.body.emailed === true ? `Link emailed for ${accountName}.` : 'Copy this link. It is shown once.');
+      setNotice(typeof res.body.reason === 'string' ? res.body.reason : (res.body.emailed === true ? `Link emailed for ${accountName}.` : 'Copy this link. It is shown once.'));
+      setTick((value) => value + 1);
       return;
     }
     setNotice(typeof res.body.reason === 'string' ? res.body.reason : 'The link was not created.');
+  }
+
+  async function refreshStatus() {
+    const res = await crmFetch(`/api/admin/crm/email-status/refresh?brand=${brand}`, { method: 'POST' });
+    setNotice(res.body.configured === false ? 'Email is not configured' : (typeof res.body.reason === 'string' ? res.body.reason : 'Status refreshed.'));
+    setTick((value) => value + 1);
   }
 
   async function revoke(id: string) {
@@ -141,6 +154,9 @@ function ReorderLinks({ brand, accountId, accountName }: { brand: CrmBrand; acco
     <div className="flex flex-col gap-2">
       <h3 className="font-display text-body-l text-primary">Reorder link</h3>
       <p className="text-caption text-tertiary">The link lets this account request a reorder. It is not an order and no payment is taken.</p>
+      <p className="text-caption text-tertiary">Open tracking is approximate: some mail apps preload images.</p>
+      {configured === false ? <p className="text-caption text-tertiary">Email is not configured</p> : null}
+      <button type="button" onClick={refreshStatus} className="min-h-[44px] self-start border border-ink px-3 py-2 font-mono text-specimen uppercase text-primary">Refresh status</button>
       {notice ? <p className="text-body-m text-primary">{notice}</p> : null}
       {url ? <input readOnly value={url} className="min-h-[44px] border border-hairline bg-clinical px-3 font-mono text-specimen text-primary" /> : null}
       <form onSubmit={create} className="flex flex-col gap-2">
@@ -153,6 +169,11 @@ function ReorderLinks({ brand, accountId, accountName }: { brand: CrmBrand; acco
             <span>Expires {row.expiresAt.slice(0, 10)}. {row.revokedAt ? 'Revoked' : 'Open'}.</span>
             {row.revokedAt ? null : <button type="button" onClick={() => revoke(row.id)} className="min-h-[44px] border border-ink px-3 py-2 font-mono text-specimen uppercase">Revoke</button>}
           </li>
+        ))}
+      </ul>
+      <ul className="flex flex-col gap-1">
+        {statuses.length === 0 ? <li className="text-caption text-tertiary">No emailed link status yet.</li> : statuses.map((row) => (
+          <li key={`${row.recipient}-${row.lastEventAt || 'none'}`} className="text-body-m text-primary">{row.recipient}. {row.label}.{row.lastEventAt ? ` ${row.lastEventAt.slice(0, 16).replace('T', ' ')}` : ''}</li>
         ))}
       </ul>
     </div>

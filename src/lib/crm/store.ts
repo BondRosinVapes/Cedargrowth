@@ -22,6 +22,7 @@ import {
 import { DISTRIBUTORS, ORDER_SOURCES, ORDER_STATUSES, PAYOUT_STATUSES, RETAILER_PAYMENT_STATUSES, type Distributor, type DistributorOrderDraft, type OrderSource, type OrderStatus, type PayoutStatus, type RetailerPaymentStatus } from './distributor';
 import { sampleTaskTitle, type MediaKind, type VisitOutcome } from './field';
 import { confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, reorderDeal, type ReleasedBatch, type ReorderLine } from './reorder';
+import { knownEmailEvent, type EmailEvent } from './emailStatus';
 
 export type StoreResult<T> =
   | { state: 'ok'; value: T }
@@ -247,6 +248,19 @@ export type ReorderRequest = {
   status: 'received' | 'converted' | 'declined';
 };
 
+export type EmailLog = {
+  id: string;
+  brand: CrmBrand;
+  kind: 'digest' | 'reorder_link';
+  resendId: string;
+  recipient: string;
+  accountId: string | null;
+  sentAt: string;
+  lastEvent: EmailEvent | null;
+  lastEventAt: string | null;
+  createdBy: string;
+};
+
 export type Counts = {
   accounts: number;
   contacts: number;
@@ -318,6 +332,9 @@ export interface CrmStore {
   lookupReleasedBatch(brand: CrmBrand, batchNumber: string): Promise<StoreResult<Batch | null>>;
   findDigestSend(brand: CrmBrand, summary: string): Promise<StoreResult<{ createdAt: string } | null>>;
   recordDigest(brand: CrmBrand, actor: string, summary: string): Promise<StoreResult<{ id: string }>>;
+  insertEmailLog(brand: CrmBrand, actor: string, input: { kind: 'digest' | 'reorder_link'; resendId: string; recipient: string; accountId: string | null }): Promise<StoreResult<EmailLog>>;
+  listEmailLogs(brand: CrmBrand, sinceIso: string, accountId?: string | null): Promise<StoreResult<EmailLog[]>>;
+  updateEmailLog(brand: CrmBrand, id: string, lastEvent: EmailEvent, lastEventAt: string): Promise<StoreResult<EmailLog>>;
 }
 
 const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,created_at,updated_at,created_by,updated_by';
@@ -575,6 +592,24 @@ function mapReorderRequest(row: Record<string, unknown>): ReorderRequest | null 
     note: String(row.note ?? ''),
     createdAt: String(row.created_at ?? ''),
     status,
+  };
+}
+
+function mapEmailLog(row: Record<string, unknown>): EmailLog | null {
+  const brand = asBrand(row.brand);
+  const kind = row.kind === 'digest' || row.kind === 'reorder_link' ? row.kind : null;
+  if (!brand || typeof row.id !== 'string' || !kind || typeof row.resend_id !== 'string' || typeof row.recipient !== 'string') return null;
+  return {
+    id: row.id,
+    brand,
+    kind,
+    resendId: row.resend_id,
+    recipient: row.recipient,
+    accountId: typeof row.account_id === 'string' ? row.account_id : null,
+    sentAt: String(row.sent_at ?? ''),
+    lastEvent: knownEmailEvent(typeof row.last_event === 'string' ? row.last_event : null),
+    lastEventAt: row.last_event_at ? String(row.last_event_at) : null,
+    createdBy: String(row.created_by ?? ''),
   };
 }
 
@@ -1312,6 +1347,29 @@ class SupabaseCrmStore implements CrmStore {
     const id = typeof recorded.data === 'string' ? recorded.data : '';
     if (!id) return { state: 'unavailable' };
     return { state: 'ok', value: { id } };
+  }
+
+  async insertEmailLog(brand: CrmBrand, actor: string, input: { kind: 'digest' | 'reorder_link'; resendId: string; recipient: string; accountId: string | null }): Promise<StoreResult<EmailLog>> {
+    const { data, error } = await this.db.from('crm_email_log').insert({
+      brand,
+      kind: input.kind,
+      resend_id: input.resendId,
+      recipient: input.recipient,
+      account_id: input.accountId,
+      created_by: actor,
+    }).select('id,brand,kind,resend_id,recipient,account_id,sent_at,last_event,last_event_at,created_by').maybeSingle();
+    return this.one(brand, data as Record<string, unknown> | null, error, mapEmailLog);
+  }
+
+  listEmailLogs(brand: CrmBrand, sinceIso: string, accountId?: string | null) {
+    let query = this.db.from('crm_email_log').select('id,brand,kind,resend_id,recipient,account_id,sent_at,last_event,last_event_at,created_by').eq('brand', brand).gte('sent_at', sinceIso).order('sent_at', { ascending: false }).limit(200);
+    if (accountId) query = query.eq('account_id', accountId);
+    return this.rows(brand, query, mapEmailLog);
+  }
+
+  async updateEmailLog(brand: CrmBrand, id: string, lastEvent: EmailEvent, lastEventAt: string): Promise<StoreResult<EmailLog>> {
+    const { data, error } = await this.db.from('crm_email_log').update({ last_event: lastEvent, last_event_at: lastEventAt }).eq('id', id).eq('brand', brand).select('id,brand,kind,resend_id,recipient,account_id,sent_at,last_event,last_event_at,created_by').maybeSingle();
+    return this.one(brand, data as Record<string, unknown> | null, error, mapEmailLog);
   }
 
   private one<T extends { brand: CrmBrand }>(
