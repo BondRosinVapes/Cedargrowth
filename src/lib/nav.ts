@@ -40,6 +40,12 @@ export const UTILITY_RIGHT: NavLink[] = [
   { label: 'Manufacturing', href: '/manufacturing' },
 ];
 
+// CSS viewport width where the section row replaces the phone menu.
+// A laptop content box can sit under 1024, including a 1366px screen at 150%
+// zoom (about 910px). This is not the Tailwind lg step. Keep min-[880px] in
+// the shell in step with this query.
+export const MASTHEAD_MEDIA = '(min-width: 880px)';
+
 // Footer, four columns (Block 9).
 export const FOOTER_COLUMNS: NavColumn[] = [
   {
