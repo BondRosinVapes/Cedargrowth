@@ -53,6 +53,7 @@ import {
   handleNotes,
   handleOpportunityCollection,
   handleReports,
+  handleDashboard,
   handleSearch,
   handleTaskCollection,
 } from '../src/lib/crm/handlers.ts';
@@ -481,6 +482,21 @@ const adminExport = await handleExport({ actorId: 'admin-1', grants: [{ brand: '
 assert(adminExport.status === 200 && adminExport.body.paidCents === null && ((adminExport.body.accounts as unknown[]) || []).length === 1, 'route export allows an administrator and leaves paid null');
 const reports = await handleReports({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/reports?brand=cedargrowth'), store: memory });
 assert(reports.status === 200 && reports.body.synthetic === false && reports.body.invoicedCents === null, 'route reports are stored rows, not a synthetic live history');
+const dash = await handleDashboard({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/dashboard?brand=cedargrowth'), store: memory });
+const dashBody = dash.body.dashboard as { kpis: { deals: number; avgResponseHours: unknown; winRate: unknown }; byStage: { key: string; count: number }[]; options: { reps: string[] } } | undefined;
+assert(dash.status === 200 && dash.body.invoicedCents === null && dash.body.paidCents === null && !!dashBody, 'route dashboard reads stored rows and leaves invoiced and paid null');
+assert(!!dashBody && dashBody.kpis.avgResponseHours === null && dashBody.kpis.winRate === null, 'dashboard reports untracked response time and no win rate without closed deals');
+assert(!!dashBody && dashBody.byStage.find((row) => row.key === 'licensed_buyer_review')?.count === 1 && dashBody.options.reps.includes('rep-label'), 'dashboard counts the stored opportunity by stage and lists the rep');
+const sources = dash.body.sources as { canix: { connected: boolean }; hoodie: { connected: boolean } };
+assert(sources.canix.connected === false && sources.hoodie.connected === false, 'dashboard reports Canix and Hoodie as not connected');
+const otherRep = await handleDashboard({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/dashboard?brand=cedargrowth&rep=nobody'), store: memory });
+assert((otherRep.body.dashboard as { kpis: { deals: number } }).kpis.deals === 0, 'dashboard rep filter scopes opportunities');
+const wonOnly = await handleDashboard({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/dashboard?brand=cedargrowth&status=won&year=2026'), store: memory });
+const wonBody = wonOnly.body.dashboard as { kpis: { deals: number }; byMonth: unknown[]; byLeadSource: unknown; byAccountType: unknown };
+assert(wonBody.kpis.deals === 0 && wonBody.byMonth.length === 12, 'dashboard status and year filters scope deals and keep a twelve month timeline');
+assert(wonBody.byLeadSource === null && wonBody.byAccountType === null, 'dashboard reports lead source and account type as not tracked, not as zero');
+const bondDash = await handleDashboard({ actorId: 'sales-1', grants: salesGrant, request: crmReq('GET', '/api/admin/crm/dashboard?brand=bond'), store: memory });
+assert(bondDash.status === 403, 'route dashboard denies the other brand');
 const health = await handleHealth({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/health?brand=cedargrowth'), store: memory });
 const healthCanix = health.body.canix as { connected?: boolean; lastSuccessAt?: unknown };
 assert(health.status === 200 && health.body.storage === 'ready' && health.body.configured === true && healthCanix.connected === false && health.body.adaptersConnected === false, 'ready storage is separate from a disconnected adapter');
