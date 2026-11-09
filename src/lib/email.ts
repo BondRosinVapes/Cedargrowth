@@ -140,6 +140,25 @@ export async function sendSignupAlert(data: SignupEmailData): Promise<void> {
   }
 }
 
+export async function sendDigestEmail(data: { to: string[]; from: string; subject: string; html: string; text: string }): Promise<boolean> {
+  const resend = getResend();
+  const recipients = [...new Set(data.to.map((item) => item.trim()).filter(Boolean))];
+  if (!resend || !data.from || recipients.length === 0) return false;
+  try {
+    await resend.emails.send({
+      from: data.from,
+      to: recipients,
+      subject: data.subject,
+      html: data.html,
+      text: data.text,
+    });
+    return true;
+  } catch (err) {
+    console.error('Weekly digest email failed', err);
+    return false;
+  }
+}
+
 export async function sendReorderLink(data: { to: string; accountName: string; url: string }): Promise<boolean> {
   const resend = getResend();
   const from = process.env.RESERVATION_ALERT_FROM;

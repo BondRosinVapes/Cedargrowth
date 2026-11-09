@@ -316,6 +316,8 @@ export interface CrmStore {
   openReorder(token: string, nowMs: number): Promise<StoreResult<{ accountName: string; distributor: string | null; assignedRep: string | null; batches: ReleasedBatch[]; status: 'ok' | 'unavailable' | 'inactive' }>>;
   submitReorder(token: string, nowMs: number, input: { lines: ReorderLine[]; buyerName: string; buyerEmail: string; note: string }): Promise<StoreResult<{ request: ReorderRequest; opportunity: Opportunity; confirmation: string }> | { state: 'closed' }>;
   lookupReleasedBatch(brand: CrmBrand, batchNumber: string): Promise<StoreResult<Batch | null>>;
+  findDigestSend(brand: CrmBrand, summary: string): Promise<StoreResult<{ createdAt: string } | null>>;
+  recordDigest(brand: CrmBrand, actor: string, summary: string): Promise<StoreResult<{ id: string }>>;
 }
 
 const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,created_at,updated_at,created_by,updated_by';
@@ -1293,6 +1295,23 @@ class SupabaseCrmStore implements CrmStore {
     const item = mapBatch(data as Record<string, unknown>);
     if (!item || item.brand !== brand || !item.released) return { state: 'unavailable' };
     return { state: 'ok', value: item };
+  }
+
+  async findDigestSend(brand: CrmBrand, summary: string): Promise<StoreResult<{ createdAt: string } | null>> {
+    const { data, error } = await this.db.from('crm_activity').select('created_at,kind,summary,brand').eq('brand', brand).eq('kind', 'digest_sent').eq('summary', summary).order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
+    if (error) return { state: 'unavailable' };
+    if (!data) return { state: 'ok', value: null };
+    if (data.brand !== brand || data.summary !== summary) return { state: 'unavailable' };
+    return { state: 'ok', value: { createdAt: String(data.created_at ?? '') } };
+  }
+
+  async recordDigest(brand: CrmBrand, actor: string, summary: string): Promise<StoreResult<{ id: string }>> {
+    const recorded = await this.db.rpc('crm_record_digest', { p_brand: brand, p_actor: actor, p_summary: summary });
+    if (recorded.error) return { state: classify(recorded.error) ?? 'unavailable' };
+    const id = typeof recorded.data === 'string' ? recorded.data : '';
+    if (!id) return { state: 'unavailable' };
+    return { state: 'ok', value: { id } };
   }
 
   private one<T extends { brand: CrmBrand }>(
