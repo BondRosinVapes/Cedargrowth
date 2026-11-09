@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { OPPORTUNITY_STAGES, type CrmBrand } from '@/lib/crm/engine';
+import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, LEAD_SOURCE_LABELS, LEAD_SOURCES, OPPORTUNITY_STAGES, type CrmBrand } from '@/lib/crm/engine';
 import {
   DEAL_STATUSES,
   MONTH_LABELS,
@@ -36,7 +36,7 @@ const SECTIONS: { id: Section; label: string }[] = [
 const SERIES = ['rgb(var(--accent-cedar))', 'rgb(var(--accent-verdant))', 'rgb(var(--text-tertiary))', 'rgb(var(--surface-ink))'];
 const STATUS_COLOR: Record<string, string> = { open: SERIES[3], won: SERIES[1], lost: SERIES[2] };
 
-const EMPTY_FILTERS = { year: '', month: '', rep: '', region: '', stage: '', status: '' };
+const EMPTY_FILTERS = { year: '', month: '', rep: '', region: '', accountType: '', leadSource: '', stage: '', status: '' };
 type Filters = typeof EMPTY_FILTERS;
 
 function money(cents: number | null): string {
@@ -49,6 +49,24 @@ function money(cents: number | null): string {
 
 function percent(value: number | null): string {
   return value === null ? 'None' : `${(value * 100).toFixed(1)}%`;
+}
+
+function hours(value: number | null): string {
+  if (value === null) return 'None yet';
+  if (value >= 48) return `${(value / 24).toFixed(1)} days`;
+  return `${value.toFixed(1)} hrs`;
+}
+
+// Four color slots at most. Anything past the top three folds into Other, so no hue is ever invented.
+function topWithOther(rows: Bucket[]): Bucket[] {
+  const sorted = [...rows].sort((a, b) => b.count - a.count);
+  if (sorted.length <= SERIES.length) return sorted;
+  const rest = sorted.slice(SERIES.length - 1);
+  const restCents = rest.map((row) => row.cents).filter((value): value is number => value !== null);
+  return [
+    ...sorted.slice(0, SERIES.length - 1),
+    { key: 'other_folded', label: 'All others', count: rest.reduce((sum, row) => sum + row.count, 0), cents: restCents.length ? restCents.reduce((a, b) => a + b, 0) : null },
+  ];
 }
 
 export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; brandName: string; onOpen: (wing: Jump) => void }) {
@@ -84,8 +102,8 @@ export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; b
       <FilterSelect label="Month" value={filters.month} onChange={set('month')} options={MONTH_LABELS.map((label, index) => ({ value: String(index + 1), label }))} />
       <FilterSelect label="Sales rep" value={filters.rep} onChange={set('rep')} options={data.options.reps.map((rep) => ({ value: rep, label: rep }))} />
       <FilterSelect label="Region" value={filters.region} onChange={set('region')} options={data.options.regions.map((region) => ({ value: region, label: region }))} />
-      <FilterSelect label="Account type" value="" onChange={() => {}} options={[]} disabled />
-      <FilterSelect label="Lead source" value="" onChange={() => {}} options={[]} disabled />
+      <FilterSelect label="Account type" value={filters.accountType} onChange={set('accountType')} options={ACCOUNT_TYPES.map((type) => ({ value: type, label: ACCOUNT_TYPE_LABELS[type] }))} />
+      <FilterSelect label="Lead source" value={filters.leadSource} onChange={set('leadSource')} options={LEAD_SOURCES.map((source) => ({ value: source, label: LEAD_SOURCE_LABELS[source] }))} />
       <FilterSelect label="Stage" value={filters.stage} onChange={set('stage')} options={OPPORTUNITY_STAGES.map((stage) => ({ value: stage, label: STAGE_LABELS[stage] }))} />
       <FilterSelect label="Status" value={filters.status} onChange={set('status')} options={DEAL_STATUSES.map((status) => ({ value: status, label: STATUS_LABELS[status] }))} />
       {filtered ? (
@@ -132,7 +150,7 @@ export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; b
           <Kpi label="Deals" value={String(data.kpis.deals)} />
           <Kpi label="Total deal value" value={money(data.kpis.totalValueCents)} note="Forecast" />
           <Kpi label="Win rate" value={percent(data.kpis.winRate)} />
-          <Kpi label="Avg response time" value="Not tracked" muted />
+          <Kpi label="Avg response time" value={hours(data.kpis.avgResponseHours)} note={data.kpis.responseSample ? `${data.kpis.responseSample} accounts` : 'First note after a new account'} muted={data.kpis.avgResponseHours === null} />
           <Kpi label="Avg deal value" value={money(data.kpis.avgDealCents)} note="Forecast" />
         </dl>
 
@@ -153,7 +171,7 @@ export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; b
         {section === 'overview' ? (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             <Card title="Deals by account type">
-              <NotTracked text="Account type arrives with Canix customer data." onOpen={() => onOpen('canix')} action="Canix status" />
+              <Donut rows={topWithOther(data.byAccountType)} colorFor={(_, index) => SERIES[index]} measure="count" empty="Set an account type on each account to see this." />
             </Card>
             <Card title="Total deal value by status">
               <Donut rows={data.byStatus} colorFor={(row) => STATUS_COLOR[row.key]} measure="cents" />
@@ -162,7 +180,7 @@ export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; b
               <Bars rows={data.byStage} />
             </Card>
             <Card title="Win rate vs total deal value by lead source" className="md:col-span-2">
-              <ScatterFrame message="Lead source arrives with Hoodie and Canix data." onOpen={() => onOpen('signals')} action="Hoodie signals" />
+              <Scatter rows={data.byLeadSource} />
             </Card>
           </div>
         ) : null}
@@ -181,8 +199,8 @@ export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; b
 
         {section === 'accounts' ? (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <Card title="Deals by account type">
-              <NotTracked text="Account type arrives with Canix customer data." onOpen={() => onOpen('canix')} action="Canix status" />
+            <Card title="Deal value by account type">
+              <Bars rows={data.byAccountType} measure="cents" empty="Set an account type on each account to see this." />
             </Card>
             <Card title="Accounts by status">
               <Donut rows={data.accountsByStatus} colorFor={(_, index) => SERIES[index % SERIES.length]} measure="count" />
@@ -196,13 +214,14 @@ export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; b
         {section === 'sources' ? (
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <Card title="Deals by lead source">
-              <NotTracked text="Lead source arrives with Hoodie and Canix data." onOpen={() => onOpen('signals')} action="Hoodie signals" />
+              <Bars rows={data.byLeadSource} empty="Set a lead source on each account to see this." />
             </Card>
             <Card title="Total deal value by lead source">
-              <NotTracked text="Lead source arrives with Hoodie and Canix data." onOpen={() => onOpen('canix')} action="Canix status" />
+              <Bars rows={data.byLeadSource} measure="cents" empty="Set a lead source on each account to see this." />
             </Card>
+            <Card title="Lead source effectiveness" className="xl:col-span-2"><SourceTable rows={data.byLeadSource} /></Card>
             <Card title="Win rate vs total deal value by lead source" className="xl:col-span-2">
-              <ScatterFrame message="Each lead source becomes a point once source data is connected." onOpen={() => onOpen('signals')} action="Hoodie signals" />
+              <Scatter rows={data.byLeadSource} />
             </Card>
           </div>
         ) : null}
@@ -253,20 +272,10 @@ function EmptyChart({ text }: { text: string }) {
   return <p className="flex min-h-40 flex-1 items-center justify-center border border-dashed border-hairline px-4 text-center text-caption text-tertiary">{text}</p>;
 }
 
-function NotTracked({ text, action, onOpen }: { text: string; action: string; onOpen: () => void }) {
-  return (
-    <div className="flex min-h-40 flex-1 flex-col items-center justify-center gap-3 border border-dashed border-hairline px-4 text-center">
-      <p className="rounded-chip border border-attention px-2 py-0.5 font-mono text-specimen uppercase tracking-specimen text-secondary">Not tracked yet</p>
-      <p className="text-caption text-tertiary">{text}</p>
-      <button type="button" onClick={onOpen} className="cedar-underline font-mono text-specimen uppercase tracking-specimen">{action}</button>
-    </div>
-  );
-}
-
-function Donut({ rows, colorFor, measure }: { rows: Bucket[]; colorFor: (row: Bucket, index: number) => string; measure: 'count' | 'cents' }) {
+function Donut({ rows, colorFor, measure, empty }: { rows: Bucket[]; colorFor: (row: Bucket, index: number) => string; measure: 'count' | 'cents'; empty?: string }) {
   const valueOf = (row: Bucket) => (measure === 'cents' ? row.cents ?? 0 : row.count);
   const total = rows.reduce((sum, row) => sum + valueOf(row), 0);
-  if (total === 0) return <EmptyChart text={measure === 'cents' ? 'No deal values entered yet.' : 'No records yet.'} />;
+  if (total === 0) return <EmptyChart text={empty ?? (measure === 'cents' ? 'No deal values entered yet.' : 'No records yet.')} />;
   const radius = 42;
   const circumference = 2 * Math.PI * radius;
   let offset = 0;
@@ -343,16 +352,67 @@ function Columns({ rows, measure }: { rows: Bucket[]; measure: 'count' | 'cents'
   );
 }
 
-function ScatterFrame({ message, action, onOpen }: { message: string; action: string; onOpen: () => void }) {
+function Scatter({ rows }: { rows: RepRow[] }) {
+  const points = rows.filter((row) => row.winRate !== null && row.cents !== null);
+  if (!points.length) return <EmptyChart text="Each lead source becomes a point once its deals have values and at least one is won or lost." />;
+  const maxCents = Math.max(...points.map((row) => row.cents ?? 0)) || 1;
+  const width = 600;
+  const height = 240;
+  const pad = { left: 64, right: 24, top: 32, bottom: 36 };
+  const x = (rate: number) => pad.left + rate * (width - pad.left - pad.right);
+  const y = (cents: number) => height - pad.bottom - (cents / maxCents) * (height - pad.top - pad.bottom);
   return (
-    <div className="relative mb-6 ml-4 min-h-56 flex-1 border-b border-l border-hairline">
-      <span className="absolute -left-5 top-1/2 -translate-x-1/2 -translate-y-1/2 -rotate-90 whitespace-nowrap text-caption text-tertiary">Total deal value</span>
-      <span className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-caption text-tertiary">Win rate</span>
-      <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
-        <p className="rounded-chip border border-attention px-2 py-0.5 font-mono text-specimen uppercase tracking-specimen text-secondary">Not tracked yet</p>
-        <p className="text-caption text-tertiary">{message}</p>
-        <button type="button" onClick={onOpen} className="cedar-underline font-mono text-specimen uppercase tracking-specimen">{action}</button>
-      </div>
+    <svg viewBox={`0 0 ${width} ${height}`} className="mx-auto h-auto w-full max-w-3xl" role="img" aria-label={points.map((row) => `${row.label}: ${percent(row.winRate)} win rate, ${money(row.cents)}`).join('; ')}>
+      {[0, 0.25, 0.5, 0.75, 1].map((tick) => (
+        <g key={tick}>
+          <line x1={x(tick)} x2={x(tick)} y1={pad.top} y2={height - pad.bottom} stroke="rgb(var(--line-hairline))" strokeWidth="1" />
+          <text x={x(tick)} y={height - pad.bottom + 16} textAnchor="middle" className="fill-tertiary font-mono" fontSize="11">{`${tick * 100}%`}</text>
+        </g>
+      ))}
+      <line x1={pad.left} x2={width - pad.right} y1={height - pad.bottom} y2={height - pad.bottom} stroke="rgb(var(--text-tertiary))" strokeWidth="1" />
+      <text x={pad.left - 8} y={pad.top + 4} textAnchor="end" className="fill-tertiary font-mono" fontSize="11">{money(maxCents)}</text>
+      <text x={pad.left - 8} y={height - pad.bottom} textAnchor="end" className="fill-tertiary font-mono" fontSize="11">$0</text>
+      <text x={(width + pad.left) / 2} y={height - 4} textAnchor="middle" className="fill-tertiary" fontSize="11">Win rate</text>
+      {points.map((row) => (
+        <g key={row.key}>
+          <circle cx={x(row.winRate ?? 0)} cy={y(row.cents ?? 0)} r="7" fill="rgb(var(--surface-ink))" stroke="rgb(var(--surface-clinical))" strokeWidth="2">
+            <title>{`${row.label}: ${percent(row.winRate)} win rate, ${money(row.cents)}, ${row.count} deals`}</title>
+          </circle>
+          <text x={x(row.winRate ?? 0)} y={y(row.cents ?? 0) - 12} textAnchor="middle" className="fill-primary" fontSize="12">{row.label}</text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+function SourceTable({ rows }: { rows: RepRow[] }) {
+  if (!rows.length) return <EmptyChart text="Set a lead source on each account to see which sources win." />;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-left">
+        <thead>
+          <tr className="font-mono text-specimen uppercase tracking-specimen text-tertiary">
+            <th className="py-2 font-normal">Lead source</th>
+            <th className="py-2 text-right font-normal">Deals</th>
+            <th className="py-2 text-right font-normal">Deal value</th>
+            <th className="py-2 text-right font-normal">Won</th>
+            <th className="py-2 text-right font-normal">Lost</th>
+            <th className="py-2 text-right font-normal">Win rate</th>
+          </tr>
+        </thead>
+        <tbody className="font-mono text-data tabular-nums text-primary">
+          {rows.map((row) => (
+            <tr key={row.key} className="border-t border-hairline">
+              <td className="py-2 font-sans text-body-m">{row.label}</td>
+              <td className="py-2 text-right">{row.count}</td>
+              <td className="py-2 text-right">{money(row.cents)}</td>
+              <td className="py-2 text-right">{row.won}</td>
+              <td className="py-2 text-right">{row.lost}</td>
+              <td className="py-2 text-right">{percent(row.winRate)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

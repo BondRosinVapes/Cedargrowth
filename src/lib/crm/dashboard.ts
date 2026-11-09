@@ -1,8 +1,20 @@
 // Pure dashboard aggregation for the wholesale CRM.
 // Reads CRM rows only. Amounts are forecasts, never invoiced or paid revenue.
-// A source that is not connected is reported as not tracked, never as zero.
+// A source that is not connected is reported as not connected, never as zero.
+// Account type and lead source come from the CRM account. Unset values group as Not set.
 
-import { OPEN_STAGES, OPPORTUNITY_STAGES, type CrmBrand, type OpportunityStage } from './engine';
+import {
+  ACCOUNT_TYPE_LABELS,
+  ACCOUNT_TYPES,
+  LEAD_SOURCE_LABELS,
+  LEAD_SOURCES,
+  OPEN_STAGES,
+  OPPORTUNITY_STAGES,
+  type AccountType,
+  type CrmBrand,
+  type LeadSource,
+  type OpportunityStage,
+} from './engine';
 
 export const STAGE_LABELS: Record<OpportunityStage, string> = {
   lead: 'Lead',
@@ -21,6 +33,7 @@ export const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'A
 
 export const UNASSIGNED_REP = 'Unassigned';
 export const NO_REGION = 'No region';
+export const NOT_SET = 'not_set';
 
 export type DashboardAccountRow = {
   brand: CrmBrand;
@@ -28,7 +41,11 @@ export type DashboardAccountRow = {
   status: string;
   city: string | null;
   assignedRep: string | null;
+  accountType?: AccountType | null;
+  leadSource?: LeadSource | null;
+  createdAt?: string;
 };
+export type DashboardNoteRow = { brand: CrmBrand; accountId: string; createdAt: string };
 export type DashboardOpportunityRow = {
   brand: CrmBrand;
   accountId: string;
@@ -44,6 +61,8 @@ export type DashboardFilter = {
   month: number | null;
   rep: string | null;
   region: string | null;
+  accountType: AccountType | null;
+  leadSource: LeadSource | null;
   stage: OpportunityStage | null;
   status: DealStatus | null;
 };
@@ -58,7 +77,8 @@ export type Dashboard = {
     deals: number;
     totalValueCents: number | null;
     winRate: number | null;
-    avgResponseHours: null;
+    avgResponseHours: number | null;
+    responseSample: number;
     avgDealCents: number | null;
     accounts: number;
     activeAccounts: number;
@@ -74,8 +94,8 @@ export type Dashboard = {
   monthsLabel: string;
   overdueOpen: number;
   accountsByStatus: Bucket[];
-  byAccountType: null;
-  byLeadSource: null;
+  byAccountType: Bucket[];
+  byLeadSource: RepRow[];
 };
 
 function clean(value: string | null): string | null {
@@ -94,6 +114,8 @@ export function parseDashboardFilter(params: URLSearchParams): DashboardFilter {
     month: Number.isInteger(month) && month >= 1 && month <= 12 ? month : null,
     rep: clean(params.get('rep')),
     region: clean(params.get('region')),
+    accountType: (ACCOUNT_TYPES as readonly string[]).includes(params.get('accountType') ?? '') ? (params.get('accountType') as AccountType) : null,
+    leadSource: (LEAD_SOURCES as readonly string[]).includes(params.get('leadSource') ?? '') ? (params.get('leadSource') as LeadSource) : null,
     stage: (OPPORTUNITY_STAGES as readonly string[]).includes(stage ?? '') ? (stage as OpportunityStage) : null,
     status: (DEAL_STATUSES as readonly string[]).includes(status ?? '') ? (status as DealStatus) : null,
   };
@@ -129,6 +151,7 @@ export function buildDashboard(input: {
   opportunities: readonly DashboardOpportunityRow[];
   tasks: readonly DashboardTaskRow[];
   activity: readonly DashboardActivityRow[];
+  notes?: readonly DashboardNoteRow[];
 }): Dashboard {
   const { brand, today, filter } = input;
   const accounts = input.accounts.filter((row) => row.brand === brand);
@@ -145,7 +168,10 @@ export function buildDashboard(input: {
   const regions = Array.from(new Set(accounts.map((row) => regionOf(row)))).sort();
 
   const scopedAccounts = accounts.filter((row) =>
-    (!filter.rep || repOf(row) === filter.rep) && (!filter.region || regionOf(row) === filter.region));
+    (!filter.rep || repOf(row) === filter.rep)
+    && (!filter.region || regionOf(row) === filter.region)
+    && (!filter.accountType || row.accountType === filter.accountType)
+    && (!filter.leadSource || row.leadSource === filter.leadSource));
   const accountById = new Map(scopedAccounts.map((row) => [row.id, row]));
 
   // Everything except the date filter, so the timeline can still show the whole year.
@@ -191,6 +217,43 @@ export function buildDashboard(input: {
     };
   }).filter((row) => row.count > 0);
 
+  const typeOf = (row: DashboardOpportunityRow) => accountById.get(row.accountId)?.accountType ?? NOT_SET;
+  const sourceOf = (row: DashboardOpportunityRow) => accountById.get(row.accountId)?.leadSource ?? NOT_SET;
+  const byAccountType: Bucket[] = [...ACCOUNT_TYPES, NOT_SET].map((type) => {
+    const rows = opps.filter((row) => typeOf(row) === type);
+    const label = type === NOT_SET ? 'Not set' : ACCOUNT_TYPE_LABELS[type as AccountType];
+    return { key: type, label, count: rows.length, cents: sumCents(rows.map((row) => row.forecastCents)) };
+  }).filter((row) => row.count > 0);
+  const byLeadSource: RepRow[] = [...LEAD_SOURCES, NOT_SET].map((source) => {
+    const rows = opps.filter((row) => sourceOf(row) === source);
+    const srcWon = rows.filter((row) => row.stage === 'won').length;
+    const srcLost = rows.filter((row) => row.stage === 'lost').length;
+    return {
+      key: source,
+      label: source === NOT_SET ? 'Not set' : LEAD_SOURCE_LABELS[source as LeadSource],
+      count: rows.length,
+      cents: sumCents(rows.map((row) => row.forecastCents)),
+      won: srcWon,
+      lost: srcLost,
+      winRate: srcWon + srcLost ? srcWon / (srcWon + srcLost) : null,
+    };
+  }).filter((row) => row.count > 0);
+
+  // Response time: hours from an account being created to the first note logged on it.
+  const firstNote = new Map<string, number>();
+  for (const note of input.notes ?? []) {
+    if (note.brand !== brand || !accountById.has(note.accountId)) continue;
+    const at = Date.parse(note.createdAt);
+    if (Number.isNaN(at)) continue;
+    const prior = firstNote.get(note.accountId);
+    if (prior === undefined || at < prior) firstNote.set(note.accountId, at);
+  }
+  const responseHours: number[] = [];
+  for (const [accountId, at] of firstNote) {
+    const created = Date.parse(accountById.get(accountId)?.createdAt ?? '');
+    if (!Number.isNaN(created) && at >= created) responseHours.push((at - created) / 3600000);
+  }
+
   const byRegion: Bucket[] = (filter.region ? [filter.region] : regions).map((region) => {
     const rows = opps.filter((row) => regionOf(accountById.get(row.accountId)) === region);
     return { key: region, label: region, count: rows.length, cents: sumCents(rows.map((row) => row.forecastCents)) };
@@ -223,7 +286,8 @@ export function buildDashboard(input: {
       deals: opps.length,
       totalValueCents: sumCents(opps.map((row) => row.forecastCents)),
       winRate: won.length + lost.length ? won.length / (won.length + lost.length) : null,
-      avgResponseHours: null,
+      avgResponseHours: responseHours.length ? Math.round((responseHours.reduce((a, b) => a + b, 0) / responseHours.length) * 10) / 10 : null,
+      responseSample: responseHours.length,
       avgDealCents: forecasts.length ? Math.round(forecasts.reduce((a, b) => a + b, 0) / forecasts.length) : null,
       accounts: scopedAccounts.length,
       activeAccounts: scopedAccounts.filter((row) => row.status === 'active').length,
@@ -239,7 +303,7 @@ export function buildDashboard(input: {
     monthsLabel: filter.year ? String(filter.year) : 'next 12 months',
     overdueOpen: open.filter((row) => row.expectedCloseOn && row.expectedCloseOn < today).length,
     accountsByStatus,
-    byAccountType: null,
-    byLeadSource: null,
+    byAccountType,
+    byLeadSource,
   };
 }

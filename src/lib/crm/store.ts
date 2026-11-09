@@ -12,6 +12,10 @@ import {
   type StoredInsight,
   type TaskStatus,
   type TaskWrite,
+  ACCOUNT_TYPES,
+  LEAD_SOURCES,
+  type AccountType,
+  type LeadSource,
 } from './engine';
 
 export type StoreResult<T> =
@@ -34,6 +38,8 @@ export type Account = {
   licenseJurisdiction: string | null;
   licenseExpiry: string | null;
   assignedRep: string | null;
+  accountType: AccountType | null;
+  leadSource: LeadSource | null;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
@@ -137,10 +143,10 @@ function asBrand(value: unknown): CrmBrand | null {
 export interface CrmStore {
   counts(brand: CrmBrand): Promise<StoreResult<Counts>>;
   listAccounts(brand: CrmBrand, filter: { q: string | null; status: AccountStatus | null }): Promise<StoreResult<Account[]>>;
-  createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null }): Promise<StoreResult<Account>>;
+  createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null }): Promise<StoreResult<Account>>;
   listNotes(brand: CrmBrand, accountId: string | null): Promise<StoreResult<Note[]>>;
   createNote(brand: CrmBrand, actor: string, input: { accountId: string; body: string }): Promise<StoreResult<Note>>;
-  updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null }): Promise<StoreResult<Account>>;
+  updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null }): Promise<StoreResult<Account>>;
   listContacts(brand: CrmBrand, accountId: string | null): Promise<StoreResult<Contact[]>>;
   createContact(brand: CrmBrand, actor: string, input: ContactWrite & { accountId: string; name: string }): Promise<StoreResult<Contact>>;
   updateContact(brand: CrmBrand, actor: string, id: string, patch: ContactWrite): Promise<StoreResult<Contact>>;
@@ -157,7 +163,7 @@ export interface CrmStore {
   applyAlert(brand: CrmBrand, id: string, next: AlertRecord): Promise<StoreResult<AlertRecord>>;
 }
 
-const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,created_at,updated_at,created_by,updated_by';
+const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,created_at,updated_at,created_by,updated_by';
 const CONTACT_COLS = 'id,public_id,brand,account_id,name,title,email,phone,notes,preference,created_at,updated_at';
 const OPP_COLS = 'id,public_id,brand,account_id,name,stage,forecast_cents,expected_close_on,notes,loss_reason,next_action,next_action_on,updated_at';
 const TASK_COLS = 'id,public_id,brand,account_id,opportunity_id,title,due_on,status,notes,owner_actor,completed_at';
@@ -188,6 +194,8 @@ function mapAccount(row: Record<string, unknown>): Account | null {
     licenseJurisdiction: row.license_jurisdiction ? String(row.license_jurisdiction) : null,
     licenseExpiry: row.license_expiry ? String(row.license_expiry) : null,
     assignedRep: row.assigned_rep ? String(row.assigned_rep) : null,
+    accountType: (ACCOUNT_TYPES as readonly string[]).includes(String(row.account_type)) ? (row.account_type as AccountType) : null,
+    leadSource: (LEAD_SOURCES as readonly string[]).includes(String(row.lead_source)) ? (row.lead_source as LeadSource) : null,
     createdAt: String(row.created_at ?? ''),
     updatedAt: String(row.updated_at ?? ''),
     createdBy: String(row.created_by ?? ''),
@@ -376,7 +384,7 @@ class SupabaseCrmStore implements CrmStore {
     return this.rows(brand, query, mapAccount);
   }
 
-  async createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null }): Promise<StoreResult<Account>> {
+  async createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null }): Promise<StoreResult<Account>> {
     const { data, error } = await this.db.from('crm_accounts').insert({
       brand,
       display_name: input.displayName,
@@ -388,6 +396,8 @@ class SupabaseCrmStore implements CrmStore {
       license_jurisdiction: input.licenseJurisdiction ?? null,
       license_expiry: input.licenseExpiry ?? null,
       assigned_rep: input.assignedRep ?? null,
+      account_type: input.accountType ?? null,
+      lead_source: input.leadSource ?? null,
       created_by: actor,
       updated_by: actor,
     }).select(ACCOUNT_COLS).maybeSingle();
@@ -399,7 +409,7 @@ class SupabaseCrmStore implements CrmStore {
     return { state: 'ok', value: account };
   }
 
-  async updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null }) {
+  async updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null }) {
     const row: Record<string, unknown> = { updated_by: actor };
     if (patch.displayName !== undefined) row.display_name = patch.displayName;
     if (patch.status !== undefined) row.status = patch.status;
@@ -410,6 +420,8 @@ class SupabaseCrmStore implements CrmStore {
     if (patch.licenseJurisdiction !== undefined) row.license_jurisdiction = patch.licenseJurisdiction;
     if (patch.licenseExpiry !== undefined) row.license_expiry = patch.licenseExpiry;
     if (patch.assignedRep !== undefined) row.assigned_rep = patch.assignedRep;
+    if (patch.accountType !== undefined) row.account_type = patch.accountType;
+    if (patch.leadSource !== undefined) row.lead_source = patch.leadSource;
     const { data, error } = await this.db.from('crm_accounts').update(row).eq('id', id).eq('brand', brand).select(ACCOUNT_COLS).maybeSingle();
     return this.one(brand, data as Record<string, unknown> | null, error, mapAccount);
   }

@@ -3,6 +3,7 @@
 // Run: node --experimental-strip-types scripts/crm-selftest.ts
 
 import { readFileSync } from 'node:fs';
+import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import {
   activePolicy,
   alertDedupeKey,
@@ -388,8 +389,8 @@ class MemoryCrm implements CrmStore {
   async listAccounts(brand: 'cedargrowth' | 'bond', filter: { q: string | null; status: Account['status'] | null }) {
     return { state: 'ok' as const, value: this.accounts.filter((row) => row.brand === brand && (!filter.status || row.status === filter.status) && (!filter.q || row.displayName.toLowerCase().includes(filter.q))) };
   }
-  async createAccount(brand: 'cedargrowth' | 'bond', actor: string, input: { displayName: string; status: Account['status']; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null }) {
-    const row: Account = { id: this.id(), publicId: `test-only:${brand}:account`, brand, displayName: input.displayName, status: input.status, city: input.city, notes: input.notes, licenseRef: input.licenseRef ?? null, facilityRef: input.facilityRef ?? null, licenseJurisdiction: input.licenseJurisdiction ?? null, licenseExpiry: input.licenseExpiry ?? null, assignedRep: input.assignedRep ?? null, createdAt: 'test-only', updatedAt: 'test-only', createdBy: actor, updatedBy: actor };
+  async createAccount(brand: 'cedargrowth' | 'bond', actor: string, input: { displayName: string; status: Account['status']; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: Account['accountType']; leadSource?: Account['leadSource'] }) {
+    const row: Account = { id: this.id(), publicId: `test-only:${brand}:account`, brand, displayName: input.displayName, status: input.status, city: input.city, notes: input.notes, licenseRef: input.licenseRef ?? null, facilityRef: input.facilityRef ?? null, licenseJurisdiction: input.licenseJurisdiction ?? null, licenseExpiry: input.licenseExpiry ?? null, assignedRep: input.assignedRep ?? null, accountType: input.accountType ?? null, leadSource: input.leadSource ?? null, createdAt: 'test-only', updatedAt: 'test-only', createdBy: actor, updatedBy: actor };
     this.accounts.push(row);
     return { state: 'ok' as const, value: row };
   }
@@ -494,7 +495,27 @@ assert((otherRep.body.dashboard as { kpis: { deals: number } }).kpis.deals === 0
 const wonOnly = await handleDashboard({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/dashboard?brand=cedargrowth&status=won&year=2026'), store: memory });
 const wonBody = wonOnly.body.dashboard as { kpis: { deals: number }; byMonth: unknown[]; byLeadSource: unknown; byAccountType: unknown };
 assert(wonBody.kpis.deals === 0 && wonBody.byMonth.length === 12, 'dashboard status and year filters scope deals and keep a twelve month timeline');
-assert(wonBody.byLeadSource === null && wonBody.byAccountType === null, 'dashboard reports lead source and account type as not tracked, not as zero');
+assert(Array.isArray(wonBody.byLeadSource) && Array.isArray(wonBody.byAccountType), 'dashboard returns lead source and account type breakdowns');
+const typedAccount = await handleAccountCollection({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/accounts', { brand: 'cedargrowth', displayName: 'TEST ONLY typed account', status: 'prospect', accountType: 'adult_use_dispensary', leadSource: 'trade_show' }), store: memory });
+const typedRow = typedAccount.body.account as { id: string; accountType: string | null; leadSource: string | null } | undefined;
+assert(typedAccount.status === 201 && typedRow?.accountType === 'adult_use_dispensary' && typedRow?.leadSource === 'trade_show', 'account stores account type and lead source');
+const badSource = await handleAccountCollection({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/accounts', { brand: 'cedargrowth', displayName: 'TEST ONLY bad source', status: 'prospect', leadSource: 'billboard' }), store: memory });
+assert(badSource.status === 400, 'an unknown lead source is rejected');
+if (typedRow) await handleOpportunityCollection({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/opportunities', { brand: 'cedargrowth', accountId: typedRow.id, name: 'TEST ONLY typed deal', stage: 'proposal', forecastCents: 5000 }), store: memory });
+const typedDash = await handleDashboard({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/dashboard?brand=cedargrowth&leadSource=trade_show'), store: memory });
+const typedBody = typedDash.body.dashboard as { kpis: { deals: number }; byLeadSource: { key: string; count: number; cents: number | null }[]; byAccountType: { key: string; count: number }[] };
+assert(typedBody.kpis.deals === 1 && typedBody.byLeadSource[0]?.key === 'trade_show' && typedBody.byLeadSource[0]?.cents === 5000 && typedBody.byAccountType[0]?.key === 'adult_use_dispensary', 'dashboard groups deals by lead source and account type');
+const responseOnly = buildDashboard({
+  brand: 'cedargrowth',
+  today: '2026-11-09',
+  filter: { year: null, month: null, rep: null, region: null, accountType: null, leadSource: null, stage: null, status: null },
+  accounts: [{ brand: 'cedargrowth', id: 'a1', status: 'prospect', city: null, assignedRep: null, createdAt: '2026-11-01T00:00:00Z' }, { brand: 'bond', id: 'b1', status: 'prospect', city: null, assignedRep: null, createdAt: '2026-11-01T00:00:00Z' }],
+  opportunities: [],
+  tasks: [],
+  activity: [],
+  notes: [{ brand: 'cedargrowth', accountId: 'a1', createdAt: '2026-11-02T06:00:00Z' }, { brand: 'cedargrowth', accountId: 'a1', createdAt: '2026-11-01T12:00:00Z' }, { brand: 'bond', accountId: 'b1', createdAt: '2026-11-01T01:00:00Z' }],
+});
+assert(responseOnly.kpis.avgResponseHours === 12 && responseOnly.kpis.responseSample === 1, 'response time uses the first note on each account in this brand only');
 const bondDash = await handleDashboard({ actorId: 'sales-1', grants: salesGrant, request: crmReq('GET', '/api/admin/crm/dashboard?brand=bond'), store: memory });
 assert(bondDash.status === 403, 'route dashboard denies the other brand');
 const health = await handleHealth({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/health?brand=cedargrowth'), store: memory });
