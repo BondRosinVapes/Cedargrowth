@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import { CrmDeskFrame } from './CrmDeskFrame';
 
 export const metadata: Metadata = {
   title: 'Wholesale CRM',
@@ -9,8 +10,6 @@ export const metadata: Metadata = {
 
 export default function CrmLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="fixed inset-0 z-[80] overflow-auto bg-parchment text-primary">
-      {children}
-    </div>
+    <CrmDeskFrame>{children}</CrmDeskFrame>
   );
 }

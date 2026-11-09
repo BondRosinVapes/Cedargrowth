@@ -37,7 +37,8 @@ where auth_user_id = '<existing auth user uuid>' and brand = 'cedargrowth' and r
 
 - Admin-gated accounts, contacts, preferences, assigned-rep labels, opportunities, tasks, append-only activity, and append-only notes, once `0120` through `0123` are applied together.
 - Opportunity stages are lead, qualification, licensed buyer review, proposal, won, and lost. Lost requires a loss reason. Forecast is not invoiced or paid.
-- Reports return funnel, aging, and rep workload from stored rows. Health states Canix and Hoodie are not connected. Missing source data stays null.
+- Reports return funnel, aging, and rep workload from stored rows when storage is ready. Health reports storage readiness separately from Canix and Hoodie. A missing schema is not `ok`. Missing source amounts stay null.
+- An existing `0120` opportunity stage is rewritten before the new check: `qualified` to `qualification`, `committed` to `proposal` with the original token in `legacy_stage`, `closed_won` to `won`, and `closed_lost` to `lost`. A lost row with no stored reason keeps the explicit sentence `Legacy stage closed_lost. No loss reason was stored.` A stage outside that set aborts the upgrade.
 - Forecast amounts are labeled forecast. Invoiced and paid amounts are null.
 - If the tables or the server client are absent, the desk says storage is not configured. It does not keep a browser copy.
 - Canix and Hoodie adapters are disconnected. They do not call the network.
@@ -49,7 +50,31 @@ where auth_user_id = '<existing auth user uuid>' and brand = 'cedargrowth' and r
 - Canix access, schema, entitlements, and write filters are unverified until Tuesday 10 Nov 2026 at the earliest. No live read was attempted.
 - Hoodie licensing, lawful coverage, freshness, and API shape are unverified. No Hoodie call was attempted.
 - Calibration, recipients, channels, and cadence are not settings. Email, text, and Slack are not sent.
-- Migrations `0120`, `0121`, `0122`, and `0123` are files only. They are not applied to the hosted project. `0120`, `0121`, and `0122` are not atomic if a hosted runner commits each file and then fails. The operator boundary is `psql --single-transaction -f scripts/crm-apply-bundle.sql`. That script is outside `supabase/migrations`, so `db push` does not run it. Rollback is `docs/crm-wholesale-rollback.sql`, manual, and only after those tables exist. It drops `crm_notes` before the account tables.
+- Migrations `0120`, `0121`, `0122`, and `0123` are files only. They are not applied to the hosted project. `0120`, `0121`, and `0122` are not atomic if a hosted runner commits each file and then fails. Hosted-runner atomicity is not established. The fresh-install boundary is `psql --single-transaction -v ON_ERROR_STOP=1 -f scripts/crm-apply-bundle.sql`. After `0120` through `0122` have committed, the upgrade boundary is `psql --single-transaction -v ON_ERROR_STOP=1 -f scripts/crm-apply-0123.sql`. Both scripts sit outside `supabase/migrations`. Autocommit application is not a deployment procedure. Rollback is `docs/crm-wholesale-rollback.sql`, manual, and only after those tables exist. It drops `crm_notes` before the account tables.
+
+## Blueprint coverage
+
+The authoritative plan is the CedarGrowth internal CRM blueprint of 8 Nov 2026. This table is the build state, not a claim that the plan is finished.
+
+| Blueprint item | State | What was exercised |
+| --- | --- | --- |
+| CedarGrowth-hosted desk, Bond hyperlink only | Implemented as `/admin/crm`. No Bond file and no hyperlink placement. | Route deny without a session. |
+| Brand authorization on search, export, and counts | Implemented. Default deny. | Route tests for Bond deny, salesperson export deny, administrator export. |
+| Accounts, stored license and facility references, assigned rep | Implemented. References do not certify a license. Assignment does not grant a role. | Route create and local SQL. |
+| Contacts and preferences | Implemented. Storing is not consent. | Route and SQL `do_not_contact`. |
+| Pipeline lead, qualification, licensed-buyer review, proposal, won, lost | Implemented, including upgrade from the prior six stage names. | Local upgrade of every prior stage. Unsupported stage aborts. |
+| Forecast, expected close, loss reason, next action | Implemented. Won and forecast are not invoiced or paid. | Route rejects lost without a reason. Counts keep invoiced and paid null. |
+| Tasks with owner, due date, and status | Implemented. | Route and SQL. |
+| Append-only notes and activity | Implemented. Calls, meetings, and outbound messages are not separate sends. | SQL rejects note update and delete. |
+| Funnel, aging, rep workload | Implemented from stored rows when storage is ready. Cross-brand totals are not offered. | Mixed-brand funnel fails closed. |
+| Source health and freshness | Adapter disconnection is separate from storage readiness. Last success is null. | Health returns 503 when storage is absent and 200 with `storage: ready` when it is not. Both keep Canix and Hoodie disconnected. |
+| Read-only Canix mirror, orders, invoices, payments | Blocked. No endpoint is called and no schema was verified. | Adapter test replaces `fetch` and records no call. |
+| Hoodie, Metrc, Headset, LeafLink | Blocked or out of this build. Hoodie is unverified. BDSA stays declined. Headset and LeafLink are phase 2. | No client for those sources. |
+| Historical import, webhooks, polling, deletions, reconciliation | Deferred. No sync job exists. | No schedule was added. |
+| Provenance on imported fields | Deferred with import. The field registry marks Canix and Hoodie fields not editable and not connected. | Registry self-test. |
+| Retention, correction, and deletion policy | Deferred. Notes cannot be deleted by this desk. | Delete trigger. |
+| Alerts, auto orders, outbound messages | Inactive. No activation path. | Alert activation is rejected. |
+| Phase 0 and phase 1 evidence | Blocked until Canix access and a verified schema. | No hosted CRM migration was applied. |
 - LITMUS, SENTINEL, VERNIER, and Gary's candidate approval have not been passed by this change.
 
 ## Storage risk

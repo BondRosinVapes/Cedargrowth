@@ -89,8 +89,15 @@ export function CrmConsole({
       ]);
       if (cancel) return;
       const storageMissing = countRes.body.configured === false || accountRes.body.configured === false;
-      setConfigured(storageMissing ? false : countRes.body.configured === true);
-      if (storageMissing) setNotice(String(countRes.body.reason || accountRes.body.reason || 'CRM storage is not configured.'));
+      if (storageMissing) {
+        setConfigured(false);
+        setNotice(String(countRes.body.reason || accountRes.body.reason || 'CRM storage is not configured.'));
+      } else if (countRes.body.configured === true) {
+        setConfigured(true);
+      } else {
+        setConfigured(null);
+        if (countRes.body.ok === false) setNotice(String(countRes.body.reason || 'The desk could not be read.'));
+      }
       setCounts((countRes.body.counts as Record<string, number | null | boolean>) || null);
       setAccounts((accountRes.body.accounts as Account[]) || []);
       if (intelRes.body.reorder) {
@@ -466,7 +473,14 @@ export function CrmConsole({
       {wing === 'health' ? (
         <section className="flex max-w-editorial flex-col gap-3 border border-hairline bg-clinical p-4">
           <h2 className="font-display text-heading-s text-primary">Source health</h2>
-          <p className="text-body-m text-secondary">{health ? `${String((health.canix as { label?: string })?.label || 'Canix not connected')}. ${String((health.hoodie as { label?: string })?.label || 'Hoodie not connected')}. Last successful refresh: none.` : 'Loading.'}</p>
+          <p className="text-body-m text-primary">
+            {health?.storage === 'ready'
+              ? 'Storage is ready for this brand.'
+              : health?.storage === 'absent' || health?.storage === 'unavailable'
+                ? `Storage is not ready. ${String(health.reason || 'CRM storage is not configured.')}`
+                : health ? String(health.reason || 'The desk could not be read.') : 'Loading.'}
+          </p>
+          <p className="text-body-m text-secondary">{health ? `${String((health.canix as { label?: string })?.label || 'Canix not connected')}. ${String((health.hoodie as { label?: string })?.label || 'Hoodie not connected')}. Last successful refresh: none. Adapter disconnection is separate from storage readiness.` : null}</p>
           <p className="text-caption text-tertiary">Exceptions: not configured. A missing source is not a zero count and not a healthy sync.</p>
         </section>
       ) : null}

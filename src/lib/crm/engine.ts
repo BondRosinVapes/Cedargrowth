@@ -106,20 +106,24 @@ export function authorizeCrmRequest(input: {
   if (!input.actorId) return { ok: false, status: 404, reason: 'Not found' };
   if (input.grants.length === 0) return { ok: false, status: 403, reason: 'Sales access is not provisioned.' };
   if (input.headerMarker !== '1') return { ok: false, status: 403, reason: 'Request was rejected.' };
-  if (!input.headerOrigin) return { ok: false, status: 403, reason: 'Request was rejected.' };
-  let origin: URL;
-  try {
-    origin = new URL(input.headerOrigin);
-  } catch {
-    return { ok: false, status: 403, reason: 'Request was rejected.' };
-  }
-  if (origin.origin !== input.requestOrigin) return { ok: false, status: 403, reason: 'Request was rejected.' };
-  if (input.headerFetchSite && input.headerFetchSite !== 'same-origin') {
-    return { ok: false, status: 403, reason: 'Request was rejected.' };
-  }
   const method = input.method.toUpperCase();
   if (method !== 'GET' && method !== 'POST' && method !== 'PATCH') {
     return { ok: false, status: 405, reason: 'Request was rejected.' };
+  }
+  // A browser same-origin GET does not send Origin. Mutations still require it.
+  if (input.headerFetchSite && input.headerFetchSite !== 'same-origin') {
+    return { ok: false, status: 403, reason: 'Request was rejected.' };
+  }
+  if (input.headerOrigin) {
+    let origin: URL;
+    try {
+      origin = new URL(input.headerOrigin);
+    } catch {
+      return { ok: false, status: 403, reason: 'Request was rejected.' };
+    }
+    if (origin.origin !== input.requestOrigin) return { ok: false, status: 403, reason: 'Request was rejected.' };
+  } else if (method !== 'GET') {
+    return { ok: false, status: 403, reason: 'Request was rejected.' };
   }
   if (!input.brandRaw) return { ok: false, status: 400, reason: 'Brand is required.' };
   const brand = parseBrand(input.brandRaw);
