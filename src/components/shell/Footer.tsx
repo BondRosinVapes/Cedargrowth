@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { FOOTER_COLUMNS } from '@/lib/nav';
-import { AGE_LINE, ANNOUNCEMENT, FACILITY_ADDRESS, UNKNOWNS, BRAND } from '@/lib/site';
+import { AGE_LINE, FACILITY_ADDRESS, UNKNOWNS, BRAND } from '@/lib/site';
 import { Unknown } from '@/components/atoms/Unknown';
 import { Wordmark } from './Wordmark';
 import { NewsletterForm } from './NewsletterForm';
@@ -67,21 +67,16 @@ export function Footer() {
           </div>
         </div>
 
-        <div className="mt-16 flex flex-col gap-3">
-          <p className="text-caption-m md:text-caption text-inverse/70">
-            {ANNOUNCEMENT}
+        <div className="mt-16 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-caption-m md:text-caption text-inverse/60">
+            {BRAND.full}. Buffalo, New York.
           </p>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-caption-m md:text-caption text-inverse/60">
-              {BRAND.full}. Buffalo, New York.
-            </p>
-            <Link
-              href="/admin/kelvin/login"
-              className="cedar-underline font-mono text-specimen uppercase tracking-specimen text-inverse/40"
-            >
-              Admin
-            </Link>
-          </div>
+          <Link
+            href="/admin/kelvin/login"
+            className="cedar-underline font-mono text-specimen uppercase tracking-specimen text-inverse/40"
+          >
+            Admin
+          </Link>
         </div>
       </div>
     </footer>
