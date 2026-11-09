@@ -1526,7 +1526,7 @@ class SupabaseCrmStore implements CrmStore {
       p_request_id: input.requestId,
       p_received_at: input.receivedAt,
       p_rows: input.ops.map((op) => {
-        if (op.op === 'account') return { op: 'account', index: op.index, display_name: op.displayName, status: op.status, account_type: op.accountType, city: op.city, county: op.county, license_number: op.licenseNumber };
+        if (op.op === 'account') return { op: 'account', index: op.index, display_name: op.displayName, status: op.status, account_type: op.accountType, lead_source: op.leadSource, assigned_rep: op.assignedRep, city: op.city, county: op.county, license_number: op.licenseNumber, license_expiry: op.licenseExpiry, notes: op.notes };
         if (op.op === 'contact') return { op: 'contact', index: op.index, name: op.name, email: op.email, phone: op.phone, title: op.title, account_license: op.accountLicense, account_name: op.accountName };
         return { op: 'note', index: op.index, body: op.body, account_license: op.accountLicense, account_name: op.accountName };
       }),

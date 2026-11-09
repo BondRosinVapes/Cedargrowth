@@ -11,3 +11,5 @@ Thumbs.db
 *.tsbuildinfo
 next-env.d.ts
 screenshots/
+# Spreadsheets loaded by scripts/codex-load-records.ts stay on the box.
+/data/

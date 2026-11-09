@@ -152,6 +152,13 @@ if [ "$AGENT_REPLAY" != "replay" ] || [ "$AGENT_COUNTS" != "1,1,1,3,unspecified"
   exit 1
 fi
 echo 'ok: agent intake writes one cedar account, contact, and note, then rejects replay and a duplicate license'
+AGENT_CONTACT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa12'::uuid, '2026-11-09T18:06:00Z', '[{\"op\":\"contact\",\"index\":0,\"name\":\"Agent Buyer\",\"email\":\"buyer@agent.test\",\"account_license\":\"AGENT-LIC-1\"}]'::jsonb)::text;")
+AGENT_CONTACT_COUNT=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_contacts where lower(email) = 'buyer@agent.test';")
+if [ "$AGENT_CONTACT_COUNT" != "1" ] || ! printf '%s' "$AGENT_CONTACT" | grep -q 'already exists'; then
+  echo "FAIL: agent contact dedupe ${AGENT_CONTACT} ${AGENT_CONTACT_COUNT}"
+  exit 1
+fi
+echo 'ok: a repeated contact email on the same account is not added again'
 expect_fail 'note delete after intake' "delete from public.crm_notes where body like 'TEST ONLY%';"
 
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${DB};" >/dev/null
