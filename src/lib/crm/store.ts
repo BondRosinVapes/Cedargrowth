@@ -14,9 +14,11 @@ import {
   type TaskWrite,
   ACCOUNT_TYPES,
   LEAD_SOURCES,
+  OPEN_STAGES,
   type AccountType,
   type LeadSource,
 } from './engine';
+import { DISTRIBUTORS, ORDER_SOURCES, ORDER_STATUSES, PAYOUT_STATUSES, RETAILER_PAYMENT_STATUSES, type Distributor, type DistributorOrderDraft, type OrderSource, type OrderStatus, type PayoutStatus, type RetailerPaymentStatus } from './distributor';
 
 export type StoreResult<T> =
   | { state: 'ok'; value: T }
@@ -40,6 +42,8 @@ export type Account = {
   assignedRep: string | null;
   accountType: AccountType | null;
   leadSource: LeadSource | null;
+  distributor: Distributor | null;
+  distributorAccountRef: string | null;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
@@ -115,6 +119,28 @@ export type Activity = {
   createdAt: string;
 };
 
+export type DistributorOrder = {
+  id: string;
+  publicId: string;
+  brand: CrmBrand;
+  accountId: string | null;
+  distributor: Distributor;
+  orderRef: string;
+  retailerName: string;
+  orderedOn: string | null;
+  deliveredOn: string | null;
+  orderStatus: OrderStatus;
+  invoiceCents: number | null;
+  retailerPaymentStatus: RetailerPaymentStatus;
+  retailerPaidOn: string | null;
+  payoutStatus: PayoutStatus;
+  payoutCents: number | null;
+  payoutOn: string | null;
+  opportunityId: string | null;
+  source: OrderSource;
+  importedAt: string;
+};
+
 export type Counts = {
   accounts: number;
   contacts: number;
@@ -143,10 +169,10 @@ function asBrand(value: unknown): CrmBrand | null {
 export interface CrmStore {
   counts(brand: CrmBrand): Promise<StoreResult<Counts>>;
   listAccounts(brand: CrmBrand, filter: { q: string | null; status: AccountStatus | null }): Promise<StoreResult<Account[]>>;
-  createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null }): Promise<StoreResult<Account>>;
+  createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>>;
   listNotes(brand: CrmBrand, accountId: string | null): Promise<StoreResult<Note[]>>;
   createNote(brand: CrmBrand, actor: string, input: { accountId: string; body: string }): Promise<StoreResult<Note>>;
-  updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null }): Promise<StoreResult<Account>>;
+  updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>>;
   listContacts(brand: CrmBrand, accountId: string | null): Promise<StoreResult<Contact[]>>;
   createContact(brand: CrmBrand, actor: string, input: ContactWrite & { accountId: string; name: string }): Promise<StoreResult<Contact>>;
   updateContact(brand: CrmBrand, actor: string, id: string, patch: ContactWrite): Promise<StoreResult<Contact>>;
@@ -161,9 +187,14 @@ export interface CrmStore {
   exportBrand(brand: CrmBrand): Promise<StoreResult<{ accounts: Account[]; contacts: Contact[]; opportunities: Opportunity[]; tasks: Task[]; activity: Activity[]; truncated: boolean }>>;
   intelligence(brand: CrmBrand): Promise<StoreResult<IntelRead>>;
   applyAlert(brand: CrmBrand, id: string, next: AlertRecord): Promise<StoreResult<AlertRecord>>;
+  listDistributorOrders(brand: CrmBrand): Promise<StoreResult<DistributorOrder[]>>;
+  upsertDistributorOrder(brand: CrmBrand, actor: string, input: DistributorOrderDraft & { accountId: string | null }): Promise<StoreResult<{ order: DistributorOrder; action: 'created' | 'updated' }>>;
+  linkDistributorOrder(brand: CrmBrand, orderId: string, accountId: string): Promise<StoreResult<DistributorOrder>>;
+  markDealWonFromOrder(brand: CrmBrand, actor: string, orderId: string, opportunityId: string): Promise<StoreResult<{ order: DistributorOrder; stage: OpportunityStage }>>;
 }
 
-const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,created_at,updated_at,created_by,updated_by';
+const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,created_at,updated_at,created_by,updated_by';
+const ORDER_COLS = 'id,public_id,brand,account_id,distributor,order_ref,retailer_name,ordered_on,delivered_on,order_status,invoice_cents,retailer_payment_status,retailer_paid_on,payout_status,payout_cents,payout_on,opportunity_id,source,imported_at';
 const CONTACT_COLS = 'id,public_id,brand,account_id,name,title,email,phone,notes,preference,created_at,updated_at';
 const OPP_COLS = 'id,public_id,brand,account_id,name,stage,forecast_cents,expected_close_on,notes,loss_reason,next_action,next_action_on,updated_at';
 const TASK_COLS = 'id,public_id,brand,account_id,opportunity_id,title,due_on,status,notes,owner_actor,completed_at';
@@ -196,10 +227,47 @@ function mapAccount(row: Record<string, unknown>): Account | null {
     assignedRep: row.assigned_rep ? String(row.assigned_rep) : null,
     accountType: (ACCOUNT_TYPES as readonly string[]).includes(String(row.account_type)) ? (row.account_type as AccountType) : null,
     leadSource: (LEAD_SOURCES as readonly string[]).includes(String(row.lead_source)) ? (row.lead_source as LeadSource) : null,
+    distributor: (DISTRIBUTORS as readonly string[]).includes(String(row.distributor)) ? (row.distributor as Distributor) : null,
+    distributorAccountRef: row.distributor_account_ref ? String(row.distributor_account_ref) : null,
     createdAt: String(row.created_at ?? ''),
     updatedAt: String(row.updated_at ?? ''),
     createdBy: String(row.created_by ?? ''),
     updatedBy: String(row.updated_by ?? ''),
+  };
+}
+
+function asToken<T extends string>(value: unknown, allowed: readonly T[]): T | null {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value) ? value as T : null;
+}
+
+function mapDistributorOrder(row: Record<string, unknown>): DistributorOrder | null {
+  const brand = asBrand(row.brand);
+  const distributor = asToken(row.distributor, DISTRIBUTORS);
+  const orderStatus = asToken(row.order_status, ORDER_STATUSES);
+  const payment = asToken(row.retailer_payment_status, RETAILER_PAYMENT_STATUSES);
+  const payout = asToken(row.payout_status, PAYOUT_STATUSES);
+  const source = asToken(row.source, ORDER_SOURCES);
+  if (!brand || typeof row.id !== 'string' || !distributor || !orderStatus || !payment || !payout || !source) return null;
+  return {
+    id: row.id,
+    publicId: String(row.public_id ?? ''),
+    brand,
+    accountId: typeof row.account_id === 'string' ? row.account_id : null,
+    distributor,
+    orderRef: String(row.order_ref ?? ''),
+    retailerName: String(row.retailer_name ?? ''),
+    orderedOn: row.ordered_on ? String(row.ordered_on) : null,
+    deliveredOn: row.delivered_on ? String(row.delivered_on) : null,
+    orderStatus,
+    invoiceCents: typeof row.invoice_cents === 'number' ? row.invoice_cents : null,
+    retailerPaymentStatus: payment,
+    retailerPaidOn: row.retailer_paid_on ? String(row.retailer_paid_on) : null,
+    payoutStatus: payout,
+    payoutCents: typeof row.payout_cents === 'number' ? row.payout_cents : null,
+    payoutOn: row.payout_on ? String(row.payout_on) : null,
+    opportunityId: typeof row.opportunity_id === 'string' ? row.opportunity_id : null,
+    source,
+    importedAt: String(row.imported_at ?? ''),
   };
 }
 
@@ -384,7 +452,7 @@ class SupabaseCrmStore implements CrmStore {
     return this.rows(brand, query, mapAccount);
   }
 
-  async createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null }): Promise<StoreResult<Account>> {
+  async createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>> {
     const { data, error } = await this.db.from('crm_accounts').insert({
       brand,
       display_name: input.displayName,
@@ -398,6 +466,8 @@ class SupabaseCrmStore implements CrmStore {
       assigned_rep: input.assignedRep ?? null,
       account_type: input.accountType ?? null,
       lead_source: input.leadSource ?? null,
+      distributor: input.distributor ?? null,
+      distributor_account_ref: input.distributorAccountRef ?? null,
       created_by: actor,
       updated_by: actor,
     }).select(ACCOUNT_COLS).maybeSingle();
@@ -409,7 +479,7 @@ class SupabaseCrmStore implements CrmStore {
     return { state: 'ok', value: account };
   }
 
-  async updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null }) {
+  async updateAccount(brand: CrmBrand, actor: string, id: string, patch: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }) {
     const row: Record<string, unknown> = { updated_by: actor };
     if (patch.displayName !== undefined) row.display_name = patch.displayName;
     if (patch.status !== undefined) row.status = patch.status;
@@ -422,6 +492,8 @@ class SupabaseCrmStore implements CrmStore {
     if (patch.assignedRep !== undefined) row.assigned_rep = patch.assignedRep;
     if (patch.accountType !== undefined) row.account_type = patch.accountType;
     if (patch.leadSource !== undefined) row.lead_source = patch.leadSource;
+    if (patch.distributor !== undefined) row.distributor = patch.distributor;
+    if (patch.distributorAccountRef !== undefined) row.distributor_account_ref = patch.distributorAccountRef;
     const { data, error } = await this.db.from('crm_accounts').update(row).eq('id', id).eq('brand', brand).select(ACCOUNT_COLS).maybeSingle();
     return this.one(brand, data as Record<string, unknown> | null, error, mapAccount);
   }
@@ -622,6 +694,86 @@ class SupabaseCrmStore implements CrmStore {
       if (!b || typeof row.id !== 'string' || typeof row.account_id !== 'string') return null;
       return { id: row.id, publicId: String(row.public_id ?? ''), brand: b, accountId: row.account_id, body: String(row.body ?? ''), actor: String(row.actor ?? ''), createdAt: String(row.created_at ?? '') };
     });
+  }
+
+  listDistributorOrders(brand: CrmBrand) {
+    return this.rows(
+      brand,
+      this.db.from('crm_distributor_orders').select(ORDER_COLS).eq('brand', brand).order('imported_at', { ascending: false }).limit(500),
+      mapDistributorOrder,
+    );
+  }
+
+  async upsertDistributorOrder(brand: CrmBrand, _actor: string, input: DistributorOrderDraft & { accountId: string | null }): Promise<StoreResult<{ order: DistributorOrder; action: 'created' | 'updated' }>> {
+    const existing = await this.db.from('crm_distributor_orders').select(ORDER_COLS).eq('brand', brand).eq('distributor', input.distributor).eq('order_ref', input.orderRef).maybeSingle();
+    const failed = classify(existing.error);
+    if (failed) return { state: failed };
+    if (existing.error) return { state: 'rejected' };
+    const current = existing.data ? mapDistributorOrder(existing.data as Record<string, unknown>) : null;
+    if (current && current.brand === brand) {
+      const { data, error } = await this.db.from('crm_distributor_orders').update({
+        order_status: input.orderStatus,
+        delivered_on: input.deliveredOn,
+        invoice_cents: input.invoiceCents,
+        retailer_payment_status: input.retailerPaymentStatus,
+        retailer_paid_on: input.retailerPaidOn,
+        payout_status: input.payoutStatus,
+        payout_cents: input.payoutCents,
+        payout_on: input.payoutOn,
+        imported_at: new Date().toISOString(),
+      }).eq('id', current.id).eq('brand', brand).select(ORDER_COLS).maybeSingle();
+      const saved = this.one(brand, data as Record<string, unknown> | null, error, mapDistributorOrder);
+      if (saved.state !== 'ok') return saved;
+      return { state: 'ok', value: { order: saved.value, action: 'updated' } };
+    }
+    const { data, error } = await this.db.from('crm_distributor_orders').insert({
+      brand,
+      account_id: input.accountId,
+      distributor: input.distributor,
+      order_ref: input.orderRef,
+      retailer_name: input.retailerName,
+      ordered_on: input.orderedOn,
+      delivered_on: input.deliveredOn,
+      order_status: input.orderStatus,
+      invoice_cents: input.invoiceCents,
+      retailer_payment_status: input.retailerPaymentStatus,
+      retailer_paid_on: input.retailerPaidOn,
+      payout_status: input.payoutStatus,
+      payout_cents: input.payoutCents,
+      payout_on: input.payoutOn,
+      source: 'csv',
+    }).select(ORDER_COLS).maybeSingle();
+    const saved = this.one(brand, data as Record<string, unknown> | null, error, mapDistributorOrder);
+    if (saved.state !== 'ok') return saved;
+    return { state: 'ok', value: { order: saved.value, action: 'created' } };
+  }
+
+  async linkDistributorOrder(brand: CrmBrand, orderId: string, accountId: string): Promise<StoreResult<DistributorOrder>> {
+    const account = await this.db.from('crm_accounts').select('id,brand').eq('id', accountId).eq('brand', brand).maybeSingle();
+    const accountFailed = classify(account.error);
+    if (accountFailed) return { state: accountFailed };
+    if (account.error || !account.data || account.data.brand !== brand) return { state: 'rejected' };
+    const { data, error } = await this.db.from('crm_distributor_orders').update({ account_id: accountId }).eq('id', orderId).eq('brand', brand).select(ORDER_COLS).maybeSingle();
+    return this.one(brand, data as Record<string, unknown> | null, error, mapDistributorOrder);
+  }
+
+  async markDealWonFromOrder(brand: CrmBrand, actor: string, orderId: string, opportunityId: string): Promise<StoreResult<{ order: DistributorOrder; stage: OpportunityStage }>> {
+    const order = await this.db.from('crm_distributor_orders').select(ORDER_COLS).eq('id', orderId).eq('brand', brand).maybeSingle();
+    const orderFailed = classify(order.error);
+    if (orderFailed) return { state: orderFailed };
+    const current = order.data ? mapDistributorOrder(order.data as Record<string, unknown>) : null;
+    if (order.error || !current || !current.accountId) return { state: 'rejected' };
+    const deal = await this.db.from('crm_opportunities').select(OPP_COLS).eq('id', opportunityId).eq('brand', brand).maybeSingle();
+    const dealFailed = classify(deal.error);
+    if (dealFailed) return { state: dealFailed };
+    const mapped = deal.data ? mapOpportunity(deal.data as Record<string, unknown>) : null;
+    if (!mapped || mapped.accountId !== current.accountId || OPEN_STAGES.indexOf(mapped.stage) < 0) return { state: 'rejected' };
+    const won = await this.updateOpportunity(brand, actor, opportunityId, { stage: 'won' });
+    if (won.state !== 'ok') return won;
+    const { data, error } = await this.db.from('crm_distributor_orders').update({ opportunity_id: opportunityId }).eq('id', orderId).eq('brand', brand).select(ORDER_COLS).maybeSingle();
+    const saved = this.one(brand, data as Record<string, unknown> | null, error, mapDistributorOrder);
+    if (saved.state !== 'ok') return saved;
+    return { state: 'ok', value: { order: saved.value, stage: 'won' } };
   }
 
   private one<T extends { brand: CrmBrand }>(

@@ -15,6 +15,7 @@ import {
   type LeadSource,
   type OpportunityStage,
 } from './engine';
+import { summarizeDistributor, type DistributorSummary, type DistributorSummaryOrder } from './distributor';
 
 export const STAGE_LABELS: Record<OpportunityStage, string> = {
   lead: 'Lead',
@@ -47,6 +48,7 @@ export type DashboardAccountRow = {
 };
 export type DashboardNoteRow = { brand: CrmBrand; accountId: string; createdAt: string };
 export type DashboardOpportunityRow = {
+  id?: string;
   brand: CrmBrand;
   accountId: string;
   stage: OpportunityStage;
@@ -96,6 +98,7 @@ export type Dashboard = {
   accountsByStatus: Bucket[];
   byAccountType: Bucket[];
   byLeadSource: RepRow[];
+  distributor: DistributorSummary;
 };
 
 function clean(value: string | null): string | null {
@@ -152,6 +155,7 @@ export function buildDashboard(input: {
   tasks: readonly DashboardTaskRow[];
   activity: readonly DashboardActivityRow[];
   notes?: readonly DashboardNoteRow[];
+  orders?: readonly DistributorSummaryOrder[];
 }): Dashboard {
   const { brand, today, filter } = input;
   const accounts = input.accounts.filter((row) => row.brand === brand);
@@ -305,5 +309,14 @@ export function buildDashboard(input: {
     accountsByStatus,
     byAccountType,
     byLeadSource,
+    distributor: summarizeDistributor({
+      today,
+      orders: (input.orders ?? []).filter((row) => row.brand === brand),
+      openDeals: input.opportunities.filter((row) => row.brand === brand && !!row.id && OPEN_STAGES.indexOf(row.stage) >= 0).map((row) => ({
+        id: row.id as string,
+        accountId: row.accountId,
+        stage: row.stage,
+      })),
+    }),
   };
 }
