@@ -99,6 +99,7 @@ export type Dashboard = {
   byAccountType: Bucket[];
   byLeadSource: RepRow[];
   distributor: DistributorSummary;
+  fieldReps: { rep: string; visitsThisWeek: number; daysSinceLastVisit: number | null }[];
 };
 
 function clean(value: string | null): string | null {
@@ -146,6 +147,24 @@ function monthLabel(key: string, withYear: boolean): string {
   return withYear ? `${MONTH_LABELS[month - 1]} ${String(year).slice(2)}` : MONTH_LABELS[month - 1];
 }
 
+function fieldRepStats(reps: string[], visits: readonly { repActor: string; checkedInAt: string }[], today: string) {
+  const start = new Date(`${today}T00:00:00Z`);
+  start.setUTCDate(start.getUTCDate() - 6);
+  const week = start.toISOString().slice(0, 10);
+  const names = new Set(reps);
+  for (const visit of visits) names.add(visit.repActor || UNASSIGNED_REP);
+  return [...names].sort().map((rep) => {
+    const mine = visits.filter((row) => (row.repActor || UNASSIGNED_REP) === rep);
+    const days = mine.map((row) => row.checkedInAt.slice(0, 10)).filter((day) => day <= today);
+    const last = days.sort().at(-1) ?? null;
+    return {
+      rep,
+      visitsThisWeek: mine.filter((row) => row.checkedInAt.slice(0, 10) >= week && row.checkedInAt.slice(0, 10) <= today).length,
+      daysSinceLastVisit: last ? Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${last}T00:00:00Z`)) / 86400000) : null,
+    };
+  });
+}
+
 export function buildDashboard(input: {
   brand: CrmBrand;
   today: string;
@@ -156,6 +175,7 @@ export function buildDashboard(input: {
   activity: readonly DashboardActivityRow[];
   notes?: readonly DashboardNoteRow[];
   orders?: readonly DistributorSummaryOrder[];
+  visits?: readonly { brand: CrmBrand; repActor: string; checkedInAt: string }[];
 }): Dashboard {
   const { brand, today, filter } = input;
   const accounts = input.accounts.filter((row) => row.brand === brand);
@@ -309,6 +329,7 @@ export function buildDashboard(input: {
     accountsByStatus,
     byAccountType,
     byLeadSource,
+    fieldReps: fieldRepStats(reps, (input.visits ?? []).filter((row) => row.brand === brand), today),
     distributor: summarizeDistributor({
       today,
       orders: (input.orders ?? []).filter((row) => row.brand === brand),

@@ -20,6 +20,7 @@ import {
   type LeadSource,
 } from './engine';
 import { DISTRIBUTORS, ORDER_SOURCES, ORDER_STATUSES, PAYOUT_STATUSES, RETAILER_PAYMENT_STATUSES, type Distributor, type DistributorOrderDraft, type OrderSource, type OrderStatus, type PayoutStatus, type RetailerPaymentStatus } from './distributor';
+import { sampleTaskTitle, type MediaKind, type VisitOutcome } from './field';
 
 export type StoreResult<T> =
   | { state: 'ok'; value: T }
@@ -162,6 +163,48 @@ export type Capacity = {
   notes: string;
 };
 
+export type Visit = {
+  id: string;
+  publicId: string;
+  brand: CrmBrand;
+  accountId: string;
+  repActor: string;
+  checkedInAt: string;
+  checkedOutAt: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  outcome: VisitOutcome;
+  notes: string;
+};
+
+export type Sample = {
+  id: string;
+  publicId: string;
+  brand: CrmBrand;
+  accountId: string;
+  visitId: string | null;
+  productLine: ProductLine;
+  quantityUnits: number;
+  leftOn: string;
+  followUpOn: string;
+  notes: string;
+};
+
+export type Media = {
+  id: string;
+  publicId: string;
+  brand: CrmBrand;
+  accountId: string;
+  visitId: string | null;
+  kind: MediaKind;
+  storagePath: string;
+  contentType: string;
+  byteSize: number;
+  durationSeconds: number | null;
+  createdBy: string;
+  createdAt: string;
+};
+
 export type Counts = {
   accounts: number;
   contacts: number;
@@ -215,6 +258,13 @@ export interface CrmStore {
   listStageEvents(brand: CrmBrand): Promise<StoreResult<StageEvent[]>>;
   listCapacity(brand: CrmBrand): Promise<StoreResult<Capacity[]>>;
   upsertCapacity(brand: CrmBrand, actor: string, input: { month: string; productLine: ProductLine; capacityUnits: number; notes: string }): Promise<StoreResult<Capacity>>;
+  listVisits(brand: CrmBrand): Promise<StoreResult<Visit[]>>;
+  checkIn(brand: CrmBrand, actor: string, input: { accountId: string; outcome: VisitOutcome; notes: string; latitude: number | null; longitude: number | null }): Promise<StoreResult<Visit>>;
+  checkOut(brand: CrmBrand, visitId: string): Promise<StoreResult<Visit>>;
+  listSamples(brand: CrmBrand): Promise<StoreResult<Sample[]>>;
+  createSample(brand: CrmBrand, actor: string, input: { accountId: string; visitId: string | null; productLine: ProductLine; quantityUnits: number; leftOn: string; followUpOn: string; notes: string }): Promise<StoreResult<{ sample: Sample; task: Task }>>;
+  listMedia(brand: CrmBrand): Promise<StoreResult<Media[]>>;
+  createMedia(brand: CrmBrand, actor: string, input: { id: string; accountId: string; visitId: string | null; kind: MediaKind; storagePath: string; contentType: string; byteSize: number; durationSeconds: number | null }): Promise<StoreResult<Media>>;
 }
 
 const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,created_at,updated_at,created_by,updated_by';
@@ -355,6 +405,63 @@ function mapCapacity(row: Record<string, unknown>): Capacity | null {
   const productLine = row.product_line === 'vape' || row.product_line === 'preroll' || row.product_line === 'gummy' || row.product_line === 'other' ? row.product_line : null;
   if (!brand || typeof row.id !== 'string' || !productLine || typeof row.capacity_units !== 'number') return null;
   return { id: row.id, brand, month: String(row.month ?? '').slice(0, 10), productLine, capacityUnits: row.capacity_units, notes: String(row.notes ?? '') };
+}
+
+function mapVisit(row: Record<string, unknown>): Visit | null {
+  const brand = asBrand(row.brand);
+  const outcome = asToken(row.outcome, ['met_buyer', 'left_info', 'no_answer', 'order_taken', 'other'] as const);
+  if (!brand || typeof row.id !== 'string' || typeof row.account_id !== 'string' || !outcome) return null;
+  return {
+    id: row.id,
+    publicId: String(row.public_id ?? ''),
+    brand,
+    accountId: row.account_id,
+    repActor: String(row.rep_actor ?? ''),
+    checkedInAt: String(row.checked_in_at ?? ''),
+    checkedOutAt: row.checked_out_at ? String(row.checked_out_at) : null,
+    latitude: typeof row.latitude === 'number' ? row.latitude : row.latitude === null || row.latitude === undefined ? null : Number(row.latitude),
+    longitude: typeof row.longitude === 'number' ? row.longitude : row.longitude === null || row.longitude === undefined ? null : Number(row.longitude),
+    outcome,
+    notes: String(row.notes ?? ''),
+  };
+}
+
+function mapSample(row: Record<string, unknown>): Sample | null {
+  const brand = asBrand(row.brand);
+  const productLine = row.product_line === 'vape' || row.product_line === 'preroll' || row.product_line === 'gummy' || row.product_line === 'other' ? row.product_line : null;
+  if (!brand || typeof row.id !== 'string' || typeof row.account_id !== 'string' || !productLine) return null;
+  return {
+    id: row.id,
+    publicId: String(row.public_id ?? ''),
+    brand,
+    accountId: row.account_id,
+    visitId: typeof row.visit_id === 'string' ? row.visit_id : null,
+    productLine,
+    quantityUnits: Number(row.quantity_units),
+    leftOn: String(row.left_on ?? ''),
+    followUpOn: String(row.follow_up_on ?? ''),
+    notes: String(row.notes ?? ''),
+  };
+}
+
+function mapMedia(row: Record<string, unknown>): Media | null {
+  const brand = asBrand(row.brand);
+  const kind = row.kind === 'shelf_photo' || row.kind === 'voice_note' ? row.kind : null;
+  if (!brand || typeof row.id !== 'string' || typeof row.account_id !== 'string' || !kind) return null;
+  return {
+    id: row.id,
+    publicId: String(row.public_id ?? ''),
+    brand,
+    accountId: row.account_id,
+    visitId: typeof row.visit_id === 'string' ? row.visit_id : null,
+    kind,
+    storagePath: String(row.storage_path ?? ''),
+    contentType: String(row.content_type ?? ''),
+    byteSize: Number(row.byte_size),
+    durationSeconds: typeof row.duration_seconds === 'number' ? row.duration_seconds : null,
+    createdBy: String(row.created_by ?? ''),
+    createdAt: String(row.created_at ?? ''),
+  };
 }
 
 function mapTask(row: Record<string, unknown>): Task | null {
@@ -864,6 +971,80 @@ class SupabaseCrmStore implements CrmStore {
       updated_by: actor,
     }).select('id,brand,month,product_line,capacity_units,notes').maybeSingle();
     return this.one(brand, data as Record<string, unknown> | null, error, mapCapacity);
+  }
+
+  listVisits(brand: CrmBrand) {
+    return this.rows(brand, this.db.from('crm_visits').select('id,public_id,brand,account_id,rep_actor,checked_in_at,checked_out_at,latitude,longitude,outcome,notes').eq('brand', brand).order('checked_in_at', { ascending: false }).limit(500), mapVisit);
+  }
+
+  async checkIn(brand: CrmBrand, actor: string, input: { accountId: string; outcome: VisitOutcome; notes: string; latitude: number | null; longitude: number | null }): Promise<StoreResult<Visit>> {
+    const account = await this.db.from('crm_accounts').select('id,brand').eq('id', input.accountId).eq('brand', brand).maybeSingle();
+    if (classify(account.error)) return { state: classify(account.error) as 'absent' | 'unavailable' };
+    if (!account.data || account.data.brand !== brand) return { state: 'rejected' };
+    const { data, error } = await this.db.from('crm_visits').insert({
+      brand,
+      account_id: input.accountId,
+      rep_actor: actor,
+      outcome: input.outcome,
+      notes: input.notes,
+      latitude: input.latitude,
+      longitude: input.longitude,
+    }).select('id,public_id,brand,account_id,rep_actor,checked_in_at,checked_out_at,latitude,longitude,outcome,notes').maybeSingle();
+    return this.one(brand, data as Record<string, unknown> | null, error, mapVisit);
+  }
+
+  async checkOut(brand: CrmBrand, visitId: string): Promise<StoreResult<Visit>> {
+    const { data, error } = await this.db.from('crm_visits').update({ checked_out_at: new Date().toISOString() }).eq('id', visitId).eq('brand', brand).is('checked_out_at', null).select('id,public_id,brand,account_id,rep_actor,checked_in_at,checked_out_at,latitude,longitude,outcome,notes').maybeSingle();
+    return this.one(brand, data as Record<string, unknown> | null, error, mapVisit);
+  }
+
+  listSamples(brand: CrmBrand) {
+    return this.rows(brand, this.db.from('crm_samples').select('id,public_id,brand,account_id,visit_id,product_line,quantity_units,left_on,follow_up_on,notes').eq('brand', brand).order('follow_up_on', { ascending: true }).limit(500), mapSample);
+  }
+
+  async createSample(brand: CrmBrand, actor: string, input: { accountId: string; visitId: string | null; productLine: ProductLine; quantityUnits: number; leftOn: string; followUpOn: string; notes: string }): Promise<StoreResult<{ sample: Sample; task: Task }>> {
+    const account = await this.db.from('crm_accounts').select('id,brand,display_name').eq('id', input.accountId).eq('brand', brand).maybeSingle();
+    if (classify(account.error)) return { state: classify(account.error) as 'absent' | 'unavailable' };
+    if (!account.data || account.data.brand !== brand) return { state: 'rejected' };
+    const { data, error } = await this.db.from('crm_samples').insert({
+      brand,
+      account_id: input.accountId,
+      visit_id: input.visitId,
+      product_line: input.productLine,
+      quantity_units: input.quantityUnits,
+      left_on: input.leftOn,
+      follow_up_on: input.followUpOn,
+      notes: input.notes,
+    }).select('id,public_id,brand,account_id,visit_id,product_line,quantity_units,left_on,follow_up_on,notes').maybeSingle();
+    const saved = this.one(brand, data as Record<string, unknown> | null, error, mapSample);
+    if (saved.state !== 'ok') return saved;
+    const title = sampleTaskTitle(String(account.data.display_name ?? ''));
+    const task = await this.createTask(brand, actor, { title, accountId: input.accountId, dueOn: input.followUpOn, status: 'open', ownerActor: actor, notes: input.notes });
+    if (task.state !== 'ok') return task;
+    return { state: 'ok', value: { sample: saved.value, task: task.value } };
+  }
+
+  listMedia(brand: CrmBrand) {
+    return this.rows(brand, this.db.from('crm_media').select('id,public_id,brand,account_id,visit_id,kind,storage_path,content_type,byte_size,duration_seconds,created_by,created_at').eq('brand', brand).order('created_at', { ascending: false }).limit(200), mapMedia);
+  }
+
+  async createMedia(brand: CrmBrand, actor: string, input: { id: string; accountId: string; visitId: string | null; kind: MediaKind; storagePath: string; contentType: string; byteSize: number; durationSeconds: number | null }): Promise<StoreResult<Media>> {
+    const account = await this.db.from('crm_accounts').select('id,brand').eq('id', input.accountId).eq('brand', brand).maybeSingle();
+    if (classify(account.error)) return { state: classify(account.error) as 'absent' | 'unavailable' };
+    if (!account.data || account.data.brand !== brand) return { state: 'rejected' };
+    const { data, error } = await this.db.from('crm_media').insert({
+      id: input.id,
+      brand,
+      account_id: input.accountId,
+      visit_id: input.visitId,
+      kind: input.kind,
+      storage_path: input.storagePath,
+      content_type: input.contentType,
+      byte_size: input.byteSize,
+      duration_seconds: input.durationSeconds,
+      created_by: actor,
+    }).select('id,public_id,brand,account_id,visit_id,kind,storage_path,content_type,byte_size,duration_seconds,created_by,created_at').maybeSingle();
+    return this.one(brand, data as Record<string, unknown> | null, error, mapMedia);
   }
 
   private one<T extends { brand: CrmBrand }>(

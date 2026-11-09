@@ -247,6 +247,18 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false }: { b
         {section === 'reps' ? (
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <Card title="Deals by sales rep" className="xl:col-span-2"><RepTable rows={data.byRep} /></Card>
+            <Card title="Visits this week" className="xl:col-span-2">
+              {data.fieldReps.length === 0 ? <p className="text-caption text-tertiary">No visits logged yet.</p> : (
+                <ul className="flex flex-col gap-2">
+                  {data.fieldReps.map((row) => (
+                    <li key={row.rep} className="flex flex-wrap justify-between gap-2 text-body-m text-primary">
+                      <span>{row.rep}</span>
+                      <span className="font-mono text-data tabular-nums">{row.visitsThisWeek} this week. {row.daysSinceLastVisit === null ? 'No visit yet' : `${row.daysSinceLastVisit} days since last visit`}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Card>
             <Card title="Total deal value by sales rep">
               <Bars rows={data.byRep} measure="cents" empty="Assign a sales rep on each account to see this." />
             </Card>

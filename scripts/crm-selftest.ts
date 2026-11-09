@@ -7,6 +7,7 @@ import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { mapRows, parseCsv, parseDate, parseMoney } from '../src/lib/crm/importer.ts';
 import { matchDistributorAccount } from '../src/lib/crm/distributor.ts';
 import { productionForecast, stageWinRates } from '../src/lib/crm/forecast.ts';
+import { roundLocation, sampleTaskTitle, validateMediaUpload } from '../src/lib/crm/field.ts';
 import {
   activePolicy,
   alertDedupeKey,
@@ -57,6 +58,9 @@ import {
   handleDistributorOrders,
   handleForecast,
   handleCapacity,
+  handleVisit,
+  handleSample,
+  handleMedia,
   handleNotes,
   handleOpportunityCollection,
   handleReports,
@@ -501,6 +505,42 @@ class MemoryCrm implements CrmStore {
     this.capacity.push(row);
     return { state: 'ok' as const, value: row };
   }
+  visits: import('../src/lib/crm/store.ts').Visit[] = [];
+  samples: import('../src/lib/crm/store.ts').Sample[] = [];
+  media: import('../src/lib/crm/store.ts').Media[] = [];
+  async listVisits(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.visits.filter((row) => row.brand === brand) }; }
+  async checkIn(brand: 'cedargrowth' | 'bond', actor: string, input: { accountId: string; outcome: import('../src/lib/crm/store.ts').Visit['outcome']; notes: string; latitude: number | null; longitude: number | null }) {
+    const account = this.accounts.find((row) => row.id === input.accountId && row.brand === brand);
+    if (!account) return { state: 'rejected' as const };
+    const row = { id: this.id(), publicId: 'test-only:visit', brand, accountId: input.accountId, repActor: actor, checkedInAt: '2026-11-09T15:00:00Z', checkedOutAt: null, latitude: input.latitude, longitude: input.longitude, outcome: input.outcome, notes: input.notes };
+    this.visits.push(row);
+    this.activity.push({ id: this.id(), publicId: 'test-only:activity', brand, accountId: input.accountId, kind: 'visit_logged', summary: 'Visit logged', actor, createdAt: row.checkedInAt });
+    return { state: 'ok' as const, value: row };
+  }
+  async checkOut(brand: 'cedargrowth' | 'bond', visitId: string) {
+    const visit = this.visits.find((row) => row.id === visitId && row.brand === brand && !row.checkedOutAt);
+    if (!visit) return { state: 'missing' as const };
+    visit.checkedOutAt = '2026-11-09T16:00:00Z';
+    return { state: 'ok' as const, value: visit };
+  }
+  async listSamples(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.samples.filter((row) => row.brand === brand) }; }
+  async createSample(brand: 'cedargrowth' | 'bond', actor: string, input: { accountId: string; visitId: string | null; productLine: import('../src/lib/crm/engine.ts').ProductLine; quantityUnits: number; leftOn: string; followUpOn: string; notes: string }) {
+    const account = this.accounts.find((row) => row.id === input.accountId && row.brand === brand);
+    if (!account) return { state: 'rejected' as const };
+    const sample = { id: this.id(), publicId: 'test-only:sample', brand, accountId: input.accountId, visitId: input.visitId, productLine: input.productLine, quantityUnits: input.quantityUnits, leftOn: input.leftOn, followUpOn: input.followUpOn, notes: input.notes };
+    this.samples.push(sample);
+    const task = { id: this.id(), publicId: 'test-only:task', brand, accountId: input.accountId, opportunityId: null, title: sampleTaskTitle(account.displayName), dueOn: input.followUpOn, status: 'open' as const, notes: input.notes, ownerActor: actor, completedAt: null };
+    this.tasks.push(task);
+    return { state: 'ok' as const, value: { sample, task } };
+  }
+  async listMedia(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.media.filter((row) => row.brand === brand) }; }
+  async createMedia(brand: 'cedargrowth' | 'bond', actor: string, input: { id: string; accountId: string; visitId: string | null; kind: 'shelf_photo' | 'voice_note'; storagePath: string; contentType: string; byteSize: number; durationSeconds: number | null }) {
+    const account = this.accounts.find((row) => row.id === input.accountId && row.brand === brand);
+    if (!account) return { state: 'rejected' as const };
+    const row = { id: input.id, publicId: 'test-only:media', brand, accountId: input.accountId, visitId: input.visitId, kind: input.kind, storagePath: input.storagePath, contentType: input.contentType, byteSize: input.byteSize, durationSeconds: input.durationSeconds, createdBy: actor, createdAt: '2026-11-09T15:00:00Z' };
+    this.media.push(row);
+    return { state: 'ok' as const, value: row };
+  }
 }
 
 const memory = new MemoryCrm();
@@ -657,6 +697,24 @@ const bondCap = await handleCapacity({ actorId: 'gary@cedargrowthco.com', grants
 const cedarForecast = await handleForecast({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/forecast?brand=cedargrowth&months=2'), store: memory });
 const cedarCells = (cedarForecast.body.cells as { productLine: string; capacityUnits: number | null }[]) || [];
 assert(bondCap.status === 200 && cedarForecast.status === 200 && cedarCells.filter((cell) => cell.productLine === 'gummy').every((cell) => cell.capacityUnits === null), 'capacity stays in its brand');
+const noLocation = await handleVisit({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/visits', { brand: 'cedargrowth', accountId, outcome: 'met_buyer', notes: 'Stopped in' }), store: memory });
+const noLocationVisit = noLocation.body.visit as { latitude: number | null; longitude: number | null };
+assert(noLocation.status === 201 && noLocationVisit.latitude === null && noLocationVisit.longitude === null, 'location is omitted unless the rep sends it');
+const rounded = roundLocation(40.7128123, -74.0060123);
+const withLocation = await handleVisit({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/visits', { brand: 'cedargrowth', accountId, outcome: 'left_info', notes: '', latitude: 40.7128123, longitude: -74.0060123 }), store: memory });
+const located = withLocation.body.visit as { latitude: number | null; longitude: number | null };
+assert(rounded !== 'invalid' && rounded !== null && withLocation.status === 201 && located.latitude === 40.713 && located.longitude === -74.006, 'location is stored rounded');
+const otherBrandVisit = await handleVisit({ actorId: 'sales-1', grants: salesGrant, request: crmReq('POST', '/api/admin/crm/visits', { brand: 'bond', accountId, outcome: 'met_buyer', notes: '' }), store: memory });
+const ownBrandVisit = await handleVisit({ actorId: 'sales-1', grants: salesGrant, request: crmReq('POST', '/api/admin/crm/visits', { brand: 'cedargrowth', accountId, outcome: 'order_taken', notes: '' }), store: memory });
+assert(otherBrandVisit.status === 403 && ownBrandVisit.status === 201, 'a salesperson can log visits only for their granted brand');
+const crossAccount = await handleVisit({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/visits', { brand: 'bond', accountId, outcome: 'met_buyer', notes: '' }), store: memory });
+assert(crossAccount.status === 400 && memory.visits.every((row) => row.brand !== 'bond'), 'check-in stays in the account brand');
+const sampleSaved = await handleSample({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/samples', { brand: 'cedargrowth', accountId, productLine: 'vape', quantityUnits: 2, leftOn: '2026-11-09', followUpOn: '2026-11-20', notes: '' }), store: memory });
+const sampleTask = sampleSaved.body.task as { title?: string; dueOn?: string };
+assert(sampleSaved.status === 201 && sampleTask.dueOn === '2026-11-20' && sampleTask.title === 'Follow up on samples at TEST ONLY synthetic account', 'a sample creates a task with the right due date');
+const wrongType = await handleMedia({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/media', { brand: 'cedargrowth', accountId, kind: 'shelf_photo', contentType: 'image/gif', byteSize: 1000 }), store: memory }, 'POST');
+const tooBig = await handleMedia({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/media', { brand: 'cedargrowth', accountId, kind: 'shelf_photo', contentType: 'image/jpeg', byteSize: 8 * 1024 * 1024 + 1 }), store: memory }, 'POST');
+assert(wrongType.status === 400 && tooBig.status === 400 && validateMediaUpload({ kind: 'shelf_photo', contentType: 'image/gif', byteSize: 1000, durationSeconds: null }).ok === false, 'the upload route rejects the wrong content type and oversize files');
 const absentHealth = await handleHealth({
   actorId: 'gary@cedargrowthco.com',
   grants: owner,
@@ -689,7 +747,7 @@ assert(handlers.includes('prepareReorderAlert') === false, 'HTTP handlers do not
 const wholesale = readFileSync('src/components/crm/WholesaleInsights.tsx', 'utf8');
 assert(wholesale.includes('getCrmStore') && wholesale.includes('localStorage') === false, 'wholesale view uses the CRM store');
 const middleware = readFileSync('src/middleware.ts', 'utf8');
-assert(middleware.includes("'/admin/crm'") && middleware.includes('kelvinEmail') && middleware.includes('SALES_AT_COOKIE'), 'middleware keeps the KELVIN owner path and the sales cookie');
+assert(middleware.includes("'/admin/crm'") && middleware.includes("'/sales/field'") && middleware.includes('kelvinEmail') && middleware.includes('SALES_AT_COOKIE'), 'middleware keeps the KELVIN owner path and the sales cookie');
 assert(readFileSync('vercel.json', 'utf8').includes('crons') === false, 'no scheduled job was added');
 
 if (failures > 0) {
