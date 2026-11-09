@@ -5,7 +5,7 @@ import { Placeholder } from '@/components/shell/Placeholder';
 import { Eyebrow } from '@/components/atoms/Eyebrow';
 import { ButtonLink } from '@/components/atoms/ButtonLink';
 import { BatchTeaser } from '@/components/home/BatchTeaser';
-import { HeroVideo } from '@/components/home/HeroVideo';
+import { HomeHero } from '@/components/home/HomeHero';
 import { TwoInputsBand } from '@/components/home/TwoInputsBand';
 import { TeamSection } from '@/components/home/TeamSection';
 import { Rise } from '@/components/motion/Rise';
@@ -48,57 +48,7 @@ export const metadata: Metadata = {
 export default function HomePage() {
   return (
     <>
-      {/* Block 1, hero. On-load sequence: frame wipe, then eyebrow, headline,
-          subline, and button rise in on a staggered delay ladder. The
-          primitives use whileInView, and the hero sits in the viewport at
-          first paint, so that fires as an on-load reveal without any
-          initial/animate special-casing. */}
-      <section className="relative flex min-h-[82vh] flex-col justify-end overflow-hidden bg-ink">
-        <div className="absolute inset-0 h-full w-full">
-          <HeroVideo
-            src={home.hero.videoSrc}
-            className="h-full w-full object-cover"
-          />
-        </div>
-        <div
-          className="absolute inset-0 bg-gradient-to-r from-ink/85 via-ink/45 to-transparent"
-          aria-hidden="true"
-        />
-        <div className="relative mx-auto w-full max-w-content px-page-margin-mobile pb-16 md:px-page-margin md:pb-24">
-          <div className="flex max-w-editorial flex-col gap-6">
-            <Rise delay={0.2}>
-              <Eyebrow tone="inverse">{home.hero.eyebrow}</Eyebrow>
-            </Rise>
-            {/* LCP element: LineReveal paints the headline text immediately
-                and animates a transform-only mask over it (no opacity:0), so
-                the largest contentful paint is not deferred behind the
-                reveal animation. */}
-            <h1 className="font-display text-display-l-m md:text-display-xl text-inverse [text-shadow:0_1px_18px_rgb(28_27_25_/_0.5)]">
-              <LineReveal
-                text={home.hero.headlineLines.join(' ')}
-                delay={0.32}
-              />
-            </h1>
-            <Rise delay={0.64}>
-              <p className="text-body-m-m md:text-body-l text-inverse/90 [text-shadow:0_1px_14px_rgb(28_27_25_/_0.55)]">
-                {home.hero.body}
-              </p>
-            </Rise>
-            <Rise delay={0.8}>
-              <div>
-                <ButtonLink
-                  href="/method"
-                  variant="outline"
-                  tone="inverse"
-                  className="!border-inverse !text-bone bg-ink/25 backdrop-blur-sm hover:!bg-inverse hover:!text-primary"
-                >
-                  {home.hero.cta}
-                </ButtonLink>
-              </div>
-            </Rise>
-          </div>
-        </div>
-      </section>
+      <HomeHero />
 
       {/* Block 2, position statement. SectionHeader wraps `sub` in a <p>, so
           Rise (which renders a div) cannot go through that prop without
