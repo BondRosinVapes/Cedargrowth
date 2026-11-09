@@ -35,6 +35,26 @@ export function Header() {
     menuBtnRef.current?.focus();
   }, []);
 
+  // The compact menu is hidden from 1024px up, but hiding it in CSS leaves the
+  // open state and the body scroll lock in place. Close it when that row takes
+  // over, and move focus to the visible Sales link rather than the hidden button.
+  useEffect(() => {
+    const desktop = window.matchMedia('(min-width: 1024px)');
+    const onChange = () => {
+      if (!desktop.matches) return;
+      setMobileOpen((open) => {
+        if (!open) return open;
+        window.requestAnimationFrame(() => {
+          const sales = document.querySelector('header a[href="/sales/signin"]');
+          if (sales instanceof HTMLElement) sales.focus();
+        });
+        return false;
+      });
+    };
+    desktop.addEventListener('change', onChange);
+    return () => desktop.removeEventListener('change', onChange);
+  }, []);
+
   return (
     <header className="bg-parchment">
       {/* Desktop masthead from 1024px. Three columns: Sales and Access left,
