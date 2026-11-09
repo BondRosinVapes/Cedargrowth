@@ -7,7 +7,7 @@ import { COVERAGE_UPLOAD, NEEDS_HOODIE, NY_REGIONS, REGION_UNKNOWN, isAdultUseDi
 export const TERRITORY_METRICS = ['accounts', 'active', 'pipeline', 'invoiced', 'visits'] as const;
 export type TerritoryMetric = (typeof TERRITORY_METRICS)[number];
 
-export type TerritoryAccount = { brand: string; id: string; displayName: string; status: string; county: string | null; assignedRep: string | null };
+export type TerritoryAccount = { brand: string; id: string; displayName: string; status: string; county: string | null; assignedRep: string | null; recordMarker?: 'test' | null };
 export type TerritoryDeal = { brand: string; accountId: string; stage: string; forecastCents: number | null };
 export type TerritoryOrder = { brand: string; accountId: string | null; distributor: string; invoiceCents: number | null; importedAt: string };
 export type TerritoryVisit = { brand: string; accountId: string; checkedInAt: string };
@@ -37,12 +37,13 @@ export function coverageLabel(input: {
   accounts: readonly TerritoryAccount[];
   retailers: readonly TerritoryRetailer[];
 }): string {
+  const accounts = input.accounts.filter((row) => row.recordMarker !== 'test');
   if (!input.retailers.length) return COVERAGE_UPLOAD;
   const latest = latestUpload(input.retailers);
   const batch = input.retailers.filter((row) => row.uploadedAt === latest);
   const denominator = batch.filter((row) => regionForCounty(row.county) === input.region && isAdultUseDispensary(row.licenseType)).length;
   if (denominator === 0) return 'no data yet';
-  const numerator = input.accounts.filter((row) => row.status === 'active' && regionForCounty(row.county) === input.region).length;
+  const numerator = accounts.filter((row) => row.status === 'active' && regionForCounty(row.county) === input.region).length;
   return `${numerator} / ${denominator}`;
 }
 
@@ -66,7 +67,7 @@ export function territoryTiles(input: {
   visits: readonly TerritoryVisit[] | null;
   territories: readonly { region: string; repActor: string }[];
 }): { tiles: TerritoryTile[]; invoicedLabel: string; unknown: TerritoryAccount[] } {
-  const accounts = input.accounts.filter((row) => row.brand === input.brand);
+  const accounts = input.accounts.filter((row) => row.brand === input.brand && row.recordMarker !== 'test');
   const deals = input.deals.filter((row) => row.brand === input.brand);
   const orders = input.orders?.filter((row) => row.brand === input.brand) ?? null;
   const visits = input.visits?.filter((row) => row.brand === input.brand) ?? null;

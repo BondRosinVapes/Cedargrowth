@@ -39,6 +39,7 @@ import { buildDigest, digestConfigured, digestFromAddress, digestRecipients, dig
 import { COVERAGE_UPLOAD, NEEDS_HOODIE, NY_REGIONS } from './nyRegions';
 import { coverageLabel, territoryTiles, TERRITORY_METRICS, type TerritoryMetric } from './territory';
 import { nextBestActions, snoozeUntil } from './nextAction';
+import { INTAKE_MAX_BYTES, intakeSecrets, parseIntake, signIntake, signaturesMatch, takeIntakeRate, timestampFresh } from './intake';
 import { readResendEvent, sendDigestEmail, sendReorderLink } from '@/lib/email';
 import { FIELD_BUCKET, READ_URL_SECONDS, isProductLine, isVisitOutcome, mediaPath, roundLocation, validateMediaUpload } from './field';
 import { BATCH_MISS, COA_BUCKET, COA_READ_SECONDS, LINK_MISS, clientIp, coaPath, consumeRate, parseBatchWrite, parseBuyer, parseReorderLines, productIdOk, tokenShapeOk, validateCoaUpload } from './reorder';
@@ -491,13 +492,17 @@ export async function handleReports(ctx: CrmContext): Promise<CrmResult> {
   const url = new URL(ctx.request.url);
   const auth = await gate(ctx, url.searchParams.get('brand'));
   if (isResult(auth)) return auth;
-  const [opps, tasks] = await Promise.all([ctx.store.listOpportunities(auth.brand), ctx.store.listTasks(auth.brand, null)]);
+  const [opps, tasks, accounts] = await Promise.all([ctx.store.listOpportunities(auth.brand), ctx.store.listTasks(auth.brand, null), ctx.store.listAccounts(auth.brand, { q: null, status: null })]);
   if (opps.state !== 'ok') return storageBody(auth.brand, opps.state === 'rejected' || opps.state === 'missing' ? 'unavailable' : opps.state);
   if (tasks.state !== 'ok') return storageBody(auth.brand, tasks.state === 'rejected' || tasks.state === 'missing' ? 'unavailable' : tasks.state);
+  if (accounts.state !== 'ok') return storageBody(auth.brand, accounts.state === 'rejected' || accounts.state === 'missing' ? 'unavailable' : accounts.state);
+  const hidden = new Set(accounts.value.filter((row) => row.recordMarker === 'test').map((row) => row.id));
+  const visibleOpps = opps.value.filter((row) => !hidden.has(row.accountId));
+  const visibleTasks = tasks.value.filter((row) => !row.accountId || !hidden.has(row.accountId));
   const today = new Date().toISOString().slice(0, 10);
-  const funnel = buildFunnel(opps.value.map((row) => ({ brand: row.brand, stage: row.stage, expectedCloseOn: row.expectedCloseOn })), auth.brand);
-  const aging = buildAging(opps.value.map((row) => ({ brand: row.brand, stage: row.stage, expectedCloseOn: row.expectedCloseOn })), auth.brand, today);
-  const workload = buildWorkload(tasks.value.map((row) => ({ brand: row.brand, ownerActor: row.ownerActor, status: row.status })), auth.brand);
+  const funnel = buildFunnel(visibleOpps.map((row) => ({ brand: row.brand, stage: row.stage, expectedCloseOn: row.expectedCloseOn })), auth.brand);
+  const aging = buildAging(visibleOpps.map((row) => ({ brand: row.brand, stage: row.stage, expectedCloseOn: row.expectedCloseOn })), auth.brand, today);
+  const workload = buildWorkload(visibleTasks.map((row) => ({ brand: row.brand, ownerActor: row.ownerActor, status: row.status })), auth.brand);
   if (!funnel.ok || !aging.ok || !workload.ok) return { status: 403, body: { ok: false, reason: 'This brand is not assigned.' } };
   return {
     status: 200,
@@ -1469,6 +1474,80 @@ export async function handleActions(ctx: CrmContext, method: 'GET' | 'POST'): Pr
     dismissals: loaded.dismissals,
   }));
   return { status: 200, body: { ok: true, brand: auth.brand, today, reps: visible.map((rep, index) => ({ rep, actions: reports[index].actions })), inactive: reports[0]?.inactive ?? [{ title: 'Out of stock alerts', reason: 'Hoodie not connected.' }] } };
+}
+
+export type IntakeHttpResult = { status: number; body: Record<string, unknown>; retryAfter?: number };
+
+export async function handleBondIntake(store: CrmStore, request: Request, options?: { nowMs?: number; env?: Record<string, string | undefined> }): Promise<IntakeHttpResult> {
+  const nowMs = options?.nowMs ?? Date.now();
+  const secrets = intakeSecrets(options?.env ?? process.env);
+  if (!secrets.primary) return { status: 503, body: { ok: false } };
+  const declared = Number(request.headers.get('content-length') || 0);
+  if (Number.isFinite(declared) && declared > INTAKE_MAX_BYTES) return { status: 413, body: { ok: false } };
+  const rawBuffer = await request.arrayBuffer();
+  if (rawBuffer.byteLength > INTAKE_MAX_BYTES) return { status: 413, body: { ok: false } };
+  const raw = new TextDecoder().decode(rawBuffer);
+  const stamp = request.headers.get('x-cg-timestamp');
+  const provided = request.headers.get('x-cg-signature') || '';
+  if (!timestampFresh(stamp, nowMs) || !stamp) return { status: 401, body: { ok: false } };
+  const primaryOk = signaturesMatch(signIntake(secrets.primary, stamp, raw), provided);
+  const nextOk = secrets.next ? signaturesMatch(signIntake(secrets.next, stamp, raw), provided) : false;
+  if (!primaryOk && !nextOk) return { status: 401, body: { ok: false } };
+  let parsed: unknown = null;
+  let parsedOk = false;
+  try {
+    parsed = JSON.parse(raw);
+    parsedOk = true;
+  } catch {
+    parsedOk = false;
+  }
+  const source = parsed && typeof parsed === 'object' && !Array.isArray(parsed) && typeof (parsed as { source_route?: unknown }).source_route === 'string'
+    ? (parsed as { source_route: string }).source_route.slice(0, 80)
+    : 'invalid';
+  const rate = takeIntakeRate(source, nowMs);
+  if (rate.limited) return { status: 429, body: { ok: false }, retryAfter: rate.retryAfter };
+  if (!parsedOk) return { status: 400, body: { ok: false, fields: ['payload'] } };
+  const lead = parseIntake(parsed);
+  if (!lead.ok) return { status: 400, body: { ok: false, fields: lead.fields } };
+  const idempotency = parseUuid(request.headers.get('idempotency-key'));
+  if (!idempotency || idempotency !== lead.lead.inquiryId) return { status: 400, body: { ok: false, fields: ['Idempotency-Key'] } };
+  try {
+    const saved = await store.receiveBondInquiry(lead.lead, new Date(nowMs).toISOString());
+    if (saved.state === 'absent') return { status: 503, body: { ok: false } };
+    if (saved.state !== 'ok') return { status: 500, body: { ok: false } };
+    return saved.value.duplicate ? { status: 200, body: { ok: true, duplicate: true } } : { status: 200, body: { ok: true } };
+  } catch {
+    return { status: 500, body: { ok: false } };
+  }
+}
+
+export async function handleIntakeDelete(ctx: CrmContext): Promise<CrmResult> {
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Only an owner or administrator can delete an intake lead.' } };
+  if (auth.brand !== 'bond') return { status: 403, body: { ok: false, reason: 'This brand is not assigned.' } };
+  const inquiryId = parseUuid(record.inquiryId);
+  if (!inquiryId) return { status: 400, body: { ok: false, fields: ['inquiryId'] } };
+  const saved = await ctx.store.deleteBondInquiry(inquiryId);
+  if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'rejected' || saved.state === 'missing' ? 'unavailable' : saved.state);
+  if (!saved.value.deleted) return { status: 404, body: { ok: false } };
+  return { status: 200, body: { ok: true } };
+}
+
+export async function handleIntakePurge(ctx: CrmContext): Promise<CrmResult> {
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Only an owner or administrator can purge intake leads.' } };
+  if (auth.brand !== 'bond') return { status: 403, body: { ok: false, reason: 'This brand is not assigned.' } };
+  const saved = await ctx.store.purgeBondInquiries(new Date().toISOString());
+  if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'rejected' || saved.state === 'missing' ? 'unavailable' : saved.state);
+  return { status: 200, body: { ok: true, purged: saved.value.purged } };
 }
 
 export function staffAudience(hasCedarSalesMembership: boolean): Audience {

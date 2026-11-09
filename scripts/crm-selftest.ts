@@ -14,6 +14,8 @@ import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, 
 import { coverageLabel } from '../src/lib/crm/territory.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
+import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
+import type { IntakeLead } from '../src/lib/crm/intake.ts';
 import { reorderLinkHtml } from '../src/lib/email.ts';
 import {
   activePolicy,
@@ -76,6 +78,9 @@ import {
   handleDigestSend,
   handleEmailStatusRefresh,
   handleTerritoryAssign,
+  handleBondIntake,
+  handleIntakeDelete,
+  handleIntakePurge,
   useDigestDelivery,
   useReorderDelivery,
   useEmailLookup,
@@ -683,6 +688,82 @@ class MemoryCrm implements CrmStore {
     this.dismissals.push(row);
     return { state: 'ok' as const, value: row };
   }
+  intakeLogs: { inquiryId: string; receivedAt: string; result: 'created' | 'possible_duplicate' }[] = [];
+  intakeDeletions: { id: string; reason: 'named' | 'retention'; contactName: 'bond' }[] = [];
+  async receiveBondInquiry(lead: IntakeLead, receivedAt: string) {
+    if (this.intakeLogs.some((row) => row.inquiryId === lead.inquiryId)) return { state: 'ok' as const, value: { duplicate: true } };
+    const license = lead.licenseNumber?.trim().toLowerCase() || '';
+    const name = normalizeBusinessName(lead.businessName);
+    const domain = emailDomain(lead.contactEmail);
+    let matched = license ? this.accounts.find((row) => row.brand === 'bond' && row.licenseRef && row.licenseRef.trim().toLowerCase() === license) : undefined;
+    if (!matched && name && domain) {
+      matched = this.accounts.find((row) => row.brand === 'bond' && normalizeBusinessName(row.displayName) === name && this.contacts.some((contact) => contact.brand === 'bond' && contact.accountId === row.id && emailDomain(contact.email || '') === domain));
+    }
+    const marker = lead.businessName.toLowerCase().includes(INTAKE_TEST_MARKER.toLowerCase()) || (lead.licenseNumber || '').toLowerCase().includes(INTAKE_TEST_MARKER.toLowerCase());
+    if (matched) {
+      this.notes.push({ id: this.id(), publicId: 'test-only:note', brand: 'bond', accountId: matched.id, body: duplicateNote(lead.message), actor: 'bond-intake', createdAt: receivedAt, sourceInquiryId: lead.inquiryId });
+      this.tasks.push({ id: this.id(), publicId: 'test-only:task', brand: 'bond', accountId: matched.id, opportunityId: null, title: 'Possible duplicate', dueOn: null, status: 'open', notes: 'possible duplicate', ownerActor: 'bond-intake', completedAt: null, sourceInquiryId: lead.inquiryId });
+      this.activity.push({ id: this.id(), publicId: 'test-only:activity', brand: 'bond', accountId: matched.id, kind: 'inquiry_received', summary: 'Inquiry received', actor: 'bond-intake', createdAt: receivedAt });
+      this.intakeLogs.push({ inquiryId: lead.inquiryId, receivedAt, result: 'possible_duplicate' });
+      return { state: 'ok' as const, value: { duplicate: false } };
+    }
+    const accountId = this.id();
+    this.accounts.push({ id: accountId, publicId: 'test-only:bond:account', brand: 'bond', displayName: lead.businessName, status: 'prospect', city: lead.city, county: lead.county, notes: '', licenseRef: lead.licenseNumber, facilityRef: null, licenseJurisdiction: null, licenseExpiry: null, assignedRep: null, accountType: null, leadSource: 'bond_inquiry', street: lead.street, state: 'NY', postalCode: lead.postalCode, consentVersion: lead.consentVersion, consentReceivedAt: receivedAt, intakeSubmittedAt: lead.submittedAt, ocmStatus: 'unverified', recordMarker: marker ? 'test' : null, sourceInquiryId: lead.inquiryId, distributor: null, distributorAccountRef: null, createdAt: receivedAt, updatedAt: receivedAt, createdBy: 'bond-intake', updatedBy: 'bond-intake' });
+    this.contacts.push({ id: this.id(), publicId: 'test-only:contact', brand: 'bond', accountId, name: lead.contactName, title: null, email: lead.contactEmail, phone: lead.contactPhone, notes: '', preference: 'unspecified', createdAt: receivedAt, updatedAt: receivedAt });
+    this.opportunities.push({ id: this.id(), publicId: 'test-only:opportunity', brand: 'bond', accountId, name: lead.businessName, stage: 'lead', forecastCents: null, amountKind: 'forecast', invoicedCents: null, paidCents: null, expectedCloseOn: null, notes: '', lossReason: null, nextAction: null, nextActionOn: null, productLine: null, quantityUnits: null, updatedAt: receivedAt, sourceInquiryId: lead.inquiryId });
+    if (lead.message) this.notes.push({ id: this.id(), publicId: 'test-only:note', brand: 'bond', accountId, body: intakeMessageText(lead.message), actor: 'bond-intake', createdAt: receivedAt, sourceInquiryId: lead.inquiryId });
+    this.activity.push({ id: this.id(), publicId: 'test-only:activity', brand: 'bond', accountId, kind: 'inquiry_received', summary: 'Inquiry received', actor: 'bond-intake', createdAt: receivedAt });
+    this.intakeLogs.push({ inquiryId: lead.inquiryId, receivedAt, result: 'created' });
+    return { state: 'ok' as const, value: { duplicate: false } };
+  }
+  async deleteBondInquiry(inquiryId: string) {
+    const account = this.accounts.find((row) => row.sourceInquiryId === inquiryId && row.brand === 'bond');
+    const noteHit = this.notes.some((row) => row.sourceInquiryId === inquiryId);
+    const taskHit = this.tasks.some((row) => row.sourceInquiryId === inquiryId);
+    const logHit = this.intakeLogs.some((row) => row.inquiryId === inquiryId);
+    if (!account && !noteHit && !taskHit && !logHit) return { state: 'ok' as const, value: { deleted: false } };
+    const ids = new Set<string>([inquiryId]);
+    if (account) {
+      for (const row of this.notes) if (row.accountId === account.id && row.sourceInquiryId) ids.add(row.sourceInquiryId);
+      for (const row of this.tasks) if (row.accountId === account.id && row.sourceInquiryId) ids.add(row.sourceInquiryId);
+      this.activity = this.activity.filter((row) => row.accountId !== account.id);
+      this.notes = this.notes.filter((row) => row.accountId !== account.id);
+      this.tasks = this.tasks.filter((row) => row.accountId !== account.id);
+      this.opportunities = this.opportunities.filter((row) => row.accountId !== account.id);
+      this.contacts = this.contacts.filter((row) => row.accountId !== account.id);
+      this.accounts = this.accounts.filter((row) => row.id !== account.id);
+    } else {
+      this.tasks = this.tasks.filter((row) => row.sourceInquiryId !== inquiryId);
+      this.notes = this.notes.filter((row) => row.sourceInquiryId !== inquiryId);
+    }
+    for (const id of ids) {
+      if (!this.intakeLogs.some((row) => row.inquiryId === id) && id !== inquiryId) continue;
+      this.intakeLogs = this.intakeLogs.filter((row) => row.inquiryId !== id);
+      this.intakeDeletions.push({ id: this.id(), reason: 'named', contactName: 'bond' });
+    }
+    return { state: 'ok' as const, value: { deleted: true } };
+  }
+  async purgeBondInquiries(nowIso: string) {
+    const due = this.accounts.filter((account) => account.brand === 'bond' && account.leadSource === 'bond_inquiry' && account.ocmStatus === 'unverified' && account.sourceInquiryId && this.opportunities.some((row) => row.sourceInquiryId === account.sourceInquiryId && row.stage === 'lead') && this.intakeLogs.some((row) => row.inquiryId === account.sourceInquiryId && intakeExpired(row.receivedAt, nowIso)));
+    let purged = 0;
+    for (const account of due) {
+      const ids = new Set<string>([account.sourceInquiryId || '']);
+      for (const row of this.notes) if (row.accountId === account.id && row.sourceInquiryId) ids.add(row.sourceInquiryId);
+      for (const row of this.tasks) if (row.accountId === account.id && row.sourceInquiryId) ids.add(row.sourceInquiryId);
+      this.activity = this.activity.filter((row) => row.accountId !== account.id);
+      this.notes = this.notes.filter((row) => row.accountId !== account.id);
+      this.tasks = this.tasks.filter((row) => row.accountId !== account.id);
+      this.opportunities = this.opportunities.filter((row) => row.accountId !== account.id);
+      this.contacts = this.contacts.filter((row) => row.accountId !== account.id);
+      this.accounts = this.accounts.filter((row) => row.id !== account.id);
+      for (const id of ids) {
+        this.intakeLogs = this.intakeLogs.filter((row) => row.inquiryId !== id);
+        this.intakeDeletions.push({ id: this.id(), reason: 'retention', contactName: 'bond' });
+      }
+      purged += 1;
+    }
+    return { state: 'ok' as const, value: { purged } };
+  }
 }
 
 const memory = new MemoryCrm();
@@ -1041,6 +1122,114 @@ const absentHealth = await handleHealth({
 });
 const absentCanix = absentHealth.body.canix as { connected?: boolean };
 assert(absentHealth.status === 503 && absentHealth.body.ok === false && absentHealth.body.configured === false && absentHealth.body.storage === 'absent' && absentCanix.connected === false, 'absent storage is not reported as a healthy desk');
+
+const intakeStore = new MemoryCrm();
+const intakeNow = Date.parse('2026-11-09T15:04:00Z');
+const intakeStamp = String(Math.floor(intakeNow / 1000));
+const intakeEnv = { CG_BOND_INTAKE_SECRET: 'test-secret', CG_BOND_INTAKE_SECRET_NEXT: 'next-secret' };
+function intakePayload(overrides: Record<string, unknown> = {}) {
+  return {
+    inquiry_id: '11111111-1111-4111-8111-111111111111',
+    submitted_at: '2026-11-09T15:00:00Z',
+    business_name: 'North Store',
+    contact_name: 'Ada Buyer',
+    contact_email: 'ada@northstore.test',
+    street: '1 Main',
+    city: 'Buffalo',
+    state: 'NY',
+    postal_code: '14201',
+    county: 'Erie',
+    license_number: 'OCM-1',
+    message: 'Hello plain',
+    consent_version: 'v1:0123456789abcdef',
+    source_route: '/order',
+    ...overrides,
+  };
+}
+function intakeRequest(body: unknown, options?: { secret?: string; stamp?: string; raw?: string; headers?: Record<string, string> }) {
+  const raw = options?.raw ?? JSON.stringify(body);
+  const stamp = options?.stamp ?? intakeStamp;
+  const secret = options?.secret ?? 'test-secret';
+  const inquiry = body && typeof body === 'object' && 'inquiry_id' in (body as Record<string, unknown>) ? String((body as { inquiry_id: unknown }).inquiry_id) : '';
+  return new Request('https://cedargrowth.vercel.app/api/intake/dispensary-inquiry', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-cg-timestamp': stamp, 'x-cg-signature': signIntake(secret, stamp, raw), 'idempotency-key': inquiry, ...options?.headers },
+    body: raw,
+  });
+}
+clearIntakeRates();
+const intakeLogs: string[] = [];
+const previousError = console.error;
+console.error = (...args: unknown[]) => { intakeLogs.push(args.map((item) => String(item)).join(' ')); };
+const intakeUnconfigured = await handleBondIntake(intakeStore, intakeRequest(intakePayload()), { nowMs: intakeNow, env: {} });
+const badSig = await handleBondIntake(intakeStore, intakeRequest(intakePayload(), { secret: 'wrong' }), { nowMs: intakeNow, env: intakeEnv });
+const stale = await handleBondIntake(intakeStore, intakeRequest(intakePayload(), { stamp: String(Number(intakeStamp) - 301) }), { nowMs: intakeNow, env: intakeEnv });
+const rotated = await handleBondIntake(intakeStore, intakeRequest(intakePayload(), { secret: 'next-secret' }), { nowMs: intakeNow, env: intakeEnv });
+const replay = await handleBondIntake(intakeStore, intakeRequest(intakePayload(), { secret: 'next-secret' }), { nowMs: intakeNow, env: intakeEnv });
+console.error = previousError;
+const rotatedAccount = intakeStore.accounts.find((row) => row.brand === 'bond' && row.displayName === 'North Store');
+assert(intakeUnconfigured.status === 503 && rotated.status === 200 && rotated.body.duplicate !== true, 'a missing intake secret does nothing');
+assert(badSig.status === 401 && stale.status === 401 && JSON.stringify(badSig.body) === '{"ok":false}' && intakeStore.intakeLogs.length === 1, 'a bad or stale signature stores nothing');
+assert(rotated.status === 200 && rotated.body.ok === true && replay.status === 200 && replay.body.duplicate === true && intakeStore.accounts.filter((row) => row.brand === 'bond').length === 1, 'the rotation secret is accepted and a replay creates nothing');
+assert(rotatedAccount?.status === 'prospect' && rotatedAccount.leadSource === 'bond_inquiry' && rotatedAccount.county === 'Erie' && rotatedAccount.ocmStatus === 'unverified' && rotatedAccount.consentVersion === 'v1:0123456789abcdef' && regionForCounty(rotatedAccount.county) === 'Western New York', 'one bond lead keeps the county and stays unverified');
+const leadOpp = intakeStore.opportunities.find((row) => row.accountId === rotatedAccount?.id);
+const leadNote = intakeStore.notes.find((row) => row.accountId === rotatedAccount?.id);
+const leadActivity = intakeStore.activity.find((row) => row.accountId === rotatedAccount?.id && row.kind === 'inquiry_received');
+assert(leadOpp?.stage === 'lead' && leadOpp.forecastCents === null && leadNote?.body === 'Hello plain' && leadNote.body.includes('<') === false && leadActivity?.summary === 'Inquiry received' && JSON.stringify(leadActivity).includes('ada@') === false, 'the lead is an unforecasted stage, and the message stays plain text');
+const unknownKey = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', address_line: 'hidden' })), { nowMs: intakeNow, env: intakeEnv });
+const rejectedKeys = ['trade_name', 'contact_role', 'preferred_contact_method', 'products_of_interest', 'consumer', 'haus', 'metrc', 'ip', 'user_agent'];
+const rejected = [];
+for (const key of rejectedKeys) {
+  const result = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', [key]: 'hidden' })), { nowMs: intakeNow, env: intakeEnv });
+  rejected.push(result.status === 400 && Array.isArray(result.body.fields) && result.body.fields.includes(key) && JSON.stringify(result.body).includes('hidden') === false);
+}
+assert(unknownKey.status === 400 && JSON.stringify(unknownKey.body) === '{"ok":false,"fields":["address_line"]}' && rejected.every(Boolean), 'unknown and rejected keys are named and their values are not stored');
+const huge = 'x'.repeat(INTAKE_MAX_BYTES + 1);
+const oversize = await handleBondIntake(intakeStore, intakeRequest(intakePayload(), { raw: huge }), { nowMs: intakeNow, env: intakeEnv });
+const badState = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', state: 'nj' })), { nowMs: intakeNow, env: intakeEnv });
+const badCounty = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', county: 'Brooklyn' })), { nowMs: intakeNow, env: intakeEnv });
+const longMessage = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', message: 'm'.repeat(501) })), { nowMs: intakeNow, env: intakeEnv });
+const badConsent = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', consent_version: 'v1:ABCDEF0123456789' })), { nowMs: intakeNow, env: intakeEnv });
+const badKey = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '12121212-1212-4121-8121-121212121212' }), { headers: { 'idempotency-key': '99999999-9999-4999-8999-999999999999' } }), { nowMs: intakeNow, env: intakeEnv });
+assert(oversize.status === 413 && badState.status === 400 && badCounty.status === 400 && longMessage.status === 400 && badConsent.status === 400 && badKey.status === 400 && intakeStore.intakeLogs.length === 1, 'oversize, state, county, message, consent, and idempotency failures store no body');
+await intakeStore.createAccount('cedargrowth', 'test-only', { displayName: 'Cedar Twin', status: 'prospect', city: 'Buffalo', notes: '', licenseRef: 'OCM-9' });
+const cedarId = intakeStore.accounts.find((row) => row.brand === 'cedargrowth')?.id || '';
+await intakeStore.createContact('cedargrowth', 'test-only', { accountId: cedarId, name: 'Cedar Buyer', email: 'twin@cedar.test' });
+const brandLead = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '13131313-1313-4131-8131-131313131313', license_number: 'OCM-9', business_name: 'Cedar Twin', contact_email: 'twin@cedar.test' })), { nowMs: intakeNow, env: intakeEnv });
+assert(brandLead.status === 200 && intakeStore.accounts.filter((row) => row.brand === 'bond' && row.displayName === 'Cedar Twin').length === 1 && intakeStore.accounts.filter((row) => row.brand === 'cedargrowth').length === 1, 'a CedarGrowth row is not the Bond duplicate');
+const weak = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '14141414-1414-4141-8141-141414141414', business_name: 'Different Shop', license_number: 'OCM-1', contact_email: 'bea@other.test' })), { nowMs: intakeNow, env: intakeEnv });
+const named = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '15151515-1515-4151-8151-151515151515', business_name: 'north-store', license_number: 'OCM-2', contact_email: 'buyer@northstore.test' })), { nowMs: intakeNow, env: intakeEnv });
+assert(weak.status === 200 && named.status === 200 && intakeStore.accounts.filter((row) => row.licenseRef === 'OCM-1').length === 1 && intakeStore.tasks.some((row) => row.title === 'Possible duplicate' && row.status === 'open') && intakeStore.notes.some((row) => row.body.startsWith('Possible duplicate.')), 'a weak duplicate is flagged and not merged');
+const htmlLead = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '16161616-1616-4161-8161-161616161616', business_name: 'Markup Shop', license_number: 'OCM-3', contact_email: 'mark@markup.test', message: '<b>hi</b>' })), { nowMs: intakeNow, env: intakeEnv });
+const htmlNote = intakeStore.notes.find((row) => row.body === '<b>hi</b>');
+assert(htmlLead.status === 200 && htmlNote?.body === intakeMessageText('<b>hi</b>'), 'a message is stored as text and not wrapped as HTML');
+const testLead = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '17171717-1717-4171-8171-171717171717', business_name: 'TEST ONLY Shop', license_number: 'TEST ONLY', contact_email: 'qa@test.test', city: 'Rochester', county: 'Monroe' })), { nowMs: intakeNow, env: intakeEnv });
+const testAccount = intakeStore.accounts.find((row) => row.displayName === 'TEST ONLY Shop');
+const intakeDash = buildDashboard({ brand: 'bond', today: '2026-11-09', filter: { year: null, month: null, rep: null, region: null, territory: null, accountType: null, leadSource: null, stage: null, status: null }, accounts: intakeStore.accounts, opportunities: intakeStore.opportunities, tasks: [], activity: [] });
+const intakeDigest = buildDigest({ brand: 'bond', nowMs: intakeNow, accounts: intakeStore.accounts.map((row) => ({ ...row, createdAt: new Date(intakeNow).toISOString() })), opportunities: intakeStore.opportunities, tasks: [] });
+assert(testLead.status === 200 && testAccount?.recordMarker === 'test' && excludeTestLeads(testAccount ? [testAccount] : []).length === 0 && (intakeDash.byStage.find((row) => row.key === 'lead')?.count || 0) > 0 && renderDigestText(intakeDigest).includes('TEST ONLY Shop') === false, 'a test marker is excluded from the dashboard and the digest');
+const bondSales = [{ brand: 'bond' as const, role: 'salesperson' as const }];
+const salesDelete = await handleIntakeDelete({ actorId: 'sales-1', grants: bondSales, request: crmReq('POST', '/api/admin/crm/intake', { brand: 'bond', inquiryId: rotatedAccount?.sourceInquiryId }), store: intakeStore });
+assert(salesDelete.status === 403 && JSON.stringify(salesDelete.body).includes('ada@') === false && JSON.stringify(salesDelete.body).includes('Hello plain') === false, 'a salesperson cannot read intake internals');
+const removed = await handleIntakeDelete({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/intake', { brand: 'bond', inquiryId: rotatedAccount?.sourceInquiryId }), store: intakeStore });
+assert(removed.status === 200 && intakeStore.accounts.every((row) => row.sourceInquiryId !== rotatedAccount?.sourceInquiryId) && intakeStore.intakeDeletions.some((row) => row.contactName === 'bond' && row.reason === 'named') && JSON.stringify(intakeStore.intakeDeletions).includes('email') === false, 'deletion removes the named lead and records bond with no mailbox');
+const oldLead = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '18181818-1818-4181-8181-181818181818', business_name: 'Old Shop', license_number: 'OLD-1', contact_email: 'cara@old.test' })), { nowMs: intakeNow, env: intakeEnv });
+const oldAccount = intakeStore.accounts.find((row) => row.displayName === 'Old Shop');
+const oldLog = intakeStore.intakeLogs.find((row) => row.inquiryId === oldAccount?.sourceInquiryId);
+if (oldLog) oldLog.receivedAt = '2024-01-01T00:00:00Z';
+const keptLead = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '19191919-1919-4191-8191-191919191919', business_name: 'Kept Shop', license_number: 'KEPT-1', contact_email: 'dan@kept.test' })), { nowMs: intakeNow, env: intakeEnv });
+const keptAccount = intakeStore.accounts.find((row) => row.displayName === 'Kept Shop');
+if (keptAccount) keptAccount.ocmStatus = 'verified';
+const keptLog = intakeStore.intakeLogs.find((row) => row.inquiryId === keptAccount?.sourceInquiryId);
+if (keptLog) keptLog.receivedAt = '2024-01-01T00:00:00Z';
+const purged = await handleIntakePurge({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/intake?action=purge', { brand: 'bond' }), store: intakeStore });
+assert(oldLead.status === 200 && keptLead.status === 200 && purged.status === 200 && purged.body.purged === 1 && intakeStore.accounts.every((row) => row.displayName !== 'Old Shop') && intakeStore.accounts.some((row) => row.displayName === 'Kept Shop'), 'purge deletes an unqualified lead and keeps a verified one');
+clearIntakeRates();
+for (let hit = 0; hit < 30; hit += 1) takeIntakeRate('/order', intakeNow);
+const limited = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '20202020-2020-4202-8202-202020202020', business_name: 'Late Shop', license_number: 'LATE-1', contact_email: 'late@late.test' })), { nowMs: intakeNow, env: intakeEnv });
+assert(limited.status === 429 && (limited.retryAfter || 0) >= 1 && intakeStore.accounts.every((row) => row.displayName !== 'Late Shop'), 'the source rate limit returns retry after and stores nothing');
+assert(intakeLogs.every((line) => line.includes('test-secret') === false && line.includes('next-secret') === false && line.includes('ada@northstore.test') === false && line.includes('Hello plain') === false), 'secret and payload never logged');
+assert(parseIntake({ consumer: true }).ok === false && intakeExpired('2024-01-01T00:00:00Z', '2026-11-09T15:00:00Z') && intakeExpired('2026-10-01T00:00:00Z', '2026-11-09T15:00:00Z') === false, 'consumer fields are rejected and the retention window is twelve months');
 
 const suiteSql = readFileSync('supabase/migrations/0123_crm_suite_workflows.sql', 'utf8');
 const raiseAt = suiteSql.indexOf('unsupported opportunity stage');
