@@ -1,6 +1,5 @@
 'use client';
 
-import { useLayoutEffect, useRef } from 'react';
 import { Eyebrow } from '@/components/atoms/Eyebrow';
 import { ButtonLink } from '@/components/atoms/ButtonLink';
 import { HeroVideo } from '@/components/home/HeroVideo';
@@ -9,27 +8,11 @@ import { LineReveal } from '@/components/motion/LineReveal';
 import { home } from '@/content/home';
 import { ANNOUNCEMENT } from '@/lib/site';
 
-// The hero fills whatever viewport remains under the live header. The
-// headline is the three stored lines, each kept on its own line.
-// Type steps down only far enough for those lines to fit a narrow width.
+// The video frame is the pre-PR18 82vh cover. The headline stays three
+// lines, and the certificate line is a band on the bottom edge of this frame.
 export function HomeHero() {
-  const sectionRef = useRef<HTMLElement>(null);
-
-  useLayoutEffect(() => {
-    const fit = () => {
-      const section = sectionRef.current;
-      const header = document.querySelector('header');
-      if (!section || !header) return;
-      const chrome = header.getBoundingClientRect().bottom;
-      section.style.minHeight = `${Math.max(0, Math.round(window.innerHeight - chrome))}px`;
-    };
-    fit();
-    window.addEventListener('resize', fit);
-    return () => window.removeEventListener('resize', fit);
-  }, []);
-
   return (
-    <section ref={sectionRef} className="relative flex flex-col justify-end overflow-hidden bg-ink">
+    <section className="relative flex min-h-[82vh] flex-col justify-end overflow-hidden bg-ink">
       <div className="absolute inset-0 h-full w-full">
         <HeroVideo
           src={home.hero.videoSrc}
