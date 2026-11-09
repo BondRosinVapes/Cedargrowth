@@ -72,7 +72,7 @@ export function MobileMenu({
       role="dialog"
       aria-modal="true"
       aria-label="Menu"
-      className="fixed inset-0 z-50 flex flex-col bg-parchment animate-fade motion-reduce:animate-none md:hidden"
+      className="fixed inset-0 z-50 flex flex-col bg-parchment animate-fade motion-reduce:animate-none lg:hidden"
     >
       <div className="flex items-center justify-between border-b border-hairline px-page-margin-mobile py-4">
         <Wordmark />

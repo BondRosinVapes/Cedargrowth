@@ -37,10 +37,11 @@ export function Header() {
 
   return (
     <header className="bg-parchment">
-      {/* Desktop masthead. Three columns: utility links left, wordmark centre,
-          the reservation link right, so the row reads balanced rather than
-          half-empty. */}
-      <div className="hidden md:block">
+      {/* Desktop masthead from 1024px. Three columns: Sales and Access left,
+          wordmark centre, Manufacturing then Reserve right. Below that width
+          the same links stay in the menu, because the centred wordmark and
+          the right-hand pair collide. */}
+      <div className="hidden lg:block">
         <div className="border-b border-hairline">
           <div className="mx-auto grid max-w-content grid-cols-3 items-center px-page-margin py-4">
             <ul className="flex items-center gap-6">
@@ -101,9 +102,11 @@ export function Header() {
         </nav>
       </div>
 
-      {/* Mobile bar */}
-      <div className="md:hidden border-b border-hairline">
-        <div className="flex items-center justify-between px-page-margin-mobile py-4">
+      {/* Compact bar. Equal side columns keep the wordmark centred. Sales,
+          Access, and Manufacturing stay in the menu, which is already keyboard
+          reachable. Reserve stays tappable. */}
+      <div className="border-b border-hairline lg:hidden">
+        <div className="grid grid-cols-[1fr_auto_1fr] items-center px-page-margin-mobile py-4">
           <button
             ref={menuBtnRef}
             type="button"
@@ -111,32 +114,21 @@ export function Header() {
             aria-expanded={mobileOpen}
             aria-controls="mobile-menu"
             aria-label="Open menu"
-            className="p-1 text-primary"
+            className="justify-self-start p-1 text-primary"
           >
             <Menu size={20} strokeWidth={1.5} aria-hidden="true" />
           </button>
           <Wordmark />
-          <div className="flex items-center gap-3">
-            {UTILITY_RIGHT.map((link) => (
-              <Link
-                key={link.href}
-                href={link.href}
-                className="cedar-underline text-caption uppercase tracking-eyebrow text-tertiary"
-              >
-                {link.label}
-              </Link>
-            ))}
           <Link
             href="/reserve"
             aria-label={`Reservations, ${reserveCount} items`}
-            className="relative p-1 text-primary"
+            className="relative justify-self-end p-1 text-primary"
           >
             <ShoppingBag size={20} strokeWidth={1.5} aria-hidden="true" />
             <span className="ml-1 font-mono text-specimen text-tertiary">
               ({reserveCount})
             </span>
           </Link>
-          </div>
         </div>
       </div>
 
