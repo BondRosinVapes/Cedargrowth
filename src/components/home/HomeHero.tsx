@@ -7,9 +7,10 @@ import { HeroVideo } from '@/components/home/HeroVideo';
 import { Rise } from '@/components/motion/Rise';
 import { LineReveal } from '@/components/motion/LineReveal';
 import { home } from '@/content/home';
+import { ANNOUNCEMENT } from '@/lib/site';
 
-// The hero fills whatever viewport remains under the live announcement and
-// header. The headline is the three stored lines, each kept on its own line.
+// The hero fills whatever viewport remains under the live header. The
+// headline is the three stored lines, each kept on its own line.
 // Type steps down only far enough for those lines to fit a narrow width.
 export function HomeHero() {
   const sectionRef = useRef<HTMLElement>(null);
@@ -68,6 +69,9 @@ export function HomeHero() {
           </Rise>
         </div>
       </div>
+      <p className="relative border-t border-hairline-inverse bg-ink px-page-margin-mobile py-2 text-center text-caption-m text-inverse/70 md:px-page-margin md:text-caption">
+        {ANNOUNCEMENT}
+      </p>
     </section>
   );
 }
