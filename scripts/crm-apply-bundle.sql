@@ -1,4 +1,4 @@
--- Apply CRM migrations 0120 through 0129 as one transaction.
+-- Apply CRM migrations 0120 through 0130 as one transaction.
 -- This file is not in supabase/migrations, so a hosted migration runner does not
 -- pick it up by itself. Run it only with psql --single-transaction against an
 -- isolated database after review. This repository does not run it.
@@ -16,3 +16,4 @@
 \ir ../supabase/migrations/0127_crm_field_visits.sql
 \ir ../supabase/migrations/0128_crm_batches_reorder.sql
 \ir ../supabase/migrations/0129_crm_digest.sql
+\ir ../supabase/migrations/0130_crm_email_log.sql
