@@ -32,8 +32,8 @@ export const PRIMARY_NAV: NavItem[] = [
 
 // Utility, left and right edges (Section 5.2).
 export const UTILITY_LEFT: NavLink[] = [
-  { label: 'Sales', href: '/sales/signin' },
-  { label: 'Access', href: '/practice' },
+  { label: 'Agents', href: '/sales/signin' },
+  { label: 'Team', href: '/practice' },
 ];
 
 export const UTILITY_RIGHT: NavLink[] = [
