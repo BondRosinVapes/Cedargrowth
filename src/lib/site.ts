@@ -3,7 +3,7 @@
 // number or name (see the non negotiable rails).
 
 export const ANNOUNCEMENT =
-  'Every batch published, with a full Certificate of Analysis.';
+  'Every batch published, with a full Certificate of Analysis';
 
 export const FACILITY_ADDRESS = '998 Broadway, Buffalo, NY 14212';
 

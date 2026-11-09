@@ -1,10 +1,9 @@
 import type { ReactNode } from 'react';
-import { AnnouncementBar } from './AnnouncementBar';
 import { Header } from './Header';
 import { Footer } from './Footer';
 
-// The reusable shell every route inherits: skip link, announcement bar, header
-// with the mega panel, the page main, and the footer.
+// The reusable shell every route inherits: skip link, header, the page main,
+// and the footer.
 
 export function Shell({ children }: { children: ReactNode }) {
   return (
@@ -15,7 +14,6 @@ export function Shell({ children }: { children: ReactNode }) {
       >
         Skip to content
       </a>
-      <AnnouncementBar />
       <Header />
       <main id="content" className="min-h-[50vh]">
         {children}
