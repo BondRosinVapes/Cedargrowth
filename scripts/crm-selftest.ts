@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { mapRows, parseCsv, parseDate, parseMoney } from '../src/lib/crm/importer.ts';
 import { matchDistributorAccount } from '../src/lib/crm/distributor.ts';
+import { productionForecast, stageWinRates } from '../src/lib/crm/forecast.ts';
 import {
   activePolicy,
   alertDedupeKey,
@@ -54,6 +55,8 @@ import {
   handleExport,
   handleHealth,
   handleDistributorOrders,
+  handleForecast,
+  handleCapacity,
   handleNotes,
   handleOpportunityCollection,
   handleReports,
@@ -377,6 +380,8 @@ class MemoryCrm implements CrmStore {
   notes: Note[] = [];
   activity: Activity[] = [];
   orders: import('../src/lib/crm/store.ts').DistributorOrder[] = [];
+  stageEvents: import('../src/lib/crm/store.ts').StageEvent[] = [];
+  capacity: import('../src/lib/crm/store.ts').Capacity[] = [];
   private n = 0;
   private id() { this.n += 1; return `00000000-0000-4000-8000-${String(this.n).padStart(12, '0')}`; }
   async counts(brand: 'cedargrowth' | 'bond') {
@@ -419,11 +424,12 @@ class MemoryCrm implements CrmStore {
   }
   async updateContact() { return { state: 'missing' as const }; }
   async listOpportunities(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.opportunities.filter((row) => row.brand === brand) }; }
-  async createOpportunity(brand: 'cedargrowth' | 'bond', _actor: string, input: { accountId: string; name: string; stage: Opportunity['stage']; forecastCents?: number | null; expectedCloseOn?: string | null; notes?: string; lossReason?: string | null; nextAction?: string | null; nextActionOn?: string | null }) {
+  async createOpportunity(brand: 'cedargrowth' | 'bond', _actor: string, input: { accountId: string; name: string; stage: Opportunity['stage']; forecastCents?: number | null; expectedCloseOn?: string | null; notes?: string; lossReason?: string | null; nextAction?: string | null; nextActionOn?: string | null; productLine?: Opportunity['productLine']; quantityUnits?: number | null }) {
     const account = this.accounts.find((row) => row.id === input.accountId && row.brand === brand);
     if (!account) return { state: 'rejected' as const };
-    const row: Opportunity = { id: this.id(), publicId: 'test-only:opportunity', brand, accountId: input.accountId, name: input.name, stage: input.stage, forecastCents: input.forecastCents ?? null, amountKind: 'forecast', invoicedCents: null, paidCents: null, expectedCloseOn: input.expectedCloseOn ?? null, notes: input.notes ?? '', lossReason: input.lossReason ?? null, nextAction: input.nextAction ?? null, nextActionOn: input.nextActionOn ?? null, updatedAt: 'test-only' };
+    const row: Opportunity = { id: this.id(), publicId: 'test-only:opportunity', brand, accountId: input.accountId, name: input.name, stage: input.stage, forecastCents: input.forecastCents ?? null, amountKind: 'forecast', invoicedCents: null, paidCents: null, expectedCloseOn: input.expectedCloseOn ?? null, notes: input.notes ?? '', lossReason: input.lossReason ?? null, nextAction: input.nextAction ?? null, nextActionOn: input.nextActionOn ?? null, productLine: input.productLine ?? null, quantityUnits: input.quantityUnits ?? null, updatedAt: 'test-only' };
     this.opportunities.push(row);
+    this.stageEvents.push({ id: this.id(), brand, opportunityId: row.id, fromStage: null, toStage: input.stage, at: 'test-only' });
     return { state: 'ok' as const, value: row };
   }
   async updateOpportunity() { return { state: 'missing' as const }; }
@@ -480,9 +486,20 @@ class MemoryCrm implements CrmStore {
     const order = this.orders.find((row) => row.id === orderId && row.brand === brand);
     const deal = this.opportunities.find((row) => row.id === opportunityId && row.brand === brand);
     if (!order || !order.accountId || !deal || deal.accountId !== order.accountId || deal.stage === 'won' || deal.stage === 'lost') return { state: 'rejected' as const };
+    const previous = deal.stage;
     deal.stage = 'won';
+    this.stageEvents.push({ id: this.id(), brand, opportunityId, fromStage: previous, toStage: 'won', at: 'test-only' });
     order.opportunityId = opportunityId;
     return { state: 'ok' as const, value: { order, stage: 'won' as const } };
+  }
+  async listStageEvents(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.stageEvents.filter((row) => row.brand === brand) }; }
+  async listCapacity(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.capacity.filter((row) => row.brand === brand) }; }
+  async upsertCapacity(brand: 'cedargrowth' | 'bond', _actor: string, input: { month: string; productLine: import('../src/lib/crm/engine.ts').ProductLine; capacityUnits: number; notes: string }) {
+    const found = this.capacity.find((row) => row.brand === brand && row.month === input.month && row.productLine === input.productLine);
+    if (found) { found.capacityUnits = input.capacityUnits; found.notes = input.notes; return { state: 'ok' as const, value: found }; }
+    const row = { id: this.id(), brand, month: input.month, productLine: input.productLine, capacityUnits: input.capacityUnits, notes: input.notes };
+    this.capacity.push(row);
+    return { state: 'ok' as const, value: row };
   }
 }
 
@@ -614,6 +631,32 @@ const health = await handleHealth({ actorId: 'gary@cedargrowthco.com', grants: o
 const healthCanix = health.body.canix as { connected?: boolean; lastSuccessAt?: unknown };
 assert(health.status === 200 && health.body.storage === 'ready' && health.body.configured === true && healthCanix.connected === false && health.body.adaptersConnected === false, 'ready storage is separate from a disconnected adapter');
 assert(String(health.body.nabisLabel).includes('Nov 9') && String(health.body.nabisLabel).includes('CSV'), 'health names the Nabis CSV import');
+assert(memory.stageEvents.some((row) => row.opportunityId === oppId && row.fromStage === null && row.toStage === 'licensed_buyer_review'), 'a new deal writes a stage event');
+assert(memory.stageEvents.some((row) => row.opportunityId === oppId && row.fromStage === 'licensed_buyer_review' && row.toStage === 'won'), 'a stage change writes an event');
+const defaultRates = stageWinRates([], []);
+assert(defaultRates.find((row) => row.stage === 'proposal')?.rate === 0.6 && defaultRates.find((row) => row.stage === 'proposal')?.defaulted === true, 'default rates until 5 closed deals');
+const historyDeals = Array.from({ length: 5 }, (_, index) => ({ id: `c${index}`, brand: 'cedargrowth', stage: (index < 4 ? 'won' : 'lost') as 'won' | 'lost', expectedCloseOn: '2026-12-01', productLine: 'vape' as const, quantityUnits: 10 }));
+const learned = stageWinRates(historyDeals.map((row) => ({ brand: 'cedargrowth', opportunityId: row.id, fromStage: null, toStage: 'proposal' as const })), historyDeals);
+assert(learned.find((row) => row.stage === 'proposal')?.defaulted === false && learned.find((row) => row.stage === 'proposal')?.rate === 0.8, 'win rate uses history after 5 closed deals');
+const grid = productionForecast({
+  opportunities: [
+    { id: 'o1', brand: 'cedargrowth', stage: 'lead', expectedCloseOn: '2026-11-15', productLine: 'vape', quantityUnits: 100 },
+    { id: 'o2', brand: 'cedargrowth', stage: 'won', expectedCloseOn: '2026-11-20', productLine: 'vape', quantityUnits: 50 },
+    { id: 'o3', brand: 'cedargrowth', stage: 'proposal', expectedCloseOn: '2026-11-01', productLine: null, quantityUnits: null },
+  ],
+  capacity: [{ brand: 'cedargrowth', month: '2026-11-01', productLine: 'vape', capacityUnits: 40 }],
+  rates: defaultRates,
+  months: ['2026-11-01'],
+});
+const vapeCell = grid.cells.find((cell) => cell.productLine === 'vape');
+const gummyCell = grid.cells.find((cell) => cell.productLine === 'gummy');
+assert(vapeCell?.demand === 60 && vapeCell.status === 'short' && gummyCell?.status === 'no_capacity' && gummyCell.capacityUnits === null && grid.notForecastable === 1, 'demand math for open and won, and missing capacity is not zero');
+const salesCap = await handleCapacity({ actorId: 'sales-1', grants: salesGrant, request: crmReq('PUT', '/api/admin/crm/capacity', { brand: 'cedargrowth', month: '2026-12', productLine: 'vape', capacityUnits: 10 }), store: memory });
+assert(salesCap.status === 403, 'a salesperson cannot edit capacity');
+const bondCap = await handleCapacity({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('PUT', '/api/admin/crm/capacity', { brand: 'bond', month: '2026-12', productLine: 'gummy', capacityUnits: 80 }), store: memory });
+const cedarForecast = await handleForecast({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/forecast?brand=cedargrowth&months=2'), store: memory });
+const cedarCells = (cedarForecast.body.cells as { productLine: string; capacityUnits: number | null }[]) || [];
+assert(bondCap.status === 200 && cedarForecast.status === 200 && cedarCells.filter((cell) => cell.productLine === 'gummy').every((cell) => cell.capacityUnits === null), 'capacity stays in its brand');
 const absentHealth = await handleHealth({
   actorId: 'gary@cedargrowthco.com',
   grants: owner,

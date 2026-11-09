@@ -11,6 +11,8 @@ import {
   dollarsToCents,
   formatForecast,
   OPPORTUNITY_STAGES,
+  PRODUCT_LINES,
+  PRODUCT_LINE_LABELS,
   signalLines,
   type CrmBrand,
   type DeskEvaluation,
@@ -207,6 +209,8 @@ export function CrmConsole({
         stage: String(form.get('stage') || 'lead'),
         forecastCents: cents,
         expectedCloseOn: String(form.get('expectedCloseOn') || '') || null,
+        productLine: String(form.get('productLine') || '') || null,
+        quantityUnits: String(form.get('quantityUnits') || '') === '' ? null : Number(form.get('quantityUnits')),
         lossReason: String(form.get('lossReason') || '') || null,
         nextAction: String(form.get('nextAction') || '') || null,
         notes: String(form.get('notes') || ''),
@@ -343,7 +347,7 @@ export function CrmConsole({
       ) : null}
 
       {wing === 'dashboard' ? (
-        <DashboardWing key={`${brand}-${refresh}`} brand={brand} brandName={label} onOpen={setWing} />
+        <DashboardWing key={`${brand}-${refresh}`} brand={brand} brandName={label} onOpen={setWing} canEditCapacity={roleLabel !== 'Sales'} />
       ) : null}
 
       {wing === 'accounts' ? (
@@ -472,6 +476,13 @@ export function CrmConsole({
               </label>
               <Field name="forecast" label="Forecast amount in dollars" />
               <Field name="expectedCloseOn" type="date" label="Expected close date" />
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Product line
+                <select name="productLine" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="">
+                  <option value="">Not set</option>
+                  {PRODUCT_LINES.map((line) => <option key={line} value={line}>{PRODUCT_LINE_LABELS[line]}</option>)}
+                </select>
+              </label>
+              <Field name="quantityUnits" label="Quantity (units)" />
               <Field name="nextAction" label="Next action" />
               <Field name="lossReason" label="Loss reason, required when stage is lost" />
               <button type="submit" disabled={configured === false} className="border border-ink px-4 py-2 font-mono text-specimen uppercase disabled:opacity-40">Save opportunity</button>

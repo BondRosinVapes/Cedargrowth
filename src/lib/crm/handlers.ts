@@ -34,6 +34,7 @@ import {
 import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
+import { monthStarts, parseCapacityWrite, productionForecast, stageWinRates } from './forecast';
 import { IMPORT_BATCH, IMPORT_KINDS, type ImportKind } from './importer';
 
 export type CrmResult = { status: number; body: Record<string, unknown> };
@@ -634,6 +635,46 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
     outcomes.push(created.state === 'ok' ? { line, status: 'created' } : { line, status: 'error', reason: 'Storage did not accept this row.' });
   }
   return { status: 200, body: { ok: true, configured: true, brand: auth.brand, kind, commit, outcomes } };
+}
+
+export async function handleForecast(ctx: CrmContext): Promise<CrmResult> {
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  const requested = Number(url.searchParams.get('months') || '6');
+  const span = Number.isInteger(requested) && requested >= 1 && requested <= 24 ? requested : 6;
+  const [opps, events, capacity] = await Promise.all([
+    ctx.store.listOpportunities(auth.brand),
+    ctx.store.listStageEvents(auth.brand),
+    ctx.store.listCapacity(auth.brand),
+  ]);
+  for (const result of [opps, events, capacity]) {
+    if (result.state !== 'ok') return storageBody(auth.brand, result.state === 'rejected' || result.state === 'missing' ? 'unavailable' : result.state);
+  }
+  if (opps.state !== 'ok' || events.state !== 'ok' || capacity.state !== 'ok') return storageBody(auth.brand, 'unavailable');
+  const today = new Date().toISOString().slice(0, 10);
+  const rates = stageWinRates(events.value, opps.value);
+  const forecast = productionForecast({
+    opportunities: opps.value,
+    capacity: capacity.value,
+    rates,
+    months: monthStarts(today, span),
+  });
+  return { status: 200, body: { ok: true, configured: true, brand: auth.brand, months: span, rates, ...forecast } };
+}
+
+export async function handleCapacity(ctx: CrmContext): Promise<CrmResult> {
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Only an owner or administrator can edit capacity.' } };
+  const parsed = parseCapacityWrite(record);
+  if (!parsed.ok) return { status: 400, body: { ok: false, reason: parsed.reason } };
+  const saved = await ctx.store.upsertCapacity(auth.brand, auth.actorId, parsed.value);
+  if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'rejected' || saved.state === 'missing' ? 'unavailable' : saved.state);
+  return { status: 200, body: { ok: true, configured: true, brand: auth.brand, capacity: saved.value } };
 }
 
 export async function handleHealth(ctx: CrmContext): Promise<CrmResult> {

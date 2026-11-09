@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, LEAD_SOURCE_LABELS, LEAD_SOURCES, OPPORTUNITY_STAGES, type CrmBrand } from '@/lib/crm/engine';
 import { ORDER_STATUS_LABELS } from '@/lib/crm/distributor';
+import { PRODUCT_LINES, PRODUCT_LINE_LABELS, type ProductLine } from '@/lib/crm/engine';
+import { monthCaption, rateCaption, stageRateLabel } from '@/lib/crm/forecast';
 import {
   DEAL_STATUSES,
   MONTH_LABELS,
@@ -24,7 +26,15 @@ type DashboardBody = {
   refreshedAt?: string;
   truncated?: boolean;
 };
-type Section = 'overview' | 'reps' | 'accounts' | 'sources' | 'timeline' | 'distributor';
+type Section = 'overview' | 'reps' | 'accounts' | 'sources' | 'timeline' | 'distributor' | 'production';
+type ForecastBody = {
+  ok?: boolean;
+  reason?: string;
+  rates?: { stage: 'lead' | 'qualification' | 'licensed_buyer_review' | 'proposal' | 'won' | 'lost'; rate: number; defaulted: boolean; closed: number }[];
+  cells?: { month: string; productLine: ProductLine; demand: number; capacityUnits: number | null; status: 'short' | 'tight' | 'ok' | 'no_capacity' }[];
+  notForecastable?: number;
+  shorts?: string[];
+};
 type Jump = 'accounts' | 'pipeline' | 'canix' | 'signals';
 
 const SECTIONS: { id: Section; label: string }[] = [
@@ -34,6 +44,7 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: 'sources', label: 'Source effectiveness' },
   { id: 'timeline', label: 'Timeline analysis' },
   { id: 'distributor', label: 'Distributor' },
+  { id: 'production', label: 'Production forecast' },
 ];
 
 // Categorical order from the house tokens, checked for adjacent color-blind separation:
@@ -74,11 +85,12 @@ function topWithOther(rows: Bucket[]): Bucket[] {
   ];
 }
 
-export function DashboardWing({ brand, brandName }: { brand: CrmBrand; brandName: string; onOpen?: (wing: Jump) => void }) {
+export function DashboardWing({ brand, brandName, canEditCapacity = false }: { brand: CrmBrand; brandName: string; onOpen?: (wing: Jump) => void; canEditCapacity?: boolean }) {
   const [section, setSection] = useState<Section>('overview');
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [body, setBody] = useState<DashboardBody | null>(null);
   const [failed, setFailed] = useState(false);
+  const [forecast, setForecast] = useState<ForecastBody | null>(null);
   const [tick, setTick] = useState(0);
   const [panel, setPanel] = useState<'none' | 'add' | 'upload'>('none');
 
@@ -104,6 +116,10 @@ export function DashboardWing({ brand, brandName }: { brand: CrmBrand; brandName
       .then((res) => res.json())
       .then((json: DashboardBody) => { if (!cancel) { setBody(json); setFailed(false); } })
       .catch(() => { if (!cancel) setFailed(true); });
+    fetch(`/api/admin/crm/forecast?brand=${brand}&months=6`, { headers: { 'x-cedargrowth-crm': '1' }, credentials: 'same-origin', cache: 'no-store' })
+      .then((res) => res.json())
+      .then((json: ForecastBody) => { if (!cancel) setForecast(json); })
+      .catch(() => { if (!cancel) setForecast(null); });
     return () => { cancel = true; };
   }, [brand, filters, tick]);
 
@@ -182,6 +198,12 @@ export function DashboardWing({ brand, brandName }: { brand: CrmBrand; brandName
 
         {panel === 'add' ? <QuickAdd brand={brand} onSaved={refresh} /> : null}
         {panel === 'upload' ? <SpreadsheetUpload brand={brand} onSaved={refresh} /> : null}
+
+        {forecast?.shorts?.length ? (
+          <div className="flex flex-col gap-2 border border-fail bg-clinical px-4 py-3" role="status">
+            {forecast.shorts.map((line) => <p key={line} className="text-body-m text-primary">{line}</p>)}
+          </div>
+        ) : null}
 
         <dl className="grid grid-cols-2 gap-4 md:grid-cols-5">
           <Kpi label="Deals" value={String(data.kpis.deals)} />
@@ -264,6 +286,7 @@ export function DashboardWing({ brand, brandName }: { brand: CrmBrand; brandName
         ) : null}
 
         {section === 'distributor' ? <DistributorSection brand={brand} data={data} onChanged={refresh} /> : null}
+        {section === 'production' ? <ProductionSection brand={brand} forecast={forecast} canEdit={canEditCapacity} onChanged={refresh} /> : null}
 
         {section === 'timeline' ? (
           <div className="grid grid-cols-1 gap-4">
@@ -367,6 +390,112 @@ function DistributorSection({ brand, data, onChanged }: { brand: CrmBrand; data:
           </ul>
         )}
       </Card>
+    </div>
+  );
+}
+
+const CHIP: Record<string, string> = {
+  short: 'border-fail text-fail',
+  tight: 'border-attention text-secondary',
+  ok: 'border-pass text-secondary',
+  no_capacity: 'border-hairline text-tertiary',
+};
+const CHIP_LABEL: Record<string, string> = {
+  short: 'Short',
+  tight: 'Tight',
+  ok: 'OK',
+  no_capacity: 'No capacity entered',
+};
+
+function units(value: number): string {
+  return value.toLocaleString('en-US', { maximumFractionDigits: 1 });
+}
+
+function ProductionSection({ brand, forecast, canEdit, onChanged }: { brand: CrmBrand; forecast: ForecastBody | null; canEdit: boolean; onChanged: () => void }) {
+  const [message, setMessage] = useState('');
+  const cells = forecast?.cells || [];
+  const months = Array.from(new Set(cells.map((cell) => cell.month)));
+  async function save(form: HTMLFormElement) {
+    const data = new FormData(form);
+    const res = await fetch('/api/admin/crm/capacity', {
+      method: 'PUT',
+      headers: { 'x-cedargrowth-crm': '1', 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        brand,
+        month: String(data.get('month') || ''),
+        productLine: String(data.get('productLine') || ''),
+        capacityUnits: Number(data.get('capacityUnits')),
+        notes: String(data.get('notes') || ''),
+      }),
+    });
+    const json = await res.json().catch(() => ({})) as { ok?: boolean; reason?: string };
+    setMessage(json.ok ? 'Capacity saved.' : String(json.reason || 'Capacity was not saved.'));
+    if (json.ok) { form.reset(); onChanged(); }
+  }
+  if (!forecast?.ok) return <Notice text={forecast?.reason || 'Production forecast is not available yet.'} />;
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-caption text-tertiary">Weighted demand uses the win rate for the current stage. Won deals count in full. A blank capacity is not zero.</p>
+      {message ? <p role="status" className="border border-hairline bg-bone px-3 py-2 text-body-m text-primary">{message}</p> : null}
+      {(forecast.notForecastable || 0) > 0 ? <p className="text-body-m text-secondary">{forecast.notForecastable} deals have no product line or quantity, so they are not in this forecast.</p> : null}
+      <div className="overflow-x-auto border border-hairline bg-clinical">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="font-mono text-specimen uppercase tracking-specimen text-tertiary">
+              <th className="px-3 py-2 font-normal">Product line</th>
+              {months.map((month) => <th key={month} className="px-3 py-2 font-normal">{monthCaption(month)}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {PRODUCT_LINES.map((line) => (
+              <tr key={line} className="border-t border-hairline">
+                <th className="px-3 py-2 text-left font-sans text-body-m font-normal text-primary">{PRODUCT_LINE_LABELS[line]}</th>
+                {months.map((month) => {
+                  const cell = cells.find((item) => item.productLine === line && item.month === month);
+                  if (!cell) return <td key={month} className="px-3 py-2 text-caption text-tertiary">No capacity entered</td>;
+                  return (
+                    <td key={month} className="px-3 py-2">
+                      <p className="font-mono text-data tabular-nums text-primary">{units(cell.demand)} / {cell.capacityUnits === null ? 'No capacity' : units(cell.capacityUnits)}</p>
+                      <p className={`mt-1 inline-flex rounded-chip border px-2 py-0.5 font-mono text-specimen uppercase ${CHIP[cell.status]}`}>{CHIP_LABEL[cell.status]}</p>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Card title="Win rates used">
+        <ul className="flex flex-col gap-2">
+          {(forecast.rates || []).map((rate) => (
+            <li key={rate.stage} className="flex flex-wrap justify-between gap-2 text-body-m text-primary">
+              <span>{stageRateLabel(rate.stage)}</span>
+              <span className="font-mono text-data tabular-nums">{(rate.rate * 100).toFixed(0)}%. {rateCaption(rate)}</span>
+            </li>
+          ))}
+        </ul>
+      </Card>
+      {canEdit ? (
+        <form onSubmit={(event) => { event.preventDefault(); save(event.currentTarget); }} className="grid grid-cols-1 gap-3 border border-hairline bg-clinical p-4 md:grid-cols-2">
+          <h3 className="font-display text-body-l text-primary md:col-span-2">Capacity</h3>
+          <label className="flex flex-col gap-1 text-caption text-tertiary">Month
+            <input name="month" type="month" required className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
+          </label>
+          <label className="flex flex-col gap-1 text-caption text-tertiary">Product line
+            <select name="productLine" required defaultValue="vape" className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary">
+              {PRODUCT_LINES.map((line) => <option key={line} value={line}>{PRODUCT_LINE_LABELS[line]}</option>)}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-caption text-tertiary">Units
+            <input name="capacityUnits" required inputMode="numeric" className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
+          </label>
+          <label className="flex flex-col gap-1 text-caption text-tertiary">Notes
+            <input name="notes" className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
+          </label>
+          <button type="submit" className="w-fit border border-ink bg-ink px-4 py-2 font-mono text-specimen uppercase text-inverse">Save capacity</button>
+        </form>
+      ) : <p className="text-caption text-tertiary">Capacity is edited by an owner or administrator.</p>}
     </div>
   );
 }
