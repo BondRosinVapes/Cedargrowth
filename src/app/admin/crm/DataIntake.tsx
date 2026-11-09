@@ -13,7 +13,7 @@ import {
   type CrmBrand,
 } from '@/lib/crm/engine';
 import { STAGE_LABELS } from '@/lib/crm/dashboard';
-import { IMPORT_BATCH, mapRows, parseCsv, TEMPLATES, type ImportKind, type ImportRow } from '@/lib/crm/importer';
+import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, TEMPLATES, type ImportKind, type ImportRow } from '@/lib/crm/importer';
 
 type Outcome = { line: number; status: 'ready' | 'created' | 'updated' | 'unmatched' | 'skipped' | 'error'; reason?: string; orderId?: string };
 
@@ -159,14 +159,13 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
   async function run(commit: boolean, list: ImportRow[]) {
     const ready = list.filter((row) => row.record);
     const results: Outcome[] = list.filter((row) => row.error).map((row) => ({ line: row.line, status: 'error', reason: row.error }));
-    for (let i = 0; i < ready.length; i += IMPORT_BATCH) {
-      const batch = ready.slice(i, i + IMPORT_BATCH);
+    for (const batch of chunkImportRows(ready, IMPORT_BATCH)) {
       const res = await send('/api/admin/crm/import', { method: 'POST', body: JSON.stringify({ brand, kind, commit, rows: batch }) });
       if (!res.body.ok) {
-        results.push(...batch.map((row) => ({ line: row.line, status: 'error' as const, reason: String(res.body.reason || 'The CRM did not accept this batch.') })));
+        results.push(...mergeBatchOutcomes(batch, null, String(res.body.reason || 'The CRM did not accept this batch.')));
         continue;
       }
-      results.push(...((res.body.outcomes as Outcome[]) || []));
+      results.push(...mergeBatchOutcomes(batch, (res.body.outcomes as Outcome[]) || []));
     }
     return results.sort((a, b) => a.line - b.line);
   }
@@ -179,7 +178,10 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
     const text = await file.text();
     const mapped = mapRows(kind, parseCsv(text));
     setUnmatched(mapped.unmatched);
-    if (mapped.missing.length) { setProblems([`Missing column: ${mapped.missing.join(', ')}. Download the template to see the expected headers.`]); return; }
+    const found: string[] = [];
+    if (mapped.truncated) found.push(`This file has ${mapped.rowCount} data rows. Import reads at most ${IMPORT_MAX_ROWS} rows. Split the file and upload the rest. Nothing was checked.`);
+    if (mapped.missing.length) found.push(`Missing column: ${mapped.missing.join(', ')}. Download the template to see the expected headers.`);
+    if (found.length) { setProblems(found); return; }
     if (!mapped.rows.length) { setProblems(['The file has headers but no rows.']); return; }
     setRows(mapped.rows);
     setPhase('checking');

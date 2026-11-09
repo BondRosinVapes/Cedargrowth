@@ -4,7 +4,7 @@
 
 import { readFileSync } from 'node:fs';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
-import { mapRows, parseCsv, parseDate, parseMoney } from '../src/lib/crm/importer.ts';
+import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, parseDate, parseMoney } from '../src/lib/crm/importer.ts';
 import { matchDistributorAccount } from '../src/lib/crm/distributor.ts';
 import { productionForecast, stageWinRates } from '../src/lib/crm/forecast.ts';
 import { roundLocation, sampleTaskTitle, validateMediaUpload } from '../src/lib/crm/field.ts';
@@ -866,6 +866,26 @@ const tooMany = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: 
 assert(tooMany.status === 413, 'import rejects oversized batches');
 const tooManyNow = await handleImport({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/import', { brand: 'cedargrowth', kind: 'accounts', commit: false, rows: Array.from({ length: 51 }, (_, i) => ({ line: i + 2, record: { displayName: `y${i}` } })) }), store: memory });
 assert(tooManyNow.status === 413, 'import rejects more than 50 rows');
+const fileRows = (count: number) => Array.from({ length: count }, (_, index) => ({ line: index + 2, record: { displayName: `Shop ${index}` } }));
+const limitReason = `Send at most ${IMPORT_BATCH} rows at a time.`;
+const checked = (list: { line: number; record?: { displayName: string } }[], step: number) => {
+  const results: { line: number; status: 'ready' | 'error'; reason?: string }[] = [];
+  for (const batch of chunkImportRows(list, step)) {
+    if (batch.length > IMPORT_BATCH) results.push(...mergeBatchOutcomes(batch, null, limitReason));
+    else results.push(...mergeBatchOutcomes(batch, batch.map((row) => ({ line: row.line, status: 'ready' as const }))));
+  }
+  return results.sort((a, b) => a.line - b.line);
+};
+const wide = fileRows(1316);
+const wideOld = checked(wide, 100);
+const wideFixed = checked(wide, IMPORT_BATCH);
+assert(wideOld.filter((row) => row.reason === limitReason).length === 1300 && wideOld.filter((row) => row.status === 'ready').length === 16, 'a 100 row step rejects 1300 rows of a 1316 row file and keeps the last 16');
+assert(wideFixed.length === 1316 && wideFixed.every((row) => row.status === 'ready') && wideFixed[0].line === 2 && wideFixed[1315].line === 1317 && new Set(wideFixed.map((row) => row.line)).size === 1316 && chunkImportRows(wide).every((batch) => batch.length <= IMPORT_BATCH) && chunkImportRows(wide).length === 27, '1316 rows are checked in batches of at most 50 and each line comes back once');
+assert(chunkImportRows(fileRows(50)).length === 1 && chunkImportRows(fileRows(50))[0].length === 50 && chunkImportRows(fileRows(51)).map((batch) => batch.length).join(',') === '50,1' && chunkImportRows([]).length === 0, 'an exact batch, a 51st row, and an empty file chunk without going over 50');
+const emptyMapped = mapRows('accounts', parseCsv(''));
+const headerOnly = mapRows('accounts', parseCsv('Account name\n'));
+const overMax = mapRows('accounts', parseCsv(`Account name\n${Array.from({ length: IMPORT_MAX_ROWS + 1 }, (_, index) => `Shop ${index}`).join('\n')}`));
+assert(emptyMapped.rows.length === 0 && emptyMapped.truncated === false && headerOnly.rows.length === 0 && headerOnly.truncated === false && overMax.truncated === true && overMax.rowCount === IMPORT_MAX_ROWS + 1 && overMax.rows.length === IMPORT_MAX_ROWS, 'an empty file stays empty and a file past 2000 rows is reported instead of being cut quietly');
 const chainCsv = parseCsv('Name,City,Region,License,License Type,Address,ZIP,County,Operating\nChain Store TEST ONLY,Albany,Capital Region,LIC-CHAIN-1,Adult-Use Retail Dispensary License,1 Main St,12207,Albany,Active\nChain Store TEST ONLY,Troy,Capital Region,LIC-CHAIN-2,Adult-Use Conditional Retail Dispensary License,2 River St,12180,Rensselaer,Non-Operational\n');
 const chainRows = mapRows('accounts', chainCsv).rows;
 assert(chainRows[0].record?.accountType === 'adult_use_dispensary' && chainRows[0].record?.county === 'Albany' && String(chainRows[0].record?.notes).includes('Address: 1 Main St 12207') && String(chainRows[0].record?.notes).includes('County: Albany') && String(chainRows[0].record?.notes).includes('Region: Capital Region') && String(chainRows[1].record?.notes).includes('Operating: Non-Operational'), 'state license export maps license type, county, and labeled notes');
