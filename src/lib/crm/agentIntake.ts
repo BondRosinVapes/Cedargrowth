@@ -1,7 +1,8 @@
 // Agent record intake. Pure checks only. No database, no network, no secrets.
 // Writes are create only, for CedarGrowth accounts, contacts, and notes.
 
-import { parseAccountWrite, parseContactWrite, parseUuid, type AccountStatus, type AccountType } from './engine';
+import { parseAccountWrite, parseContactWrite, parseUuid, type AccountStatus, type AccountType, type LeadSource } from './engine';
+import { composeAccountNotes, matchLeadSource, parseDate } from './importer';
 import { signIntake, signaturesMatch, timestampFresh } from './intake';
 
 export const AGENT_ACTOR = 'CODEX agent';
@@ -13,7 +14,7 @@ export const AGENT_MAX_BYTES = 64 * 1024;
 export const AGENT_FLAG = 'AGENT_INTAKE_ENABLED';
 
 const ENVELOPE_KEYS = ['request_id', 'brand', 'rows'] as const;
-const ACCOUNT_KEYS = ['kind', 'display_name', 'status', 'account_type', 'city', 'county', 'state', 'country', 'license_number'] as const;
+const ACCOUNT_KEYS = ['kind', 'display_name', 'status', 'account_type', 'lead_source', 'assigned_rep', 'city', 'county', 'state', 'country', 'license_number', 'license_expiry', 'street', 'postal_code', 'ocm_status', 'phone', 'email', 'website', 'operating', 'region', 'license_status', 'notes'] as const;
 const CONTACT_KEYS = ['kind', 'name', 'email', 'phone', 'title', 'account_license', 'account_name'] as const;
 const NOTE_KEYS = ['kind', 'body', 'account_license', 'account_name'] as const;
 const DUMMY_ACCOUNT = '00000000-0000-4000-8000-000000000001';
@@ -24,9 +25,16 @@ export type AgentAccountOp = {
   displayName: string;
   status: AccountStatus;
   accountType: AccountType | null;
+  leadSource: LeadSource | null;
+  assignedRep: string | null;
   city: string | null;
   county: string | null;
   licenseNumber: string | null;
+  licenseExpiry: string | null;
+  street: string | null;
+  postalCode: string | null;
+  ocmStatus: 'unverified' | 'verified' | null;
+  notes: string;
 };
 
 export type AgentContactOp = {
@@ -106,15 +114,50 @@ export function parseAgentRow(index: number, value: unknown): { ok: true; op: Ag
 function parseAccountRow(index: number, record: Record<string, unknown>): { ok: true; op: AgentAccountOp } | AgentRowFailure {
   if (record.state !== 'NY') return { index, reason: 'State must be NY.' };
   if (record.country !== 'USA') return { index, reason: 'Country must be USA.' };
+  const leadSource = record.lead_source === undefined || record.lead_source === null || record.lead_source === '' ? null : typeof record.lead_source === 'string' ? matchLeadSource(record.lead_source) : 'invalid';
+  if (leadSource === 'invalid') return { index, reason: 'Lead source is not recognized.' };
+  const expiry = record.license_expiry === undefined || record.license_expiry === null || record.license_expiry === '' ? null : typeof record.license_expiry === 'string' ? parseDate(record.license_expiry) : 'invalid';
+  if (expiry === 'invalid') return { index, reason: 'License expiry is not a date.' };
+  const assignedRep = record.assigned_rep === undefined || record.assigned_rep === null || record.assigned_rep === '' ? null : typeof record.assigned_rep === 'string' ? record.assigned_rep.trim() : 'invalid';
+  if (assignedRep === 'invalid' || (assignedRep && assignedRep.length > 200)) return { index, reason: 'Assigned rep is too long.' };
+  const street = optionalBounded(record.street, 120);
+  if (street === 'invalid') return { index, reason: 'Street is too long.' };
+  const postalCode = optionalBounded(record.postal_code, 10);
+  if (postalCode === 'invalid') return { index, reason: 'ZIP is too long.' };
+  const ocmStatus = record.ocm_status === undefined || record.ocm_status === null || record.ocm_status === '' ? null : record.ocm_status === 'unverified' || record.ocm_status === 'verified' ? record.ocm_status : 'invalid';
+  if (ocmStatus === 'invalid') return { index, reason: 'OCM status must be unverified or verified.' };
+  const phone = optionalNote(record.phone);
+  const email = optionalNote(record.email);
+  const website = optionalNote(record.website);
+  const operating = optionalNote(record.operating);
+  const region = optionalNote(record.region);
+  const licenseStatus = optionalNote(record.license_status);
+  const noteText = optionalNote(record.notes);
+  if ([phone, email, website, operating, region, licenseStatus, noteText].includes('invalid')) return { index, reason: 'Notes could not be read.' };
   const parsed = parseAccountWrite({
     displayName: record.display_name,
     status: record.status,
     accountType: record.account_type,
+    leadSource,
+    assignedRep,
     city: record.city,
     county: record.county,
     licenseRef: record.license_number,
+    licenseExpiry: expiry,
   }, 'create');
   if (!parsed.ok || !parsed.value.displayName || !parsed.value.status) return { index, reason: parsed.ok ? 'Enter an account name.' : parsed.reason };
+  const notes = composeAccountNotes({
+    notes: noteText || '',
+    address: street || '',
+    zip: postalCode || '',
+    county: parsed.value.county || '',
+    region: region || '',
+    phone: phone || '',
+    email: email || '',
+    website: website || '',
+    licenseStatus: licenseStatus || '',
+    operating: operating || '',
+  });
   return {
     ok: true,
     op: {
@@ -123,9 +166,16 @@ function parseAccountRow(index: number, record: Record<string, unknown>): { ok: 
       displayName: parsed.value.displayName,
       status: parsed.value.status,
       accountType: parsed.value.accountType ?? null,
+      leadSource: parsed.value.leadSource ?? null,
+      assignedRep: parsed.value.assignedRep ?? null,
       city: parsed.value.city ?? null,
       county: parsed.value.county ?? null,
       licenseNumber: parsed.value.licenseRef ?? null,
+      licenseExpiry: parsed.value.licenseExpiry ?? null,
+      street,
+      postalCode,
+      ocmStatus,
+      notes,
     },
   };
 }
@@ -177,11 +227,12 @@ export function applyAgentOps(input: {
   receivedAtMs: number;
   requests: readonly { requestId: string; receivedAtMs: number }[];
   accounts: readonly AgentAccountView[];
+  contacts: readonly { accountId: string; email: string | null }[];
   ops: readonly AgentOp[];
   nextId: () => string;
 }): { code: 'replay' } | { code: 'rate'; retryAfter: number } | {
   code: 'ok';
-  accounts: (AgentAccountView & { status: AccountStatus; city: string | null; county: string | null; accountType: AccountType | null })[];
+  accounts: (AgentAccountView & { status: AccountStatus; city: string | null; county: string | null; accountType: AccountType | null; leadSource: LeadSource | null; assignedRep: string | null; licenseExpiry: string | null; street: string | null; postalCode: string | null; ocmStatus: 'unverified' | 'verified' | null; notes: string })[];
   contacts: { id: string; accountId: string; name: string; email: string | null; phone: string | null; title: string | null }[];
   notes: { id: string; accountId: string; body: string }[];
   activity: { id: string; accountId: string; kind: string; summary: string }[];
@@ -194,7 +245,8 @@ export function applyAgentOps(input: {
   const rate = agentRateLimited(input.receivedAtMs, recent);
   if (rate.limited) return { code: 'rate', retryAfter: rate.retryAfter };
   const accounts = input.accounts.map((row) => ({ ...row }));
-  const added: (AgentAccountView & { status: AccountStatus; city: string | null; county: string | null; accountType: AccountType | null })[] = [];
+  const added: (AgentAccountView & { status: AccountStatus; city: string | null; county: string | null; accountType: AccountType | null; leadSource: LeadSource | null; assignedRep: string | null; licenseExpiry: string | null; street: string | null; postalCode: string | null; ocmStatus: 'unverified' | 'verified' | null; notes: string })[] = [];
+  const knownContacts = input.contacts.map((row) => ({ accountId: row.accountId, email: row.email }));
   const contacts: { id: string; accountId: string; name: string; email: string | null; phone: string | null; title: string | null }[] = [];
   const notes: { id: string; accountId: string; body: string }[] = [];
   const activity: { id: string; accountId: string; kind: string; summary: string }[] = [];
@@ -224,7 +276,7 @@ export function applyAgentOps(input: {
         continue;
       }
       const id = input.nextId();
-      const createdAccount = { id, brand: AGENT_BRAND, displayName: op.displayName, licenseRef: op.licenseNumber, status: op.status, city: op.city, county: op.county, accountType: op.accountType };
+      const createdAccount = { id, brand: AGENT_BRAND, displayName: op.displayName, licenseRef: op.licenseNumber, status: op.status, city: op.city, county: op.county, accountType: op.accountType, leadSource: op.leadSource, assignedRep: op.assignedRep, licenseExpiry: op.licenseExpiry, street: op.street, postalCode: op.postalCode, ocmStatus: op.ocmStatus, notes: op.notes };
       accounts.push(createdAccount);
       added.push(createdAccount);
       activity.push({ id: input.nextId(), accountId: id, kind: 'account_created', summary: 'Account created' });
@@ -234,6 +286,12 @@ export function applyAgentOps(input: {
     const linked = link(op.accountLicense, op.accountName);
     if ('reason' in linked) { failed.push({ index: op.index, reason: linked.reason }); continue; }
     if (op.op === 'contact') {
+      const email = op.email?.trim().toLowerCase() || '';
+      if (email && knownContacts.some((row) => row.accountId === linked.id && row.email?.trim().toLowerCase() === email)) {
+        skipped.push({ index: op.index, reason: 'A contact with this email already exists on the account.' });
+        continue;
+      }
+      knownContacts.push({ accountId: linked.id, email: op.email });
       contacts.push({ id: input.nextId(), accountId: linked.id, name: op.name, email: op.email, phone: op.phone, title: op.title });
       activity.push({ id: input.nextId(), accountId: linked.id, kind: 'contact_created', summary: 'Contact created' });
       created.contacts += 1;
@@ -244,6 +302,22 @@ export function applyAgentOps(input: {
     }
   }
   return { code: 'ok', accounts: added, contacts, notes, activity, created, skipped, failed };
+}
+
+function optionalBounded(value: unknown, max: number): string | null | 'invalid' {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') return 'invalid';
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > max) return 'invalid';
+  return trimmed;
+}
+
+function optionalNote(value: unknown): string | null | 'invalid' {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') return 'invalid';
+  const trimmed = value.trim();
+  return trimmed || null;
 }
 
 function optionalLink(value: unknown): string | null | 'invalid' {

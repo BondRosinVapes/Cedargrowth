@@ -15,7 +15,8 @@ import { coverageLabel } from '../src/lib/crm/territory.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
-import { applyAgentOps } from '../src/lib/crm/agentIntake.ts';
+import { applyAgentOps, parseAgentRow } from '../src/lib/crm/agentIntake.ts';
+import { codexBatches, codexReport, codexWaitMs, planCodexCsv, runCodexLoad } from './codex-load-records.ts';
 import type { IntakeLead } from '../src/lib/crm/intake.ts';
 import { reorderLinkHtml } from '../src/lib/email.ts';
 import {
@@ -774,6 +775,7 @@ class MemoryCrm implements CrmStore {
       receivedAtMs,
       requests: this.agentRequests,
       accounts: this.accounts.map((row) => ({ id: row.id, brand: row.brand, displayName: row.displayName, licenseRef: row.licenseRef })),
+      contacts: this.contacts.map((row) => ({ accountId: row.accountId, email: row.email })),
       ops: input.ops,
       nextId: () => this.id(),
     });
@@ -781,7 +783,7 @@ class MemoryCrm implements CrmStore {
     if (result.code === 'rate') return { state: 'ok' as const, value: { code: 'rate' as const, retryAfter: result.retryAfter } };
     this.agentRequests.push({ requestId: input.requestId, receivedAtMs });
     for (const account of result.accounts) {
-      this.accounts.push({ id: account.id, publicId: 'test-only:agent:account', brand: 'cedargrowth', displayName: account.displayName, status: account.status, city: account.city, county: account.county, notes: '', licenseRef: account.licenseRef, facilityRef: null, licenseJurisdiction: null, licenseExpiry: null, assignedRep: null, accountType: account.accountType, leadSource: null, distributor: null, distributorAccountRef: null, createdAt: input.receivedAt, updatedAt: input.receivedAt, createdBy: 'CODEX agent', updatedBy: 'CODEX agent', state: 'NY', sourceRequestId: input.requestId });
+      this.accounts.push({ id: account.id, publicId: 'test-only:agent:account', brand: 'cedargrowth', displayName: account.displayName, status: account.status, city: account.city, county: account.county, notes: account.notes, licenseRef: account.licenseRef, facilityRef: null, licenseJurisdiction: null, licenseExpiry: account.licenseExpiry, assignedRep: account.assignedRep, accountType: account.accountType, leadSource: account.leadSource, street: account.street, postalCode: account.postalCode, ocmStatus: account.ocmStatus, distributor: null, distributorAccountRef: null, createdAt: input.receivedAt, updatedAt: input.receivedAt, createdBy: 'CODEX agent', updatedBy: 'CODEX agent', state: 'NY', sourceRequestId: input.requestId });
     }
     for (const contact of result.contacts) {
       this.contacts.push({ id: contact.id, publicId: 'test-only:agent:contact', brand: 'cedargrowth', accountId: contact.accountId, name: contact.name, title: contact.title, email: contact.email, phone: contact.phone, notes: '', preference: 'unspecified', createdAt: input.receivedAt, updatedAt: input.receivedAt, sourceRequestId: input.requestId });
@@ -1360,6 +1362,54 @@ assert(agentGood.status === 200 && agentCreated.accounts === 1 && agentCreated.c
 assert(agentReplay.status === 409 && agentStore.accounts.filter((row) => row.licenseRef === 'AGENT-LIC-2').length === 0, 'a replayed agent request id is rejected');
 assert(agentDupe.status === 200 && ((agentDupe.body.skipped as { reason: string }[]) || []).some((row) => row.reason.includes('license')) && agentStore.accounts.filter((row) => row.displayName === 'Agent Shop Copy').length === 0, 'a duplicate license is not added again');
 assert(agentLogs.every((line) => line.includes('agent-secret') === false), 'the agent secret is never logged');
+const agentFields = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa7', [
+  { kind: 'account', display_name: 'TEST ONLY Shop', status: 'prospect', account_type: 'adult_use_dispensary', lead_source: 'Referral', assigned_rep: 'TEST ONLY Rep', city: 'Buffalo', county: 'Erie', state: 'NY', country: 'USA', license_number: 'TEST-ONLY-FIELDS', license_expiry: '1/2/2027', street: '1 Test Street', postal_code: '14201', ocm_status: 'unverified', phone: '555-0100', email: 'buyer@test.only', website: 'https://test.only', operating: 'Open', region: 'Western', license_status: 'Active', notes: 'TEST ONLY note' },
+])), { nowMs: agentNow, env: agentEnv });
+const fieldAccount = agentStore.accounts.find((row) => row.licenseRef === 'TEST-ONLY-FIELDS');
+assert(agentFields.status === 200 && fieldAccount?.street === '1 Test Street' && fieldAccount.postalCode === '14201' && fieldAccount.licenseExpiry === '2027-01-02' && fieldAccount.ocmStatus === 'unverified' && fieldAccount.leadSource === 'referral' && fieldAccount.assignedRep === 'TEST ONLY Rep' && fieldAccount.notes.includes('Store phone: 555-0100') && fieldAccount.notes.includes('Store email: buyer@test.only') && fieldAccount.notes.includes('Website: https://test.only') && fieldAccount.notes.includes('Operating: Open') && fieldAccount.notes.startsWith('TEST ONLY note'), 'agent account fields match the importer notes and the added columns');
+assert(JSON.stringify(agentFields.body).includes('buyer@test.only') === false && JSON.stringify(agentFields.body).includes('555-0100') === false, 'the agent response does not echo phone or email');
+const agentContactAgain = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa8', [
+  { kind: 'contact', name: 'Agent Buyer', email: 'buyer@agent.test', account_license: 'AGENT-LIC-1' },
+])), { nowMs: agentNow, env: agentEnv });
+assert(agentContactAgain.status === 200 && ((agentContactAgain.body.skipped as { reason: string }[]) || []).some((row) => row.reason.includes('email')) && agentStore.contacts.filter((row) => row.email === 'buyer@agent.test').length === 1, 'a contact with the same email on the same account is not added again');
+const accountHeader = 'Account name,Status,Account type,Lead source,Sales rep,City,License number,License expiry,Address,ZIP,County,Region,Phone,Email,Website,License status,Operating,Notes';
+const contactHeader = 'Contact name,Email,Phone,Title,Account name,Account license';
+const accountCsv = `${accountHeader}\nTEST ONLY Shop,Prospect,Adult-use dispensary,Referral,TEST ONLY Rep,Buffalo,TEST-ONLY-LIC,2027-01-01,1 Test Street,14201,Erie,Western,555-0100,buyer@test.only,https://test.only,Active,Open,TEST ONLY note\nTEST ONLY Bad,Nope,Adult-use dispensary,Referral,TEST ONLY Rep,Buffalo,TEST-ONLY-LIC-2,2027-01-01,1 Test Street,14201,Erie,Western,555-0101,bad@test.only,https://test.only,Active,Open,TEST ONLY\n`;
+const contactCsv = `${contactHeader}\nTEST ONLY Buyer,buyer@test.only,555-0100,Buyer,TEST ONLY Shop,TEST-ONLY-LIC\n`;
+const mappedNotes = mapRows('accounts', parseCsv(accountCsv)).rows.find((row) => row.record)?.record?.notes;
+const planned = planCodexCsv('accounts', accountCsv);
+const plannedOp = parseAgentRow(0, planned.ready[0]?.payload);
+const sameNotes = plannedOp && 'op' in plannedOp && plannedOp.op.op === 'account' && plannedOp.op.notes === mappedNotes;
+assert(sameNotes === true, 'the loader stores phone, email, website, operating, and notes the same way as the importer');
+const dryLines: string[] = [];
+let posts = 0;
+const dryCode = await runCodexLoad(['--accounts', 'accounts.csv', '--contacts', 'contacts.csv', '--dry-run'], { CG_AGENT_INTAKE_SECRET: 'loader-secret', CG_AGENT_INTAKE_URL: 'https://loader.example' }, {
+  read: (path) => path === 'accounts.csv' ? accountCsv : contactCsv,
+  post: async () => { posts += 1; return { status: 200, retryAfter: 0, body: {} }; },
+  now: () => agentNow,
+  sleep: async () => {},
+  print: (line) => dryLines.push(line),
+});
+const report = dryLines.join('\n');
+assert(dryCode === 1 && posts === 0 && report.includes('accounts ready 1') && report.includes('row 3:') && report.includes('loader-secret') === false && report.includes('loader.example') === false && report.includes('TEST ONLY') === false && report.includes('buyer@test.only') === false && report.includes('555-0100') === false, 'dry run prints counts only and does not post');
+const many = [accountHeader, ...Array.from({ length: 51 }, (_, index) => `TEST ONLY ${index},Prospect,Adult-use dispensary,Referral,TEST ONLY Rep,Buffalo,TEST-ONLY-${index},2027-01-01,1 Test Street,14201,Erie,Western,555-0100,buyer${index}@test.only,https://test.only,Active,Open,TEST ONLY`)].join('\n');
+assert(codexBatches(planCodexCsv('accounts', many).ready).map((batch) => batch.length).join(',') === '50,1', 'the loader posts at most 50 rows at a time');
+assert(codexWaitMs(agentNow + 1000, Array.from({ length: 20 }, () => agentNow)) > 0, 'the loader waits after 20 requests in an hour');
+const sentKinds: string[] = [];
+await runCodexLoad(['--accounts', 'accounts.csv', '--contacts', 'contacts.csv'], { CG_AGENT_INTAKE_SECRET: 'loader-secret', CG_AGENT_INTAKE_URL: 'https://loader.example' }, {
+  read: (path) => path === 'accounts.csv' ? accountCsv : contactCsv,
+  post: async ({ body, headers }) => {
+    const parsed = JSON.parse(body) as { rows: { kind: string }[] };
+    sentKinds.push(String(parsed.rows[0]?.kind));
+    assert(typeof headers['x-cg-signature'] === 'string' && headers['x-cg-signature'].length > 0, 'a loader batch is signed');
+    return { status: 200, retryAfter: 0, body: { ok: true, created: { accounts: parsed.rows[0]?.kind === 'account' ? 1 : 0, contacts: parsed.rows[0]?.kind === 'contact' ? 1 : 0 }, skipped: [], failed: [] } };
+  },
+  now: () => agentNow,
+  sleep: async () => {},
+  print: () => {},
+});
+assert(sentKinds.join(',') === 'account,contact', 'accounts are posted before contacts');
+assert(codexReport('accounts', 1, [{ line: 4, reason: 'Email buyer@test.only was rejected.' }], [], ['loader-secret']).some((line) => line === 'row 4: Row was rejected.'), 'a reason that contains an email is not printed');
 void agentUnknown;
 
 const suiteSql = readFileSync('supabase/migrations/0123_crm_suite_workflows.sql', 'utf8');
