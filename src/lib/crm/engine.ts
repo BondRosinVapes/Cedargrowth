@@ -62,6 +62,14 @@ const ACCOUNT_STATUS: readonly AccountStatus[] = ['prospect', 'active', 'paused'
 export const OPPORTUNITY_STAGES: readonly OpportunityStage[] = ['lead', 'qualification', 'licensed_buyer_review', 'proposal', 'won', 'lost'];
 const STAGES = OPPORTUNITY_STAGES;
 export const OPEN_STAGES: readonly OpportunityStage[] = ['lead', 'qualification', 'licensed_buyer_review', 'proposal'];
+export const PRODUCT_LINES = ['vape', 'preroll', 'gummy', 'other'] as const;
+export type ProductLine = (typeof PRODUCT_LINES)[number];
+export const PRODUCT_LINE_LABELS: Record<ProductLine, string> = {
+  vape: 'Vape',
+  preroll: 'Pre-roll',
+  gummy: 'Gummy',
+  other: 'Other',
+};
 const TASK_STATUS: readonly TaskStatus[] = ['open', 'done'];
 
 export function parseBrand(value: unknown): CrmBrand | null {
@@ -131,7 +139,7 @@ export function authorizeCrmRequest(input: {
   if (input.grants.length === 0) return { ok: false, status: 403, reason: 'Sales access is not provisioned.' };
   if (input.headerMarker !== '1') return { ok: false, status: 403, reason: 'Request was rejected.' };
   const method = input.method.toUpperCase();
-  if (method !== 'GET' && method !== 'POST' && method !== 'PATCH') {
+  if (method !== 'GET' && method !== 'POST' && method !== 'PATCH' && method !== 'PUT') {
     return { ok: false, status: 405, reason: 'Request was rejected.' };
   }
   // A browser same-origin GET does not send Origin. Mutations still require it.
@@ -481,6 +489,8 @@ export type OpportunityWrite = {
   lossReason?: string | null;
   nextAction?: string | null;
   nextActionOn?: string | null;
+  productLine?: ProductLine | null;
+  quantityUnits?: number | null;
 };
 
 export function parseOpportunityWrite(
@@ -542,6 +552,17 @@ export function parseOpportunityWrite(
     if (b.nextActionOn === null || b.nextActionOn === '') value.nextActionOn = null;
     else if (typeof b.nextActionOn !== 'string' || !parseIsoDate(b.nextActionOn)) return { ok: false, reason: 'Next action date must be a calendar date.' };
     else value.nextActionOn = b.nextActionOn;
+  }
+  if (b.productLine !== undefined) {
+    if (b.productLine === null || b.productLine === '') value.productLine = null;
+    else if (typeof b.productLine !== 'string' || !(PRODUCT_LINES as readonly string[]).includes(b.productLine)) return { ok: false, reason: 'Product line is not recognized.' };
+    else value.productLine = b.productLine as ProductLine;
+  }
+  if (b.quantityUnits !== undefined) {
+    if (b.quantityUnits === null || b.quantityUnits === '') value.quantityUnits = null;
+    else if (typeof b.quantityUnits !== 'number' || !Number.isInteger(b.quantityUnits) || b.quantityUnits < 0 || b.quantityUnits > 10_000_000) {
+      return { ok: false, reason: 'Quantity must be a whole number of units, or empty.' };
+    } else value.quantityUnits = b.quantityUnits;
   }
   if (value.stage === 'lost' && !value.lossReason) return { ok: false, reason: 'A lost opportunity needs a loss reason.' };
   return { ok: true, value };

@@ -9,6 +9,7 @@ import {
   type CrmBrand,
   type OpportunityStage,
   type OpportunityWrite,
+  type ProductLine,
   type StoredInsight,
   type TaskStatus,
   type TaskWrite,
@@ -81,6 +82,8 @@ export type Opportunity = {
   lossReason: string | null;
   nextAction: string | null;
   nextActionOn: string | null;
+  productLine: ProductLine | null;
+  quantityUnits: number | null;
   updatedAt: string;
 };
 
@@ -141,6 +144,24 @@ export type DistributorOrder = {
   importedAt: string;
 };
 
+export type StageEvent = {
+  id: string;
+  brand: CrmBrand;
+  opportunityId: string;
+  fromStage: OpportunityStage | null;
+  toStage: OpportunityStage;
+  at: string;
+};
+
+export type Capacity = {
+  id: string;
+  brand: CrmBrand;
+  month: string;
+  productLine: ProductLine;
+  capacityUnits: number;
+  notes: string;
+};
+
 export type Counts = {
   accounts: number;
   contacts: number;
@@ -191,12 +212,15 @@ export interface CrmStore {
   upsertDistributorOrder(brand: CrmBrand, actor: string, input: DistributorOrderDraft & { accountId: string | null }): Promise<StoreResult<{ order: DistributorOrder; action: 'created' | 'updated' }>>;
   linkDistributorOrder(brand: CrmBrand, orderId: string, accountId: string): Promise<StoreResult<DistributorOrder>>;
   markDealWonFromOrder(brand: CrmBrand, actor: string, orderId: string, opportunityId: string): Promise<StoreResult<{ order: DistributorOrder; stage: OpportunityStage }>>;
+  listStageEvents(brand: CrmBrand): Promise<StoreResult<StageEvent[]>>;
+  listCapacity(brand: CrmBrand): Promise<StoreResult<Capacity[]>>;
+  upsertCapacity(brand: CrmBrand, actor: string, input: { month: string; productLine: ProductLine; capacityUnits: number; notes: string }): Promise<StoreResult<Capacity>>;
 }
 
 const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,created_at,updated_at,created_by,updated_by';
 const ORDER_COLS = 'id,public_id,brand,account_id,distributor,order_ref,retailer_name,ordered_on,delivered_on,order_status,invoice_cents,retailer_payment_status,retailer_paid_on,payout_status,payout_cents,payout_on,opportunity_id,source,imported_at';
 const CONTACT_COLS = 'id,public_id,brand,account_id,name,title,email,phone,notes,preference,created_at,updated_at';
-const OPP_COLS = 'id,public_id,brand,account_id,name,stage,forecast_cents,expected_close_on,notes,loss_reason,next_action,next_action_on,updated_at';
+const OPP_COLS = 'id,public_id,brand,account_id,name,stage,forecast_cents,expected_close_on,notes,loss_reason,next_action,next_action_on,product_line,quantity_units,updated_at';
 const TASK_COLS = 'id,public_id,brand,account_id,opportunity_id,title,due_on,status,notes,owner_actor,completed_at';
 
 const ABSENT: CrmStore = new Proxy({} as CrmStore, {
@@ -309,8 +333,28 @@ function mapOpportunity(row: Record<string, unknown>): Opportunity | null {
     lossReason: row.loss_reason ? String(row.loss_reason) : null,
     nextAction: row.next_action ? String(row.next_action) : null,
     nextActionOn: row.next_action_on ? String(row.next_action_on) : null,
+    productLine: row.product_line === 'vape' || row.product_line === 'preroll' || row.product_line === 'gummy' || row.product_line === 'other' ? row.product_line : null,
+    quantityUnits: typeof row.quantity_units === 'number' ? row.quantity_units : null,
     updatedAt: String(row.updated_at ?? ''),
   };
+}
+
+const STAGES: readonly OpportunityStage[] = ['lead', 'qualification', 'licensed_buyer_review', 'proposal', 'won', 'lost'];
+
+function mapStageEvent(row: Record<string, unknown>): StageEvent | null {
+  const brand = asBrand(row.brand);
+  const toStage = asToken(row.to_stage, STAGES);
+  const fromStage = row.from_stage === null || row.from_stage === undefined ? null : asToken(row.from_stage, STAGES);
+  if (!brand || typeof row.id !== 'string' || typeof row.opportunity_id !== 'string' || !toStage) return null;
+  if (row.from_stage !== null && row.from_stage !== undefined && !fromStage) return null;
+  return { id: row.id, brand, opportunityId: row.opportunity_id, fromStage, toStage, at: String(row.at ?? '') };
+}
+
+function mapCapacity(row: Record<string, unknown>): Capacity | null {
+  const brand = asBrand(row.brand);
+  const productLine = row.product_line === 'vape' || row.product_line === 'preroll' || row.product_line === 'gummy' || row.product_line === 'other' ? row.product_line : null;
+  if (!brand || typeof row.id !== 'string' || !productLine || typeof row.capacity_units !== 'number') return null;
+  return { id: row.id, brand, month: String(row.month ?? '').slice(0, 10), productLine, capacityUnits: row.capacity_units, notes: String(row.notes ?? '') };
 }
 
 function mapTask(row: Record<string, unknown>): Task | null {
@@ -552,6 +596,8 @@ class SupabaseCrmStore implements CrmStore {
       loss_reason: input.lossReason ?? null,
       next_action: input.nextAction ?? null,
       next_action_on: input.nextActionOn ?? null,
+      product_line: input.productLine ?? null,
+      quantity_units: input.quantityUnits ?? null,
       created_by: actor,
       updated_by: actor,
     }).select(OPP_COLS).maybeSingle();
@@ -568,6 +614,8 @@ class SupabaseCrmStore implements CrmStore {
     if (patch.lossReason !== undefined) row.loss_reason = patch.lossReason;
     if (patch.nextAction !== undefined) row.next_action = patch.nextAction;
     if (patch.nextActionOn !== undefined) row.next_action_on = patch.nextActionOn;
+    if (patch.productLine !== undefined) row.product_line = patch.productLine;
+    if (patch.quantityUnits !== undefined) row.quantity_units = patch.quantityUnits;
     const { data, error } = await this.db.from('crm_opportunities').update(row).eq('id', id).eq('brand', brand).select(OPP_COLS).maybeSingle();
     return this.one(brand, data as Record<string, unknown> | null, error, mapOpportunity);
   }
@@ -774,6 +822,48 @@ class SupabaseCrmStore implements CrmStore {
     const saved = this.one(brand, data as Record<string, unknown> | null, error, mapDistributorOrder);
     if (saved.state !== 'ok') return saved;
     return { state: 'ok', value: { order: saved.value, stage: 'won' } };
+  }
+
+  listStageEvents(brand: CrmBrand) {
+    return this.rows(
+      brand,
+      this.db.from('crm_stage_events').select('id,brand,opportunity_id,from_stage,to_stage,at').eq('brand', brand).order('at', { ascending: true }).limit(5000),
+      mapStageEvent,
+    );
+  }
+
+  listCapacity(brand: CrmBrand) {
+    return this.rows(
+      brand,
+      this.db.from('crm_capacity').select('id,brand,month,product_line,capacity_units,notes').eq('brand', brand).order('month', { ascending: true }),
+      mapCapacity,
+    );
+  }
+
+  async upsertCapacity(brand: CrmBrand, actor: string, input: { month: string; productLine: ProductLine; capacityUnits: number; notes: string }): Promise<StoreResult<Capacity>> {
+    const existing = await this.db.from('crm_capacity').select('id,brand,month,product_line,capacity_units,notes').eq('brand', brand).eq('month', input.month).eq('product_line', input.productLine).maybeSingle();
+    const failed = classify(existing.error);
+    if (failed) return { state: failed };
+    if (existing.error) return { state: 'rejected' };
+    if (existing.data && typeof existing.data.id === 'string') {
+      const { data, error } = await this.db.from('crm_capacity').update({
+        capacity_units: input.capacityUnits,
+        notes: input.notes,
+        updated_by: actor,
+        updated_at: new Date().toISOString(),
+      }).eq('id', existing.data.id).eq('brand', brand).select('id,brand,month,product_line,capacity_units,notes').maybeSingle();
+      return this.one(brand, data as Record<string, unknown> | null, error, mapCapacity);
+    }
+    const { data, error } = await this.db.from('crm_capacity').insert({
+      brand,
+      month: input.month,
+      product_line: input.productLine,
+      capacity_units: input.capacityUnits,
+      notes: input.notes,
+      created_by: actor,
+      updated_by: actor,
+    }).select('id,brand,month,product_line,capacity_units,notes').maybeSingle();
+    return this.one(brand, data as Record<string, unknown> | null, error, mapCapacity);
   }
 
   private one<T extends { brand: CrmBrand }>(

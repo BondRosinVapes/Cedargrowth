@@ -15,8 +15,11 @@ import {
   LEAD_SOURCE_LABELS,
   LEAD_SOURCES,
   OPPORTUNITY_STAGES,
+  PRODUCT_LINES,
+  PRODUCT_LINE_LABELS,
   type AccountStatus,
   type OpportunityStage,
+  type ProductLine,
 } from './engine';
 
 export const IMPORT_KINDS = ['accounts', 'deals', 'orders'] as const;
@@ -95,6 +98,8 @@ const DEAL_HEADERS: Record<string, string[]> = {
   lossReason: ['loss reason', 'lost reason', 'reason lost'],
   nextAction: ['next action', 'next step'],
   notes: ['notes', 'note', 'comments'],
+  productLine: ['product line', 'product', 'format', 'line'],
+  quantity: ['quantity', 'quantity units', 'units', 'qty'],
 };
 
 export function matchHeaders(kind: ImportKind, header: string[]): { columns: Record<string, number>; unmatched: string[] } {
@@ -134,6 +139,10 @@ const STAGE_SYNONYMS: Record<string, OpportunityStage> = {
   new: 'lead', prospect: 'lead', contacted: 'lead', qualified: 'qualification', 'license review': 'licensed_buyer_review',
   'license check': 'licensed_buyer_review', 'proposal sent': 'proposal', quote: 'proposal', negotiation: 'proposal',
   'closed won': 'won', closed: 'won', ordered: 'won', 'closed lost': 'lost',
+};
+const LINE_SYNONYMS: Record<string, ProductLine> = {
+  'pre roll': 'preroll', 'pre-roll': 'preroll', 'infused pre roll': 'preroll', 'infused pre-roll': 'preroll',
+  gummies: 'gummy', vapes: 'vape',
 };
 const STAGE_LABEL: Record<OpportunityStage, string> = {
   lead: 'Lead', qualification: 'Qualified', licensed_buyer_review: 'Licensed buyer review', proposal: 'Proposal', won: 'Won', lost: 'Lost',
@@ -250,6 +259,14 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
     if (close === 'invalid') return { line, error: `Close date "${cell(row, 'expectedCloseOn')}" is not a date.` };
     if (close) record.expectedCloseOn = close;
     for (const key of ['lossReason', 'nextAction', 'notes']) if (cell(row, key)) record[key] = cell(row, key);
+    const lineName = choice(cell(row, 'productLine'), PRODUCT_LINES, PRODUCT_LINE_LABELS, LINE_SYNONYMS);
+    if (lineName === 'invalid') return { line, error: `Product line "${cell(row, 'productLine')}" is not recognized.` };
+    if (lineName) record.productLine = lineName;
+    const qtyRaw = cell(row, 'quantity').replace(/,/g, '');
+    if (qtyRaw) {
+      if (!/^\d+$/.test(qtyRaw)) return { line, error: `Quantity "${cell(row, 'quantity')}" is not a whole number of units.` };
+      record.quantityUnits = Number(qtyRaw);
+    }
     if (record.stage === 'lost' && !record.lossReason) return { line, error: 'A lost deal needs a loss reason column.' };
     return { line, record, accountName };
   });
@@ -258,6 +275,6 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
 
 export const TEMPLATES: Record<ImportKind, string> = {
   accounts: 'Account name,Status,Account type,Lead source,Sales rep,City,License number,License expiry,Notes\n',
-  deals: 'Account,Deal name,Stage,Amount,Close date,Next action,Loss reason,Notes\n',
+  deals: 'Account,Deal name,Stage,Amount,Close date,Product line,Quantity,Next action,Loss reason,Notes\n',
   orders: 'Order ID,Retailer,License,Order Date,Delivery Date,Status,Invoice Total,Payment Status,Paid Date,Payout,Payout Date\n',
 };

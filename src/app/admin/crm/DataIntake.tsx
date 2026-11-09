@@ -8,6 +8,8 @@ import {
   LEAD_SOURCE_LABELS,
   LEAD_SOURCES,
   OPPORTUNITY_STAGES,
+  PRODUCT_LINES,
+  PRODUCT_LINE_LABELS,
   type CrmBrand,
 } from '@/lib/crm/engine';
 import { STAGE_LABELS } from '@/lib/crm/dashboard';
@@ -70,6 +72,8 @@ export function QuickAdd({ brand, onSaved }: { brand: CrmBrand; onSaved: () => v
         stage: String(data.get('stage') || 'lead'),
         forecastCents: cents,
         expectedCloseOn: String(data.get('expectedCloseOn') || '') || null,
+        productLine: String(data.get('productLine') || '') || null,
+        quantityUnits: String(data.get('quantityUnits') || '') === '' ? null : Number(data.get('quantityUnits')),
         lossReason: String(data.get('lossReason') || '') || null,
       }),
     });
@@ -119,6 +123,13 @@ export function QuickAdd({ brand, onSaved }: { brand: CrmBrand; onSaved: () => v
             </label>
             <label className={label}>Amount (dollars)<input name="amount" inputMode="decimal" className={input} /></label>
             <label className={label}>Expected close<input name="expectedCloseOn" type="date" className={input} /></label>
+            <label className={label}>Product line
+              <select name="productLine" defaultValue="" className={input}>
+                <option value="">Not set</option>
+                {PRODUCT_LINES.map((line) => <option key={line} value={line}>{PRODUCT_LINE_LABELS[line]}</option>)}
+              </select>
+            </label>
+            <label className={label}>Quantity (units)<input name="quantityUnits" inputMode="numeric" className={input} /></label>
             {stage === 'lost' ? <label className={label}>Loss reason<input name="lossReason" required className={input} /></label> : null}
           </div>
           <button type="submit" disabled={!accounts.length} className={`${primaryButton} w-fit`}>Add deal</button>
@@ -208,7 +219,7 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
           ? 'Needs an Account name column. Optional: Status, Account type, Lead source, Sales rep, City, License number, License expiry, Notes. Accounts that already exist by name are skipped.'
           : kind === 'orders'
             ? 'Needs Order ID and Retailer. Optional: License, Order Date, Delivery Date, Status, Invoice Total, Payment Status, Paid Date, Payout, Payout Date. A repeat Order ID updates that order. Unmatched retailers are not created.'
-            : 'Needs Account and Deal name columns. Optional: Stage, Amount, Close date, Next action, Loss reason, Notes. Import accounts first; each deal is matched to an account by name.'}
+            : 'Needs Account and Deal name columns. Optional: Stage, Amount, Close date, Product line, Quantity, Next action, Loss reason, Notes. Import accounts first; each deal is matched to an account by name.'}
         {' '}Nothing is saved until you press Import.
       </p>
       {problems.map((text) => <p key={text} role="alert" className="border border-attention px-3 py-2 text-body-m text-primary">{text}</p>)}
