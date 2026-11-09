@@ -32,6 +32,7 @@ import {
   type TaskStatus,
 } from './engine';
 import type { CrmStore } from './store';
+import { buildDashboard, parseDashboardFilter } from './dashboard';
 
 export type CrmResult = { status: number; body: Record<string, unknown> };
 
@@ -489,6 +490,50 @@ export async function handleReports(ctx: CrmContext): Promise<CrmResult> {
       agedOpenOpportunities: aging.aged,
       workload: workload.owners,
       mirror: mirrorContract(),
+    },
+  };
+}
+
+export async function handleDashboard(ctx: CrmContext): Promise<CrmResult> {
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  const [accounts, opps, tasks, activity] = await Promise.all([
+    ctx.store.listAccounts(auth.brand, { q: null, status: null }),
+    ctx.store.listOpportunities(auth.brand),
+    ctx.store.listTasks(auth.brand, null),
+    ctx.store.listActivity(auth.brand),
+  ]);
+  for (const result of [accounts, opps, tasks, activity]) {
+    if (result.state !== 'ok') return storageBody(auth.brand, result.state === 'rejected' || result.state === 'missing' ? 'unavailable' : result.state);
+  }
+  if (accounts.state !== 'ok' || opps.state !== 'ok' || tasks.state !== 'ok' || activity.state !== 'ok') {
+    return storageBody(auth.brand, 'unavailable');
+  }
+  const dashboard = buildDashboard({
+    brand: auth.brand,
+    today: new Date().toISOString().slice(0, 10),
+    filter: parseDashboardFilter(url.searchParams),
+    accounts: accounts.value,
+    opportunities: opps.value,
+    tasks: tasks.value,
+    activity: activity.value,
+  });
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      configured: true,
+      brand: auth.brand,
+      amountKind: 'forecast',
+      invoicedCents: null,
+      paidCents: null,
+      sources: {
+        crm: { connected: true, label: 'CRM records' },
+        canix: { connected: false, label: CANIX_NOT_CONNECTED },
+        hoodie: { connected: false, label: HOODIE_NOT_CONNECTED },
+      },
+      dashboard,
     },
   };
 }
