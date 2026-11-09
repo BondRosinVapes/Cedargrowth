@@ -3,7 +3,11 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
+  ACCOUNT_TYPE_LABELS,
+  ACCOUNT_TYPES,
   brandLabel,
+  LEAD_SOURCE_LABELS,
+  LEAD_SOURCES,
   dollarsToCents,
   formatForecast,
   OPPORTUNITY_STAGES,
@@ -26,6 +30,8 @@ type Account = {
   licenseRef?: string | null;
   facilityRef?: string | null;
   assignedRep?: string | null;
+  accountType?: keyof typeof ACCOUNT_TYPE_LABELS | null;
+  leadSource?: keyof typeof LEAD_SOURCE_LABELS | null;
 };
 type Contact = { id: string; publicId: string; accountId: string; name: string; email: string | null; title: string | null; preference?: string };
 type Opportunity = { id: string; publicId: string; name: string; stage: string; forecastCents: number | null; forecastLabel?: string };
@@ -160,6 +166,8 @@ export function CrmConsole({
         licenseJurisdiction: String(form.get('licenseJurisdiction') || '') || null,
         licenseExpiry: String(form.get('licenseExpiry') || '') || null,
         assignedRep: String(form.get('assignedRep') || '') || null,
+        accountType: String(form.get('accountType') || '') || null,
+        leadSource: String(form.get('leadSource') || '') || null,
       }),
     });
     setNotice(res.body.ok ? 'Account saved in this brand.' : String(res.body.reason || 'Account was not saved.'));
@@ -337,6 +345,7 @@ export function CrmConsole({
               <p className="font-mono text-specimen text-tertiary">{selected.publicId || selected.id}</p>
               <p className="text-body-m text-secondary">License reference: {selected.licenseRef || 'None stored'}. A stored reference is not a validity certification.</p>
               <p className="text-body-m text-secondary">Facility reference: {selected.facilityRef || 'None stored'}. This is not a certified facility record.</p>
+              <p className="text-body-m text-secondary">Account type: {selected.accountType ? ACCOUNT_TYPE_LABELS[selected.accountType] : 'Not set'}. Lead source: {selected.leadSource ? LEAD_SOURCE_LABELS[selected.leadSource] : 'Not set'}.</p>
               <p className="text-body-m text-secondary">Assigned rep: {selected.assignedRep || 'None'}. Assignment does not grant a login or a role.</p>
               <ul className="flex flex-col gap-2">
                 {accountContacts.length === 0 ? <li className="text-caption text-tertiary">No contacts on this account.</li> : accountContacts.map((row) => (
@@ -375,6 +384,18 @@ export function CrmConsole({
                   <option value="active">Active</option>
                   <option value="paused">Paused</option>
                   <option value="closed">Closed</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Account type
+                <select name="accountType" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="">
+                  <option value="">Not set</option>
+                  {ACCOUNT_TYPES.map((type) => <option key={type} value={type}>{ACCOUNT_TYPE_LABELS[type]}</option>)}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-caption text-tertiary">Lead source
+                <select name="leadSource" className="border border-hairline bg-clinical px-3 py-2 text-body-m" defaultValue="">
+                  <option value="">Not set</option>
+                  {LEAD_SOURCES.map((source) => <option key={source} value={source}>{LEAD_SOURCE_LABELS[source]}</option>)}
                 </select>
               </label>
               <Field name="city" label="City or region" />

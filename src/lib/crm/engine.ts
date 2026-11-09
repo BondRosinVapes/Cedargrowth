@@ -34,6 +34,30 @@ export type AccountStatus = 'prospect' | 'active' | 'paused' | 'closed';
 export type OpportunityStage = 'lead' | 'qualification' | 'licensed_buyer_review' | 'proposal' | 'won' | 'lost';
 export type TaskStatus = 'open' | 'done';
 
+export const ACCOUNT_TYPES = ['adult_use_dispensary', 'microbusiness', 'distributor', 'registered_organization', 'processor', 'cultivator', 'other'] as const;
+export type AccountType = (typeof ACCOUNT_TYPES)[number];
+export const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
+  adult_use_dispensary: 'Adult-use dispensary',
+  microbusiness: 'Microbusiness',
+  distributor: 'Distributor',
+  registered_organization: 'Registered organization',
+  processor: 'Processor',
+  cultivator: 'Cultivator',
+  other: 'Other',
+};
+export const LEAD_SOURCES = ['referral', 'leaflink', 'trade_show', 'cold_outreach', 'website', 'hoodie', 'existing_relationship', 'other'] as const;
+export type LeadSource = (typeof LEAD_SOURCES)[number];
+export const LEAD_SOURCE_LABELS: Record<LeadSource, string> = {
+  referral: 'Referral',
+  leaflink: 'LeafLink',
+  trade_show: 'Trade show',
+  cold_outreach: 'Cold outreach',
+  website: 'Website',
+  hoodie: 'Hoodie',
+  existing_relationship: 'Existing relationship',
+  other: 'Other',
+};
+
 const ACCOUNT_STATUS: readonly AccountStatus[] = ['prospect', 'active', 'paused', 'closed'];
 export const OPPORTUNITY_STAGES: readonly OpportunityStage[] = ['lead', 'qualification', 'licensed_buyer_review', 'proposal', 'won', 'lost'];
 const STAGES = OPPORTUNITY_STAGES;
@@ -234,7 +258,7 @@ function textField(value: unknown, max: number, required: boolean): string | nul
 export function parseAccountWrite(
   body: unknown,
   mode: 'create' | 'update',
-): { ok: true; value: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null } } | { ok: false; reason: string } {
+): { ok: true; value: { displayName?: string; status?: AccountStatus; city?: string | null; notes?: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null } } | { ok: false; reason: string } {
   if (!body || typeof body !== 'object') return { ok: false, reason: 'Account could not be read.' };
   const b = body as Record<string, unknown>;
   const displayName = textField(b.displayName, 160, mode === 'create');
@@ -303,11 +327,24 @@ export function parseAccountWrite(
       assignedRep = v || null;
     }
   }
+  let accountType: AccountType | null | undefined;
+  if (b.accountType !== undefined) {
+    if (b.accountType === null || b.accountType === '') accountType = null;
+    else if (typeof b.accountType !== 'string' || !(ACCOUNT_TYPES as readonly string[]).includes(b.accountType)) return { ok: false, reason: 'Account type is not recognized.' };
+    else accountType = b.accountType as AccountType;
+  }
+  let leadSource: LeadSource | null | undefined;
+  if (b.leadSource !== undefined) {
+    if (b.leadSource === null || b.leadSource === '') leadSource = null;
+    else if (typeof b.leadSource !== 'string' || !(LEAD_SOURCES as readonly string[]).includes(b.leadSource)) return { ok: false, reason: 'Lead source is not recognized.' };
+    else leadSource = b.leadSource as LeadSource;
+  }
   if (mode === 'update' && displayName === undefined && status === undefined && city === undefined && notes === undefined
-    && licenseRef === undefined && facilityRef === undefined && licenseJurisdiction === undefined && licenseExpiry === undefined && assignedRep === undefined) {
+    && licenseRef === undefined && facilityRef === undefined && licenseJurisdiction === undefined && licenseExpiry === undefined && assignedRep === undefined
+    && accountType === undefined && leadSource === undefined) {
     return { ok: false, reason: 'Nothing to update.' };
   }
-  return { ok: true, value: { displayName: displayName || undefined, status, city, notes, licenseRef, facilityRef, licenseJurisdiction, licenseExpiry, assignedRep } };
+  return { ok: true, value: { displayName: displayName || undefined, status, city, notes, licenseRef, facilityRef, licenseJurisdiction, licenseExpiry, assignedRep, accountType, leadSource } };
 }
 
 export function dollarsToCents(input: string): number | null | 'invalid' {

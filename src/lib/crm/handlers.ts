@@ -155,6 +155,8 @@ export async function handleAccountCollection(ctx: CrmContext, method: 'GET' | '
     licenseJurisdiction: parsed.value.licenseJurisdiction ?? null,
     licenseExpiry: parsed.value.licenseExpiry ?? null,
     assignedRep: parsed.value.assignedRep ?? null,
+    accountType: parsed.value.accountType ?? null,
+    leadSource: parsed.value.leadSource ?? null,
   });
   if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'rejected' ? 'unavailable' : created.state === 'missing' ? 'unavailable' : created.state);
   return { status: 201, body: { ok: true, configured: true, brand: auth.brand, account: created.value } };
@@ -179,6 +181,8 @@ export async function handleAccountUpdate(ctx: CrmContext, id: string): Promise<
     licenseJurisdiction: parsed.value.licenseJurisdiction,
     licenseExpiry: parsed.value.licenseExpiry,
     assignedRep: parsed.value.assignedRep,
+    accountType: parsed.value.accountType,
+    leadSource: parsed.value.leadSource,
   });
   if (updated.state === 'missing') return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   if (updated.state !== 'ok') return storageBody(auth.brand, updated.state === 'rejected' ? 'unavailable' : updated.state);
@@ -498,16 +502,17 @@ export async function handleDashboard(ctx: CrmContext): Promise<CrmResult> {
   const url = new URL(ctx.request.url);
   const auth = await gate(ctx, url.searchParams.get('brand'));
   if (isResult(auth)) return auth;
-  const [accounts, opps, tasks, activity] = await Promise.all([
+  const [accounts, opps, tasks, activity, notes] = await Promise.all([
     ctx.store.listAccounts(auth.brand, { q: null, status: null }),
     ctx.store.listOpportunities(auth.brand),
     ctx.store.listTasks(auth.brand, null),
     ctx.store.listActivity(auth.brand),
+    ctx.store.listNotes(auth.brand, null),
   ]);
-  for (const result of [accounts, opps, tasks, activity]) {
+  for (const result of [accounts, opps, tasks, activity, notes]) {
     if (result.state !== 'ok') return storageBody(auth.brand, result.state === 'rejected' || result.state === 'missing' ? 'unavailable' : result.state);
   }
-  if (accounts.state !== 'ok' || opps.state !== 'ok' || tasks.state !== 'ok' || activity.state !== 'ok') {
+  if (accounts.state !== 'ok' || opps.state !== 'ok' || tasks.state !== 'ok' || activity.state !== 'ok' || notes.state !== 'ok') {
     return storageBody(auth.brand, 'unavailable');
   }
   const dashboard = buildDashboard({
@@ -518,6 +523,7 @@ export async function handleDashboard(ctx: CrmContext): Promise<CrmResult> {
     opportunities: opps.value,
     tasks: tasks.value,
     activity: activity.value,
+    notes: notes.value,
   });
   return {
     status: 200,
