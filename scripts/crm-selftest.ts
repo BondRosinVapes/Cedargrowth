@@ -1362,25 +1362,26 @@ assert(agentGood.status === 200 && agentCreated.accounts === 1 && agentCreated.c
 assert(agentReplay.status === 409 && agentStore.accounts.filter((row) => row.licenseRef === 'AGENT-LIC-2').length === 0, 'a replayed agent request id is rejected');
 assert(agentDupe.status === 200 && ((agentDupe.body.skipped as { reason: string }[]) || []).some((row) => row.reason.includes('license')) && agentStore.accounts.filter((row) => row.displayName === 'Agent Shop Copy').length === 0, 'a duplicate license is not added again');
 assert(agentLogs.every((line) => line.includes('agent-secret') === false), 'the agent secret is never logged');
-const agentFields = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa7', [
+const agentFields = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa8', [
   { kind: 'account', display_name: 'TEST ONLY Shop', status: 'prospect', account_type: 'adult_use_dispensary', lead_source: 'Referral', assigned_rep: 'TEST ONLY Rep', city: 'Buffalo', county: 'Erie', state: 'NY', country: 'USA', license_number: 'TEST-ONLY-FIELDS', license_expiry: '1/2/2027', street: '1 Test Street', postal_code: '14201', ocm_status: 'unverified', phone: '555-0100', email: 'buyer@test.only', website: 'https://test.only', operating: 'Open', region: 'Western', license_status: 'Active', notes: 'TEST ONLY note' },
 ])), { nowMs: agentNow, env: agentEnv });
 const fieldAccount = agentStore.accounts.find((row) => row.licenseRef === 'TEST-ONLY-FIELDS');
 assert(agentFields.status === 200 && fieldAccount?.street === '1 Test Street' && fieldAccount.postalCode === '14201' && fieldAccount.licenseExpiry === '2027-01-02' && fieldAccount.ocmStatus === 'unverified' && fieldAccount.leadSource === 'referral' && fieldAccount.assignedRep === 'TEST ONLY Rep' && fieldAccount.notes.includes('Store phone: 555-0100') && fieldAccount.notes.includes('Store email: buyer@test.only') && fieldAccount.notes.includes('Website: https://test.only') && fieldAccount.notes.includes('Operating: Open') && fieldAccount.notes.startsWith('TEST ONLY note'), 'agent account fields match the importer notes and the added columns');
 assert(JSON.stringify(agentFields.body).includes('buyer@test.only') === false && JSON.stringify(agentFields.body).includes('555-0100') === false, 'the agent response does not echo phone or email');
-const agentContactAgain = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa8', [
+const agentContactAgain = await handleAgentIntake(agentStore, agentRequest(agentPayload('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa7', [
   { kind: 'contact', name: 'Agent Buyer', email: 'buyer@agent.test', account_license: 'AGENT-LIC-1' },
 ])), { nowMs: agentNow, env: agentEnv });
 assert(agentContactAgain.status === 200 && ((agentContactAgain.body.skipped as { reason: string }[]) || []).some((row) => row.reason.includes('email')) && agentStore.contacts.filter((row) => row.email === 'buyer@agent.test').length === 1, 'a contact with the same email on the same account is not added again');
+void agentUnknown;
 const accountHeader = 'Account name,Status,Account type,Lead source,Sales rep,City,License number,License expiry,Address,ZIP,County,Region,Phone,Email,Website,License status,Operating,Notes';
 const contactHeader = 'Contact name,Email,Phone,Title,Account name,Account license';
 const accountCsv = `${accountHeader}\nTEST ONLY Shop,Prospect,Adult-use dispensary,Referral,TEST ONLY Rep,Buffalo,TEST-ONLY-LIC,2027-01-01,1 Test Street,14201,Erie,Western,555-0100,buyer@test.only,https://test.only,Active,Open,TEST ONLY note\nTEST ONLY Bad,Nope,Adult-use dispensary,Referral,TEST ONLY Rep,Buffalo,TEST-ONLY-LIC-2,2027-01-01,1 Test Street,14201,Erie,Western,555-0101,bad@test.only,https://test.only,Active,Open,TEST ONLY\n`;
 const contactCsv = `${contactHeader}\nTEST ONLY Buyer,buyer@test.only,555-0100,Buyer,TEST ONLY Shop,TEST-ONLY-LIC\n`;
+const accountPlan = planCodexCsv('accounts', accountCsv);
+const contactPlan = planCodexCsv('contacts', contactCsv);
 const mappedNotes = mapRows('accounts', parseCsv(accountCsv)).rows.find((row) => row.record)?.record?.notes;
-const planned = planCodexCsv('accounts', accountCsv);
-const plannedOp = parseAgentRow(0, planned.ready[0]?.payload);
-const sameNotes = plannedOp && 'op' in plannedOp && plannedOp.op.op === 'account' && plannedOp.op.notes === mappedNotes;
-assert(sameNotes === true, 'the loader stores phone, email, website, operating, and notes the same way as the importer');
+const plannedOp = parseAgentRow(0, accountPlan.ready[0]?.payload);
+assert(plannedOp && 'op' in plannedOp && plannedOp.op.op === 'account' && plannedOp.op.notes === mappedNotes, 'the loader stores phone, email, website, operating, and notes the same way as the importer');
 const dryLines: string[] = [];
 let posts = 0;
 const dryCode = await runCodexLoad(['--accounts', 'accounts.csv', '--contacts', 'contacts.csv', '--dry-run'], { CG_AGENT_INTAKE_SECRET: 'loader-secret', CG_AGENT_INTAKE_URL: 'https://loader.example' }, {
@@ -1391,7 +1392,9 @@ const dryCode = await runCodexLoad(['--accounts', 'accounts.csv', '--contacts', 
   print: (line) => dryLines.push(line),
 });
 const report = dryLines.join('\n');
-assert(dryCode === 1 && posts === 0 && report.includes('accounts ready 1') && report.includes('row 3:') && report.includes('loader-secret') === false && report.includes('loader.example') === false && report.includes('TEST ONLY') === false && report.includes('buyer@test.only') === false && report.includes('555-0100') === false, 'dry run prints counts only and does not post');
+assert(dryCode === 1 && posts === 0 && accountPlan.ready.length === 1 && accountPlan.failed.length === 1 && contactPlan.ready.length === 1, 'dry run validates the spreadsheet and does not post');
+assert(report.includes('accounts ready 1') && report.includes('accounts failed 1') && report.includes('contacts ready 1') && report.includes('row 3:'), 'dry run prints counts and the row number');
+assert(report.includes('loader-secret') === false && report.includes('loader.example') === false && report.includes('TEST ONLY') === false && report.includes('buyer@test.only') === false && report.includes('555-0100') === false, 'the loader report hides the secret, the URL, and the row values');
 const many = [accountHeader, ...Array.from({ length: 51 }, (_, index) => `TEST ONLY ${index},Prospect,Adult-use dispensary,Referral,TEST ONLY Rep,Buffalo,TEST-ONLY-${index},2027-01-01,1 Test Street,14201,Erie,Western,555-0100,buyer${index}@test.only,https://test.only,Active,Open,TEST ONLY`)].join('\n');
 assert(codexBatches(planCodexCsv('accounts', many).ready).map((batch) => batch.length).join(',') === '50,1', 'the loader posts at most 50 rows at a time');
 assert(codexWaitMs(agentNow + 1000, Array.from({ length: 20 }, () => agentNow)) > 0, 'the loader waits after 20 requests in an hour');
@@ -1409,8 +1412,8 @@ await runCodexLoad(['--accounts', 'accounts.csv', '--contacts', 'contacts.csv'],
   print: () => {},
 });
 assert(sentKinds.join(',') === 'account,contact', 'accounts are posted before contacts');
-assert(codexReport('accounts', 1, [{ line: 4, reason: 'Email buyer@test.only was rejected.' }], [], ['loader-secret']).some((line) => line === 'row 4: Row was rejected.'), 'a reason that contains an email is not printed');
-void agentUnknown;
+const reportLines = codexReport('accounts', 1, [{ line: 4, reason: 'Email buyer@test.only was rejected.' }], [], ['loader-secret']);
+assert(reportLines.some((line) => line === 'row 4: Row was rejected.'), 'a reason that contains an email is not printed');
 
 const suiteSql = readFileSync('supabase/migrations/0123_crm_suite_workflows.sql', 'utf8');
 const raiseAt = suiteSql.indexOf('unsupported opportunity stage');

@@ -152,12 +152,17 @@ if [ "$AGENT_REPLAY" != "replay" ] || [ "$AGENT_COUNTS" != "1,1,1,3,unspecified"
   exit 1
 fi
 echo 'ok: agent intake writes one cedar account, contact, and note, then rejects replay and a duplicate license'
-AGENT_FIELDS=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa13'::uuid, '2026-11-09T18:07:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"TEST ONLY Shop\",\"status\":\"prospect\",\"account_type\":\"adult_use_dispensary\",\"lead_source\":\"referral\",\"assigned_rep\":\"TEST ONLY Rep\",\"city\":\"Buffalo\",\"county\":\"Erie\",\"license_number\":\"TEST-ONLY-FIELDS\",\"license_expiry\":\"2027-01-02\",\"street\":\"1 Test Street\",\"postal_code\":\"14201\",\"ocm_status\":\"unverified\",\"notes\":\"TEST ONLY note\\nAddress: 1 Test Street 14201\\nCounty: Erie\\nRegion: Western\\nStore phone: 555-0100\\nStore email: buyer@test.only\\nWebsite: https://test.only\\nLicense status: Active\\nOperating: Open\"}]'::jsonb)->>'code';")
-AGENT_FIELD_ROW=$(sudo -u postgres psql -d "$DB" -tA -c "select street || '|' || postal_code || '|' || license_expiry::text || '|' || ocm_status || '|' || lead_source || '|' || assigned_rep || '|' || created_by || '|' || (notes like 'TEST ONLY note%' and notes like '%Store phone: 555-0100%' and notes like '%Store email: buyer@test.only%' and notes like '%Website: https://test.only%' and notes like '%Operating: Open%')::text from public.crm_accounts where license_ref = 'TEST-ONLY-FIELDS';")
 AGENT_CONTACT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa12'::uuid, '2026-11-09T18:06:00Z', '[{\"op\":\"contact\",\"index\":0,\"name\":\"Agent Buyer\",\"email\":\"buyer@agent.test\",\"account_license\":\"AGENT-LIC-1\"}]'::jsonb)::text;")
 AGENT_CONTACT_COUNT=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_contacts where lower(email) = 'buyer@agent.test';")
-if [ "$AGENT_FIELDS" != "accepted" ] || [ "$AGENT_FIELD_ROW" != "1 Test Street|14201|2027-01-02|unverified|referral|TEST ONLY Rep|CODEX agent|true" ] || [ "$AGENT_CONTACT_COUNT" != "1" ] || ! printf '%s' "$AGENT_CONTACT" | grep -q 'already exists'; then
-  echo "FAIL: agent account fields ${AGENT_FIELDS} ${AGENT_FIELD_ROW} ${AGENT_CONTACT} ${AGENT_CONTACT_COUNT}"
+if [ "$AGENT_CONTACT_COUNT" != "1" ] || ! printf '%s' "$AGENT_CONTACT" | grep -q 'already exists'; then
+  echo "FAIL: agent contact dedupe ${AGENT_CONTACT} ${AGENT_CONTACT_COUNT}"
+  exit 1
+fi
+echo 'ok: a repeated contact email on the same account is not added again'
+AGENT_FIELDS=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa13'::uuid, '2026-11-09T18:07:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"TEST ONLY Shop\",\"status\":\"prospect\",\"account_type\":\"adult_use_dispensary\",\"lead_source\":\"referral\",\"assigned_rep\":\"TEST ONLY Rep\",\"city\":\"Buffalo\",\"county\":\"Erie\",\"license_number\":\"TEST-ONLY-FIELDS\",\"license_expiry\":\"2027-01-02\",\"street\":\"1 Test Street\",\"postal_code\":\"14201\",\"ocm_status\":\"unverified\",\"notes\":\"TEST ONLY note\\nAddress: 1 Test Street 14201\\nCounty: Erie\\nRegion: Western\\nStore phone: 555-0100\\nStore email: buyer@test.only\\nWebsite: https://test.only\\nLicense status: Active\\nOperating: Open\"}]'::jsonb)->>'code';")
+AGENT_FIELD_ROW=$(sudo -u postgres psql -d "$DB" -tA -c "select street || '|' || postal_code || '|' || license_expiry::text || '|' || ocm_status || '|' || lead_source || '|' || assigned_rep || '|' || created_by || '|' || (notes like 'TEST ONLY note%' and notes like '%Store phone: 555-0100%' and notes like '%Store email: buyer@test.only%' and notes like '%Website: https://test.only%' and notes like '%Operating: Open%')::text from public.crm_accounts where license_ref = 'TEST-ONLY-FIELDS';")
+if [ "$AGENT_FIELDS" != "accepted" ] || [ "$AGENT_FIELD_ROW" != "1 Test Street|14201|2027-01-02|unverified|referral|TEST ONLY Rep|CODEX agent|true" ]; then
+  echo "FAIL: agent account fields ${AGENT_FIELDS} ${AGENT_FIELD_ROW}"
   exit 1
 fi
 echo 'ok: agent accounts keep street, ZIP, expiry, OCM status, lead source, rep, and importer notes'
