@@ -1,0 +1,418 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { OPPORTUNITY_STAGES, type CrmBrand } from '@/lib/crm/engine';
+import {
+  DEAL_STATUSES,
+  MONTH_LABELS,
+  STAGE_LABELS,
+  STATUS_LABELS,
+  type Bucket,
+  type Dashboard,
+  type RepRow,
+} from '@/lib/crm/dashboard';
+
+type Source = { connected: boolean; label: string };
+type DashboardBody = {
+  ok?: boolean;
+  configured?: boolean;
+  reason?: string;
+  sources?: { crm: Source; canix: Source; hoodie: Source };
+  dashboard?: Dashboard;
+};
+type Section = 'overview' | 'reps' | 'accounts' | 'sources' | 'timeline';
+type Jump = 'accounts' | 'pipeline' | 'canix' | 'signals';
+
+const SECTIONS: { id: Section; label: string }[] = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'reps', label: 'Sales rep analysis' },
+  { id: 'accounts', label: 'Account breakdown' },
+  { id: 'sources', label: 'Source effectiveness' },
+  { id: 'timeline', label: 'Timeline analysis' },
+];
+
+// Categorical order from the house tokens, checked for adjacent color-blind separation:
+// cedar, verdant, tertiary, ink. Every chart also carries a legend and direct labels.
+const SERIES = ['rgb(var(--accent-cedar))', 'rgb(var(--accent-verdant))', 'rgb(var(--text-tertiary))', 'rgb(var(--surface-ink))'];
+const STATUS_COLOR: Record<string, string> = { open: SERIES[3], won: SERIES[1], lost: SERIES[2] };
+
+const EMPTY_FILTERS = { year: '', month: '', rep: '', region: '', stage: '', status: '' };
+type Filters = typeof EMPTY_FILTERS;
+
+function money(cents: number | null): string {
+  if (cents === null) return 'None';
+  const dollars = cents / 100;
+  if (dollars >= 1_000_000) return `$${(dollars / 1_000_000).toFixed(1)}M`;
+  if (dollars >= 1_000) return `$${(dollars / 1_000).toFixed(1)}K`;
+  return `$${Math.round(dollars)}`;
+}
+
+function percent(value: number | null): string {
+  return value === null ? 'None' : `${(value * 100).toFixed(1)}%`;
+}
+
+export function DashboardWing({ brand, brandName, onOpen }: { brand: CrmBrand; brandName: string; onOpen: (wing: Jump) => void }) {
+  const [section, setSection] = useState<Section>('overview');
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [body, setBody] = useState<DashboardBody | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancel = false;
+    const params = new URLSearchParams({ brand });
+    for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
+    setFailed(false);
+    fetch(`/api/admin/crm/dashboard?${params.toString()}`, { headers: { 'x-cedargrowth-crm': '1' }, credentials: 'same-origin' })
+      .then((res) => res.json())
+      .then((json: DashboardBody) => { if (!cancel) setBody(json); })
+      .catch(() => { if (!cancel) setFailed(true); });
+    return () => { cancel = true; };
+  }, [brand, filters]);
+
+  if (failed) return <Notice text="The dashboard could not be read. Try again in a moment." />;
+  if (!body) return <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Loading dashboard</p>;
+  if (body.configured === false || !body.dashboard) return <Notice text={body.reason || 'CRM storage is not configured.'} />;
+
+  const data = body.dashboard;
+  const set = (key: keyof Filters) => (value: string) => setFilters((current) => ({ ...current, [key]: value }));
+  const filtered = Object.values(filters).some(Boolean);
+  const empty = data.kpis.deals === 0 && data.kpis.accounts === 0;
+
+  const filterPanel = (
+    <div className="flex flex-col gap-4">
+      <FilterSelect label="Year" value={filters.year} onChange={set('year')} options={data.options.years.map((year) => ({ value: String(year), label: String(year) }))} />
+      <FilterSelect label="Month" value={filters.month} onChange={set('month')} options={MONTH_LABELS.map((label, index) => ({ value: String(index + 1), label }))} />
+      <FilterSelect label="Sales rep" value={filters.rep} onChange={set('rep')} options={data.options.reps.map((rep) => ({ value: rep, label: rep }))} />
+      <FilterSelect label="Region" value={filters.region} onChange={set('region')} options={data.options.regions.map((region) => ({ value: region, label: region }))} />
+      <FilterSelect label="Account type" value="" onChange={() => {}} options={[]} disabled />
+      <FilterSelect label="Lead source" value="" onChange={() => {}} options={[]} disabled />
+      <FilterSelect label="Stage" value={filters.stage} onChange={set('stage')} options={OPPORTUNITY_STAGES.map((stage) => ({ value: stage, label: STAGE_LABELS[stage] }))} />
+      <FilterSelect label="Status" value={filters.status} onChange={set('status')} options={DEAL_STATUSES.map((status) => ({ value: status, label: STATUS_LABELS[status] }))} />
+      {filtered ? (
+        <button type="button" onClick={() => setFilters(EMPTY_FILTERS)} className="w-fit border border-hairline-inverse px-3 py-2 font-mono text-specimen uppercase tracking-specimen text-inverse">
+          Clear filters
+        </button>
+      ) : null}
+      {body.sources ? (
+        <ul className="flex flex-col gap-2 border-t border-hairline-inverse pt-4" aria-label="Data sources">
+          <SourceLine name="CRM" source={body.sources.crm} />
+          <SourceLine name="Canix" source={body.sources.canix} />
+          <SourceLine name="Hoodie" source={body.sources.hoodie} />
+        </ul>
+      ) : null}
+    </div>
+  );
+
+  return (
+    <section aria-label={`${brandName} dashboard`} className="grid grid-cols-1 gap-4 lg:grid-cols-[13rem_minmax(0,1fr)_14rem]">
+      <nav aria-label="Dashboard sections" className="bg-ink lg:min-h-full">
+        <ul className="flex overflow-x-auto lg:flex-col lg:py-6">
+          {SECTIONS.map((item) => (
+            <li key={item.id} className="shrink-0">
+              <button
+                type="button"
+                aria-pressed={section === item.id}
+                onClick={() => setSection(item.id)}
+                className={`w-full whitespace-nowrap border-b-2 px-4 py-3 text-left font-sans text-caption lg:border-b-0 lg:border-l-2 lg:px-5 ${section === item.id ? 'border-cedar bg-parchment text-primary' : 'border-transparent text-inverse'}`}
+              >
+                {item.label}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </nav>
+
+      <div className="flex min-w-0 flex-col gap-4">
+        <details className="bg-ink p-4 text-inverse lg:hidden">
+          <summary className="cursor-pointer font-mono text-specimen uppercase tracking-specimen">Filters{filtered ? ' (on)' : ''}</summary>
+          <div className="mt-4">{filterPanel}</div>
+        </details>
+
+        <dl className="grid grid-cols-2 gap-4 md:grid-cols-5">
+          <Kpi label="Deals" value={String(data.kpis.deals)} />
+          <Kpi label="Total deal value" value={money(data.kpis.totalValueCents)} note="Forecast" />
+          <Kpi label="Win rate" value={percent(data.kpis.winRate)} />
+          <Kpi label="Avg response time" value="Not tracked" muted />
+          <Kpi label="Avg deal value" value={money(data.kpis.avgDealCents)} note="Forecast" />
+        </dl>
+
+        {empty ? (
+          <div className="flex flex-col gap-3 border border-hairline bg-clinical p-4 md:flex-row md:items-center md:justify-between">
+            <p className="text-body-m text-secondary">
+              {filtered ? 'Nothing matches these filters.' : `No ${brandName} records yet. Charts fill in as deals are added and when Canix and Hoodie connect.`}
+            </p>
+            {!filtered ? (
+              <div className="flex shrink-0 gap-3">
+                <button type="button" onClick={() => onOpen('accounts')} className="border border-ink bg-ink px-4 py-2 font-mono text-specimen uppercase text-inverse">Add account</button>
+                <button type="button" onClick={() => onOpen('pipeline')} className="border border-ink px-4 py-2 font-mono text-specimen uppercase text-primary">Add deal</button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {section === 'overview' ? (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <Card title="Deals by account type">
+              <NotTracked text="Account type arrives with Canix customer data." onOpen={() => onOpen('canix')} action="Canix status" />
+            </Card>
+            <Card title="Total deal value by status">
+              <Donut rows={data.byStatus} colorFor={(row) => STATUS_COLOR[row.key]} measure="cents" />
+            </Card>
+            <Card title="Deals by stage" className="md:col-span-2 xl:col-span-1 xl:row-span-2">
+              <Bars rows={data.byStage} />
+            </Card>
+            <Card title="Win rate vs total deal value by lead source" className="md:col-span-2">
+              <ScatterFrame message="Lead source arrives with Hoodie and Canix data." onOpen={() => onOpen('signals')} action="Hoodie signals" />
+            </Card>
+          </div>
+        ) : null}
+
+        {section === 'reps' ? (
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <Card title="Deals by sales rep" className="xl:col-span-2"><RepTable rows={data.byRep} /></Card>
+            <Card title="Total deal value by sales rep">
+              <Bars rows={data.byRep} measure="cents" empty="Assign a sales rep on each account to see this." />
+            </Card>
+            <Card title="Win rate by sales rep">
+              <Bars rows={data.byRep.filter((row) => row.winRate !== null).map((row) => ({ ...row, count: Math.round((row.winRate ?? 0) * 1000) / 10 }))} suffix="%" empty="No closed deals yet." />
+            </Card>
+          </div>
+        ) : null}
+
+        {section === 'accounts' ? (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <Card title="Deals by account type">
+              <NotTracked text="Account type arrives with Canix customer data." onOpen={() => onOpen('canix')} action="Canix status" />
+            </Card>
+            <Card title="Accounts by status">
+              <Donut rows={data.accountsByStatus} colorFor={(_, index) => SERIES[index % SERIES.length]} measure="count" />
+            </Card>
+            <Card title="Deals by region" className="md:col-span-2 xl:col-span-1">
+              <Bars rows={data.byRegion} empty="Add a city to each account to see regions." />
+            </Card>
+          </div>
+        ) : null}
+
+        {section === 'sources' ? (
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <Card title="Deals by lead source">
+              <NotTracked text="Lead source arrives with Hoodie and Canix data." onOpen={() => onOpen('signals')} action="Hoodie signals" />
+            </Card>
+            <Card title="Total deal value by lead source">
+              <NotTracked text="Lead source arrives with Hoodie and Canix data." onOpen={() => onOpen('canix')} action="Canix status" />
+            </Card>
+            <Card title="Win rate vs total deal value by lead source" className="xl:col-span-2">
+              <ScatterFrame message="Each lead source becomes a point once source data is connected." onOpen={() => onOpen('signals')} action="Hoodie signals" />
+            </Card>
+          </div>
+        ) : null}
+
+        {section === 'timeline' ? (
+          <div className="grid grid-cols-1 gap-4">
+            <Card title={`Deals by expected close, ${data.monthsLabel}`} note={data.overdueOpen ? `${data.overdueOpen} open deals are past their close date` : undefined}>
+              <Columns rows={data.byMonth} measure="count" />
+            </Card>
+            <Card title={`Total deal value by expected close, ${data.monthsLabel}`}>
+              <Columns rows={data.byMonth} measure="cents" />
+            </Card>
+          </div>
+        ) : null}
+      </div>
+
+      <aside aria-label="Filters" className="hidden bg-ink p-5 text-inverse lg:block">{filterPanel}</aside>
+    </section>
+  );
+}
+
+function Notice({ text }: { text: string }) {
+  return <p className="border border-hairline bg-clinical px-4 py-3 text-body-m text-secondary">{text}</p>;
+}
+
+function Kpi({ label, value, note, muted }: { label: string; value: string; note?: string; muted?: boolean }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-1 border border-hairline bg-clinical px-3 py-5 text-center">
+      <dd className={`order-1 font-display tabular-nums ${muted ? 'text-heading-s-m md:text-heading-s text-tertiary' : 'text-heading-m-m md:text-heading-m text-primary'}`}>{value}</dd>
+      <dt className="order-2 text-caption text-secondary">{label}{note ? <span className="text-tertiary"> ({note})</span> : null}</dt>
+    </div>
+  );
+}
+
+function Card({ title, note, className = '', children }: { title: string; note?: string; className?: string; children: React.ReactNode }) {
+  return (
+    <article className={`flex min-w-0 flex-col gap-4 border border-hairline bg-clinical p-4 ${className}`}>
+      <header className="text-center">
+        <h2 className="font-display text-body-l-m md:text-body-l text-primary">{title}</h2>
+        {note ? <p className="text-caption text-tertiary">{note}</p> : null}
+      </header>
+      {children}
+    </article>
+  );
+}
+
+function EmptyChart({ text }: { text: string }) {
+  return <p className="flex min-h-40 flex-1 items-center justify-center border border-dashed border-hairline px-4 text-center text-caption text-tertiary">{text}</p>;
+}
+
+function NotTracked({ text, action, onOpen }: { text: string; action: string; onOpen: () => void }) {
+  return (
+    <div className="flex min-h-40 flex-1 flex-col items-center justify-center gap-3 border border-dashed border-hairline px-4 text-center">
+      <p className="rounded-chip border border-attention px-2 py-0.5 font-mono text-specimen uppercase tracking-specimen text-secondary">Not tracked yet</p>
+      <p className="text-caption text-tertiary">{text}</p>
+      <button type="button" onClick={onOpen} className="cedar-underline font-mono text-specimen uppercase tracking-specimen">{action}</button>
+    </div>
+  );
+}
+
+function Donut({ rows, colorFor, measure }: { rows: Bucket[]; colorFor: (row: Bucket, index: number) => string; measure: 'count' | 'cents' }) {
+  const valueOf = (row: Bucket) => (measure === 'cents' ? row.cents ?? 0 : row.count);
+  const total = rows.reduce((sum, row) => sum + valueOf(row), 0);
+  if (total === 0) return <EmptyChart text={measure === 'cents' ? 'No deal values entered yet.' : 'No records yet.'} />;
+  const radius = 42;
+  const circumference = 2 * Math.PI * radius;
+  let offset = 0;
+  return (
+    <div className="flex flex-col items-center gap-4">
+      <svg viewBox="0 0 120 120" className="h-40 w-40" role="img" aria-label={rows.map((row) => `${row.label} ${measure === 'cents' ? money(row.cents) : row.count}`).join(', ')}>
+        <g transform="rotate(-90 60 60)">
+          {rows.map((row, index) => {
+            const value = valueOf(row);
+            if (!value) return null;
+            const length = (value / total) * circumference;
+            const segment = (
+              <circle key={row.key} cx="60" cy="60" r={radius} fill="none" stroke={colorFor(row, index)} strokeWidth="18"
+                strokeDasharray={`${Math.max(length - 2, 0.5)} ${circumference}`} strokeDashoffset={-offset}>
+                <title>{`${row.label}: ${measure === 'cents' ? money(row.cents) : row.count} (${Math.round((value / total) * 100)}%)`}</title>
+              </circle>
+            );
+            offset += length;
+            return segment;
+          })}
+        </g>
+      </svg>
+      <ul className="flex flex-wrap justify-center gap-x-4 gap-y-1">
+        {rows.map((row, index) => (
+          <li key={row.key} className="flex items-center gap-2 text-caption text-secondary">
+            <span className="inline-block h-2 w-2" style={{ background: colorFor(row, index) }} aria-hidden="true" />
+            {row.label} <span className="font-mono text-specimen tabular-nums text-primary">{measure === 'cents' ? money(row.cents) : row.count} ({Math.round((valueOf(row) / total) * 100)}%)</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function Bars({ rows, measure = 'count', suffix = '', empty = 'No deals yet.' }: { rows: Bucket[]; measure?: 'count' | 'cents'; suffix?: string; empty?: string }) {
+  const valueOf = (row: Bucket) => (measure === 'cents' ? row.cents ?? 0 : row.count);
+  const max = Math.max(0, ...rows.map(valueOf));
+  if (max === 0) return <EmptyChart text={empty} />;
+  return (
+    <ul className="flex flex-1 flex-col justify-around gap-3">
+      {rows.map((row) => {
+        const label = measure === 'cents' ? money(row.cents) : `${valueOf(row)}${suffix}`;
+        return (
+          <li key={row.key} className="grid grid-cols-[6.5rem_1fr] items-center gap-3" title={`${row.label}: ${label}`}>
+            <span className="truncate text-right text-caption text-secondary">{row.label}</span>
+            <span className="flex items-center gap-2">
+              <span className="h-8 bg-ink" style={{ width: `${(valueOf(row) / max) * 85}%` }} aria-hidden="true" />
+              <span className="font-mono text-specimen tabular-nums text-primary">{label}</span>
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function Columns({ rows, measure }: { rows: Bucket[]; measure: 'count' | 'cents' }) {
+  const valueOf = (row: Bucket) => (measure === 'cents' ? row.cents ?? 0 : row.count);
+  const max = Math.max(0, ...rows.map(valueOf));
+  if (max === 0) return <EmptyChart text="No deals have an expected close date in this range yet." />;
+  return (
+    <ul className="grid h-48 grid-cols-12 items-end gap-1 md:gap-2">
+      {rows.map((row) => {
+        const label = measure === 'cents' ? (row.cents === null ? '' : money(row.cents)) : row.count ? String(row.count) : '';
+        return (
+          <li key={row.key} className="flex h-full min-w-0 flex-col items-center justify-end gap-1" title={`${row.label}: ${row.count} deals, ${money(row.cents)}`}>
+            <span className="font-mono text-specimen tabular-nums text-primary">{label}</span>
+            <span className="w-full bg-ink" style={{ height: `${(valueOf(row) / max) * 75}%` }} aria-hidden="true" />
+            <span className="truncate font-mono text-specimen text-tertiary">{row.label}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function ScatterFrame({ message, action, onOpen }: { message: string; action: string; onOpen: () => void }) {
+  return (
+    <div className="relative mb-6 ml-4 min-h-56 flex-1 border-b border-l border-hairline">
+      <span className="absolute -left-5 top-1/2 -translate-x-1/2 -translate-y-1/2 -rotate-90 whitespace-nowrap text-caption text-tertiary">Total deal value</span>
+      <span className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-caption text-tertiary">Win rate</span>
+      <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
+        <p className="rounded-chip border border-attention px-2 py-0.5 font-mono text-specimen uppercase tracking-specimen text-secondary">Not tracked yet</p>
+        <p className="text-caption text-tertiary">{message}</p>
+        <button type="button" onClick={onOpen} className="cedar-underline font-mono text-specimen uppercase tracking-specimen">{action}</button>
+      </div>
+    </div>
+  );
+}
+
+function RepTable({ rows }: { rows: RepRow[] }) {
+  if (!rows.length) return <EmptyChart text="No deals yet. Assign a sales rep on each account." />;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-left">
+        <thead>
+          <tr className="font-mono text-specimen uppercase tracking-specimen text-tertiary">
+            <th className="py-2 font-normal">Sales rep</th>
+            <th className="py-2 text-right font-normal">Deals</th>
+            <th className="py-2 text-right font-normal">Deal value</th>
+            <th className="py-2 text-right font-normal">Won</th>
+            <th className="py-2 text-right font-normal">Lost</th>
+            <th className="py-2 text-right font-normal">Win rate</th>
+          </tr>
+        </thead>
+        <tbody className="font-mono text-data tabular-nums text-primary">
+          {rows.map((row) => (
+            <tr key={row.key} className="border-t border-hairline">
+              <td className="py-2 font-sans text-body-m">{row.label}</td>
+              <td className="py-2 text-right">{row.count}</td>
+              <td className="py-2 text-right">{money(row.cents)}</td>
+              <td className="py-2 text-right">{row.won}</td>
+              <td className="py-2 text-right">{row.lost}</td>
+              <td className="py-2 text-right">{percent(row.winRate)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function FilterSelect({ label, value, onChange, options, disabled }: { label: string; value: string; onChange: (value: string) => void; options: { value: string; label: string }[]; disabled?: boolean }) {
+  return (
+    <label className="flex flex-col gap-1 text-caption text-inverse">
+      {label}
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary disabled:bg-bone disabled:text-tertiary"
+      >
+        <option value="">{disabled ? 'Not tracked yet' : 'All'}</option>
+        {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function SourceLine({ name, source }: { name: string; source: Source }) {
+  return (
+    <li className="flex items-center justify-between gap-2 font-mono text-specimen uppercase tracking-specimen">
+      <span>{name}</span>
+      <span className={`rounded-chip border px-2 py-0.5 ${source.connected ? 'border-pass text-inverse' : 'border-attention text-inverse'}`}>
+        {source.connected ? 'Connected' : 'Not connected'}
+      </span>
+    </li>
+  );
+}
