@@ -28,6 +28,32 @@ export type ImportKind = (typeof IMPORT_KINDS)[number];
 export const IMPORT_BATCH = 50;
 export const IMPORT_MAX_ROWS = 2000;
 
+export function chunkImportRows<T>(rows: readonly T[], size = IMPORT_BATCH): T[][] {
+  const limit = Math.max(1, Math.floor(size));
+  const chunks: T[][] = [];
+  for (let i = 0; i < rows.length; i += limit) chunks.push(rows.slice(i, i + limit));
+  return chunks;
+}
+
+export function mergeBatchOutcomes<T extends { line: number }>(
+  batch: readonly T[],
+  outcomes: readonly { line?: number; status: 'ready' | 'created' | 'updated' | 'unmatched' | 'skipped' | 'error'; reason?: string; orderId?: string }[] | null,
+  failure?: string,
+): { line: number; status: 'ready' | 'created' | 'updated' | 'unmatched' | 'skipped' | 'error'; reason?: string; orderId?: string }[] {
+  if (failure) return batch.map((row) => ({ line: row.line, status: 'error', reason: failure }));
+  const byLine = new Map<number, { line?: number; status: 'ready' | 'created' | 'updated' | 'unmatched' | 'skipped' | 'error'; reason?: string; orderId?: string }>();
+  for (const outcome of outcomes ?? []) {
+    if (typeof outcome.line === 'number') byLine.set(outcome.line, outcome);
+  }
+  return batch.map((row, index) => {
+    const matched = byLine.get(row.line);
+    if (matched) return { ...matched, line: row.line };
+    const sameIndex = outcomes?.[index];
+    if (sameIndex && typeof sameIndex.line !== 'number') return { ...sameIndex, line: row.line };
+    return { line: row.line, status: 'error', reason: 'This row did not come back from the import.' };
+  });
+}
+
 export type ImportRow = { line: number; record?: Record<string, unknown>; accountName?: string; accountLicense?: string; error?: string };
 
 // RFC 4180 style parser: quoted fields, doubled quotes, commas and newlines inside quotes, CRLF, BOM.
@@ -202,14 +228,15 @@ export function parseMoney(value: string): number | null | 'invalid' {
   return Math.round(Number(v) * 100);
 }
 
-export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[]; missing: string[]; unmatched: string[] } {
+export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[]; missing: string[]; unmatched: string[]; truncated: boolean; rowCount: number } {
   const [header = [], ...body] = table;
   const { columns, unmatched } = matchHeaders(kind, header);
   const required = kind === 'accounts' ? ['displayName'] : kind === 'orders' ? ['orderRef', 'retailerName'] : kind === 'retailers' ? ['licenseNumber', 'name', 'county'] : kind === 'contacts' ? ['name'] : ['accountName', 'name'];
   const missing = required.filter((key) => !(key in columns)).map((key) => ({ displayName: 'Account name', accountName: 'Account', name: kind === 'contacts' ? 'Contact name' : 'Name', orderRef: 'Order ID', retailerName: 'Retailer', licenseNumber: 'License number', county: 'County' }[key] ?? key));
   if (kind === 'contacts' && !('accountName' in columns) && !('accountLicense' in columns)) missing.push('Account name or Account license');
-  if (missing.length) return { rows: [], missing, unmatched };
+  if (missing.length) return { rows: [], missing, unmatched, truncated: body.length > IMPORT_MAX_ROWS, rowCount: body.length };
     const cell = (row: string[], key: string) => (key in columns ? (row[columns[key]] ?? '').trim() : '');
+  const truncated = body.length > IMPORT_MAX_ROWS;
   const rows = body.slice(0, IMPORT_MAX_ROWS).map((row, index): ImportRow => {
     const line = index + 2;
     if (kind === 'orders') {
@@ -342,7 +369,7 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
     if (record.stage === 'lost' && !record.lossReason) return { line, error: 'A lost deal needs a loss reason column.' };
     return { line, record, accountName };
   });
-  return { rows, missing: [], unmatched };
+  return { rows, missing: [], unmatched, truncated, rowCount: body.length };
 }
 
 export const TEMPLATES: Record<ImportKind, string> = {
