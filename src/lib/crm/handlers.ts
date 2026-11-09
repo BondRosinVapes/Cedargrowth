@@ -36,11 +36,12 @@ import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
 import { monthStarts, parseCapacityWrite, productionForecast, stageWinRates } from './forecast';
 import { buildDigest, digestConfigured, digestFromAddress, digestRecipients, digestSummary, nyWeek, renderDigestHtml, renderDigestText, secretMatches } from './digest';
-import { sendDigestEmail } from '@/lib/email';
+import { readResendEvent, sendDigestEmail, sendReorderLink } from '@/lib/email';
 import { FIELD_BUCKET, READ_URL_SECONDS, isProductLine, isVisitOutcome, mediaPath, roundLocation, validateMediaUpload } from './field';
 import { BATCH_MISS, COA_BUCKET, COA_READ_SECONDS, LINK_MISS, clientIp, coaPath, consumeRate, parseBatchWrite, parseBuyer, parseReorderLines, productIdOk, tokenShapeOk, validateCoaUpload } from './reorder';
 import { PRODUCTS } from '@/lib/products';
-import { sendReorderLink, sendReorderRequest } from '@/lib/email';
+import { sendReorderRequest } from '@/lib/email';
+import { EMAIL_STATUS_CAP, EMAIL_STATUS_DAYS, emailRefreshLimited, emailStatusLabel, knownEmailEvent } from './emailStatus';
 import { getSupabaseServerClient } from '@/lib/supabase';
 import { IMPORT_BATCH, IMPORT_KINDS, type ImportKind } from './importer';
 
@@ -992,7 +993,18 @@ export async function handleReorderLinks(ctx: CrmContext, method: 'GET' | 'POST'
     if (!parseUuid(accountId)) return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
     const rows = await ctx.store.listReorderLinks(auth.brand, accountId);
     if (rows.state !== 'ok') return storageBody(auth.brand, rows.state === 'rejected' || rows.state === 'missing' ? 'unavailable' : rows.state);
-    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, links: rows.value.map((row) => ({ id: row.id, accountId: row.accountId, expiresAt: row.expiresAt, revokedAt: row.revokedAt, createdAt: row.createdAt })) } };
+    const since = new Date(Date.now() - EMAIL_STATUS_DAYS * 86400000).toISOString();
+    const logs = await ctx.store.listEmailLogs(auth.brand, since, accountId);
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        configured: Boolean(process.env.RESEND_API_KEY),
+        brand: auth.brand,
+        links: rows.value.map((row) => ({ id: row.id, accountId: row.accountId, expiresAt: row.expiresAt, revokedAt: row.revokedAt, createdAt: row.createdAt })),
+        emailStatus: logs.state === 'ok' ? logs.value.filter((row) => row.kind === 'reorder_link' && row.brand === auth.brand).map(emailStatusRow) : [],
+      },
+    };
   }
   const body = await readBody(ctx.request);
   if (isCrmResult(body)) return body;
@@ -1016,12 +1028,33 @@ export async function handleReorderLinks(ctx: CrmContext, method: 'GET' | 'POST'
   const url = `${origin}/reorder/${created.value.token}`;
   const email = typeof record.email === 'string' ? record.email.trim() : '';
   let emailed = false;
+  let logFailed = false;
   if (email) {
     const account = await ctx.store.listAccounts(auth.brand, { q: null, status: null });
     const name = account.state === 'ok' ? account.value.find((row) => row.id === accountId)?.displayName || 'Account' : 'Account';
-    emailed = await sendReorderLink({ to: email, accountName: name, url });
+    const mailed = await deliverReorder({ to: email, accountName: name, url });
+    emailed = mailed.sent && Boolean(mailed.id);
+    if (mailed.id) {
+      const logged = await ctx.store.insertEmailLog(auth.brand, auth.actorId, { kind: 'reorder_link', resendId: mailed.id, recipient: email, accountId });
+      logFailed = logged.state !== 'ok';
+    } else if (mailed.sent) logFailed = true;
   }
-  return { status: 201, body: { ok: true, configured: true, brand: auth.brand, url, expiresAt: created.value.link.expiresAt, emailed } };
+  const since = new Date(Date.now() - EMAIL_STATUS_DAYS * 86400000).toISOString();
+  const logs = await ctx.store.listEmailLogs(auth.brand, since, accountId);
+  return {
+    status: 201,
+    body: {
+      ok: true,
+      configured: true,
+      brand: auth.brand,
+      url,
+      expiresAt: created.value.link.expiresAt,
+      emailed,
+      logFailed,
+      reason: logFailed ? 'The email was sent. The status log was not saved.' : undefined,
+      emailStatus: logs.state === 'ok' ? logs.value.filter((row) => row.kind === 'reorder_link').map(emailStatusRow) : [],
+    },
+  };
 }
 
 function catalog(accountName: string, batches: { id: string; productId: string; batchNumber: string; labName: string; testedOn: string }[]) {
@@ -1134,8 +1167,22 @@ export async function handleTransparencyBatch(store: CrmStore, request: Request)
 }
 
 let deliverDigest = sendDigestEmail;
-export function useDigestDelivery(fn: ((data: { to: string[]; from: string; subject: string; html: string; text: string }) => Promise<boolean>) | null): void {
+export function useDigestDelivery(fn: typeof sendDigestEmail | null): void {
   deliverDigest = fn ?? sendDigestEmail;
+}
+
+let deliverReorder = sendReorderLink;
+export function useReorderDelivery(fn: typeof sendReorderLink | null): void {
+  deliverReorder = fn ?? sendReorderLink;
+}
+
+let lookupEvent = readResendEvent;
+export function useEmailLookup(fn: typeof readResendEvent | null): void {
+  lookupEvent = fn ?? readResendEvent;
+}
+
+function emailStatusRow(row: { recipient: string; lastEvent: string | null; lastEventAt: string | null; brand: CrmBrand }) {
+  return { recipient: row.recipient, label: emailStatusLabel(row.lastEvent), lastEventAt: row.lastEventAt, brand: row.brand };
 }
 
 async function loadDigest(store: CrmStore, brand: CrmBrand, nowMs: number): Promise<{ model: ReturnType<typeof buildDigest> } | CrmResult> {
@@ -1181,6 +1228,8 @@ export async function handleDigestPreview(ctx: CrmContext): Promise<CrmResult> {
   if ('status' in loaded) return loaded;
   const prior = await ctx.store.findDigestSend(auth.brand, digestSummary(loaded.model.weekKey));
   if (prior.state !== 'ok') return storageBody(auth.brand, prior.state === 'rejected' || prior.state === 'missing' ? 'unavailable' : prior.state);
+  const since = new Date(Date.now() - EMAIL_STATUS_DAYS * 86400000).toISOString();
+  const logs = await ctx.store.listEmailLogs(auth.brand, since);
   return {
     status: 200,
     body: {
@@ -1191,6 +1240,7 @@ export async function handleDigestPreview(ctx: CrmContext): Promise<CrmResult> {
       weekLabel: loaded.model.weekLabel,
       html: renderDigestHtml(loaded.model),
       text: renderDigestText(loaded.model),
+      statuses: logs.state === 'ok' ? logs.value.filter((row) => row.kind === 'digest' && row.brand === auth.brand).map(emailStatusRow) : [],
     },
   };
 }
@@ -1231,10 +1281,47 @@ export async function handleDigestSend(ctx: CrmContext): Promise<CrmResult> {
     html: renderDigestHtml(loaded.model),
     text: renderDigestText(loaded.model),
   });
-  if (!sent) return { status: 502, body: { ok: false, sent: false, reason: 'The digest was not sent.' } };
+  if (!sent.sent) return { status: 502, body: { ok: false, sent: false, reason: 'The digest was not sent.' } };
+  let logFailed = sent.messages.length !== recipients.length;
+  for (const message of sent.messages) {
+    if (!message.id) { logFailed = true; continue; }
+    const logged = await ctx.store.insertEmailLog(brand, actor, { kind: 'digest', resendId: message.id, recipient: message.recipient, accountId: null });
+    if (logged.state !== 'ok') logFailed = true;
+  }
   const saved = await ctx.store.recordDigest(brand, actor, summary);
   if (saved.state !== 'ok') return storageBody(brand, saved.state === 'rejected' || saved.state === 'missing' ? 'unavailable' : saved.state);
-  return { status: 200, body: { ok: true, sent: true, weekKey: loaded.model.weekKey } };
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      sent: true,
+      weekKey: loaded.model.weekKey,
+      logFailed,
+      reason: logFailed ? 'The email was sent. The status log was not saved.' : undefined,
+    },
+  };
+}
+
+export async function handleEmailStatusRefresh(ctx: CrmContext): Promise<CrmResult> {
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Only an owner or administrator can refresh email status.' } };
+  if (!process.env.RESEND_API_KEY) return { status: 200, body: { ok: true, configured: false, updated: 0, reason: 'Email is not configured' } };
+  if (emailRefreshLimited(`${auth.brand}:${auth.actorId}`, Date.now())) return { status: 429, body: { ok: false, reason: 'Too many status checks. Wait and try again.' } };
+  const since = new Date(Date.now() - EMAIL_STATUS_DAYS * 86400000).toISOString();
+  const rows = await ctx.store.listEmailLogs(auth.brand, since);
+  if (rows.state !== 'ok') return storageBody(auth.brand, rows.state === 'rejected' || rows.state === 'missing' ? 'unavailable' : rows.state);
+  const batch = rows.value.filter((row) => row.brand === auth.brand).slice(0, EMAIL_STATUS_CAP);
+  const observed = new Date().toISOString();
+  let updated = 0;
+  for (const row of batch) {
+    const event = knownEmailEvent(await lookupEvent(row.resendId));
+    if (!event) continue;
+    const saved = await ctx.store.updateEmailLog(auth.brand, row.id, event, observed);
+    if (saved.state === 'ok' && saved.value.brand === auth.brand) updated += 1;
+  }
+  return { status: 200, body: { ok: true, configured: true, updated, capped: rows.value.length > EMAIL_STATUS_CAP } };
 }
 
 export function staffAudience(hasCedarSalesMembership: boolean): Audience {
