@@ -142,6 +142,16 @@ if [ "$EXEC" != "false,true,false" ]; then
   exit 1
 fi
 echo 'ok: intake log is writable only through the service role function'
+AGENT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10'::uuid, '2026-11-09T18:00:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"Agent Shop\",\"status\":\"prospect\",\"account_type\":\"adult_use_dispensary\",\"city\":\"Buffalo\",\"county\":\"Erie\",\"license_number\":\"AGENT-LIC-1\"},{\"op\":\"contact\",\"index\":1,\"name\":\"Agent Buyer\",\"email\":\"buyer@agent.test\",\"account_license\":\"AGENT-LIC-1\"},{\"op\":\"note\",\"index\":2,\"body\":\"Plain note\",\"account_license\":\"AGENT-LIC-1\"}]'::jsonb)::text;")
+AGENT_REPLAY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10'::uuid, '2026-11-09T18:00:00Z', '[]'::jsonb)->>'code';")
+AGENT_DUPE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa11'::uuid, '2026-11-09T18:05:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"Copy\",\"status\":\"prospect\",\"county\":\"Erie\",\"license_number\":\"agent-lic-1\"}]'::jsonb)::text;")
+AGENT_COUNTS=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_accounts where license_ref = 'AGENT-LIC-1') || ',' || (select count(*) from public.crm_contacts where account_id in (select id from public.crm_accounts where license_ref = 'AGENT-LIC-1')) || ',' || (select count(*) from public.crm_notes where body = 'Plain note' and actor = 'CODEX agent') || ',' || (select count(*) from public.crm_activity where actor = 'CODEX agent' and source_request_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10') || ',' || (select preference from public.crm_contacts where name = 'Agent Buyer');")
+AGENT_GRANT=$(sudo -u postgres psql -d "$DB" -tA -c "select has_function_privilege('anon', 'public.crm_receive_agent_records(uuid, timestamptz, jsonb)', 'execute')::text || ',' || has_function_privilege('service_role', 'public.crm_receive_agent_records(uuid, timestamptz, jsonb)', 'execute')::text || ',' || has_table_privilege('service_role', 'public.crm_agent_requests', 'insert')::text;")
+if [ "$AGENT_REPLAY" != "replay" ] || [ "$AGENT_COUNTS" != "1,1,1,3,unspecified" ] || [ "$AGENT_GRANT" != "false,true,false" ] || ! printf '%s' "$AGENT" | grep -q '"accounts": 1' || ! printf '%s' "$AGENT_DUPE" | grep -q 'already exists'; then
+  echo "FAIL: agent intake ${AGENT} ${AGENT_REPLAY} ${AGENT_DUPE} ${AGENT_COUNTS} ${AGENT_GRANT}"
+  exit 1
+fi
+echo 'ok: agent intake writes one cedar account, contact, and note, then rejects replay and a duplicate license'
 expect_fail 'note delete after intake' "delete from public.crm_notes where body like 'TEST ONLY%';"
 
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${DB};" >/dev/null

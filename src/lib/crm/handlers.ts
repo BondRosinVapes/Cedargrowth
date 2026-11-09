@@ -40,6 +40,7 @@ import { COVERAGE_UPLOAD, NEEDS_HOODIE, NY_REGIONS } from './nyRegions';
 import { coverageLabel, territoryTiles, TERRITORY_METRICS, type TerritoryMetric } from './territory';
 import { nextBestActions, snoozeUntil } from './nextAction';
 import { INTAKE_MAX_BYTES, intakeSecrets, parseIntake, signIntake, signaturesMatch, takeIntakeRate, timestampFresh } from './intake';
+import { AGENT_ACTOR, AGENT_MAX_BYTES, AGENT_ROW_LIMIT, agentReady, agentSecret, agentSignatureOk, agentTimestampFresh, parseAgentEnvelope, parseAgentRow, type AgentOp } from './agentIntake';
 import { readResendEvent, sendDigestEmail, sendReorderLink } from '@/lib/email';
 import { FIELD_BUCKET, READ_URL_SECONDS, isProductLine, isVisitOutcome, mediaPath, roundLocation, validateMediaUpload } from './field';
 import { BATCH_MISS, COA_BUCKET, COA_READ_SECONDS, LINK_MISS, clientIp, coaPath, consumeRate, parseBatchWrite, parseBuyer, parseReorderLines, productIdOk, tokenShapeOk, validateCoaUpload } from './reorder';
@@ -1576,6 +1577,46 @@ export async function handleBondIntake(store: CrmStore, request: Request, option
     if (saved.state === 'absent') return { status: 503, body: { ok: false } };
     if (saved.state !== 'ok') return { status: 500, body: { ok: false } };
     return saved.value.duplicate ? { status: 200, body: { ok: true, duplicate: true } } : { status: 200, body: { ok: true } };
+  } catch {
+    return { status: 500, body: { ok: false } };
+  }
+}
+
+export async function handleAgentIntake(store: CrmStore, request: Request, options?: { nowMs?: number; env?: Record<string, string | undefined> }): Promise<IntakeHttpResult> {
+  const nowMs = options?.nowMs ?? Date.now();
+  const env = options?.env ?? process.env;
+  const secret = agentSecret(env);
+  if (!agentReady(env) || !secret) return { status: 503, body: { ok: false } };
+  const declared = Number(request.headers.get('content-length') || 0);
+  if (Number.isFinite(declared) && declared > AGENT_MAX_BYTES) return { status: 413, body: { ok: false } };
+  const rawBuffer = await request.arrayBuffer();
+  if (rawBuffer.byteLength > AGENT_MAX_BYTES) return { status: 413, body: { ok: false } };
+  const raw = new TextDecoder().decode(rawBuffer);
+  const stamp = request.headers.get('x-cg-timestamp');
+  const provided = request.headers.get('x-cg-signature') || '';
+  if (!agentTimestampFresh(stamp, nowMs) || !stamp) return { status: 401, body: { ok: false } };
+  if (!agentSignatureOk(secret, stamp, raw, provided)) return { status: 401, body: { ok: false } };
+  let parsed: unknown = null;
+  try { parsed = JSON.parse(raw); } catch { return { status: 400, body: { ok: false, fields: ['payload'] } }; }
+  const envelope = parseAgentEnvelope(parsed);
+  if (!envelope.ok) return { status: 400, body: { ok: false, fields: envelope.fields } };
+  const idempotency = parseUuid(request.headers.get('idempotency-key'));
+  if (!idempotency || idempotency !== envelope.requestId) return { status: 400, body: { ok: false, fields: ['Idempotency-Key'] } };
+  if (envelope.rows.length > AGENT_ROW_LIMIT) return { status: 413, body: { ok: false } };
+  const ops: AgentOp[] = [];
+  const rejected: { index: number; reason: string; fields?: string[] }[] = [];
+  envelope.rows.forEach((row, index) => {
+    const parsedRow = parseAgentRow(index, row);
+    if ('op' in parsedRow) ops.push(parsedRow.op);
+    else rejected.push({ index: parsedRow.index, reason: parsedRow.reason, ...(parsedRow.fields ? { fields: parsedRow.fields } : {}) });
+  });
+  try {
+    const saved = await store.receiveAgentRecords({ requestId: envelope.requestId, receivedAt: new Date(nowMs).toISOString(), ops });
+    if (saved.state === 'absent') return { status: 503, body: { ok: false } };
+    if (saved.state !== 'ok') return { status: 500, body: { ok: false } };
+    if (saved.value.code === 'replay') return { status: 409, body: { ok: false } };
+    if (saved.value.code === 'rate') return { status: 429, body: { ok: false }, retryAfter: saved.value.retryAfter };
+    return { status: 200, body: { ok: true, actor: AGENT_ACTOR, created: saved.value.created, skipped: saved.value.skipped, failed: [...rejected, ...saved.value.failed] } };
   } catch {
     return { status: 500, body: { ok: false } };
   }
