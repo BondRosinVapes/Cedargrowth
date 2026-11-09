@@ -23,12 +23,12 @@ import {
   type ProductLine,
 } from './engine';
 
-export const IMPORT_KINDS = ['accounts', 'deals', 'orders', 'retailers'] as const;
+export const IMPORT_KINDS = ['accounts', 'deals', 'orders', 'retailers', 'contacts'] as const;
 export type ImportKind = (typeof IMPORT_KINDS)[number];
-export const IMPORT_BATCH = 100;
+export const IMPORT_BATCH = 50;
 export const IMPORT_MAX_ROWS = 2000;
 
-export type ImportRow = { line: number; record?: Record<string, unknown>; accountName?: string; error?: string };
+export type ImportRow = { line: number; record?: Record<string, unknown>; accountName?: string; accountLicense?: string; error?: string };
 
 // RFC 4180 style parser: quoted fields, doubled quotes, commas and newlines inside quotes, CRLF, BOM.
 export function parseCsv(text: string): string[][] {
@@ -72,6 +72,24 @@ const ACCOUNT_HEADERS: Record<string, string[]> = {
   licenseRef: ['license', 'license number', 'license no', 'license ref', 'license id'],
   licenseExpiry: ['license expiry', 'license expiration', 'expiration', 'expires', 'expiry'],
   notes: ['notes', 'note', 'comments'],
+  // Kept as labeled lines in the account notes. County is also stored on the account.
+  address: ['address', 'street', 'street address'],
+  zip: ['zip', 'zip code', 'postal code'],
+  region: ['region', 'region area', 'market region'],
+  phone: ['phone', 'store phone', 'account phone'],
+  email: ['email', 'store email', 'account email'],
+  website: ['website', 'url', 'web'],
+  operating: ['operating', 'operating status'],
+  licenseStatus: ['source status', 'license status'],
+};
+
+const CONTACT_HEADERS: Record<string, string[]> = {
+  name: ['name', 'contact', 'contact name', 'full name'],
+  email: ['email', 'contact email', 'email address'],
+  phone: ['phone', 'contact phone', 'mobile', 'cell'],
+  title: ['title', 'role', 'job title', 'contact title'],
+  accountName: ['account name', 'account', 'store', 'dispensary', 'retailer'],
+  accountLicense: ['account license', 'account id', 'license', 'license number'],
 };
 
 const ORDER_HEADERS: Record<string, string[]> = {
@@ -112,7 +130,7 @@ const DEAL_HEADERS: Record<string, string[]> = {
 };
 
 export function matchHeaders(kind: ImportKind, header: string[]): { columns: Record<string, number>; unmatched: string[] } {
-  const table = kind === 'accounts' ? ACCOUNT_HEADERS : kind === 'orders' ? ORDER_HEADERS : kind === 'retailers' ? RETAILER_HEADERS : DEAL_HEADERS;
+  const table = kind === 'accounts' ? ACCOUNT_HEADERS : kind === 'orders' ? ORDER_HEADERS : kind === 'retailers' ? RETAILER_HEADERS : kind === 'contacts' ? CONTACT_HEADERS : DEAL_HEADERS;
   const columns: Record<string, number> = {};
   const unmatched: string[] = [];
   header.forEach((raw, index) => {
@@ -137,6 +155,9 @@ const TYPE_SYNONYMS: Record<string, (typeof ACCOUNT_TYPES)[number]> = {
   'adult use retail dispensary': 'adult_use_dispensary', caurd: 'adult_use_dispensary', aurd: 'adult_use_dispensary',
   micro: 'microbusiness', 'micro business': 'microbusiness', distribution: 'distributor', ro: 'registered_organization',
   'medical dispensary': 'registered_organization', processing: 'processor', manufacturer: 'processor', cultivation: 'cultivator', grower: 'cultivator',
+  'adult use retail dispensary license': 'adult_use_dispensary', 'adult use conditional retail dispensary license': 'adult_use_dispensary',
+  'adult use dispensary': 'adult_use_dispensary', 'adult use microbusiness license': 'microbusiness', 'microbusiness retail': 'microbusiness',
+  'adult use registered organization dispensary license': 'registered_organization',
 };
 const SOURCE_SYNONYMS: Record<string, (typeof LEAD_SOURCES)[number]> = {
   'leaf link': 'leaflink', 'trade show': 'trade_show', tradeshow: 'trade_show', event: 'trade_show', expo: 'trade_show',
@@ -184,8 +205,9 @@ export function parseMoney(value: string): number | null | 'invalid' {
 export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[]; missing: string[]; unmatched: string[] } {
   const [header = [], ...body] = table;
   const { columns, unmatched } = matchHeaders(kind, header);
-  const required = kind === 'accounts' ? ['displayName'] : kind === 'orders' ? ['orderRef', 'retailerName'] : kind === 'retailers' ? ['licenseNumber', 'name', 'county'] : ['accountName', 'name'];
-  const missing = required.filter((key) => !(key in columns)).map((key) => ({ displayName: 'Account name', accountName: 'Account', name: 'Name', orderRef: 'Order ID', retailerName: 'Retailer', licenseNumber: 'License number', county: 'County' }[key] ?? key));
+  const required = kind === 'accounts' ? ['displayName'] : kind === 'orders' ? ['orderRef', 'retailerName'] : kind === 'retailers' ? ['licenseNumber', 'name', 'county'] : kind === 'contacts' ? ['name'] : ['accountName', 'name'];
+  const missing = required.filter((key) => !(key in columns)).map((key) => ({ displayName: 'Account name', accountName: 'Account', name: kind === 'contacts' ? 'Contact name' : 'Name', orderRef: 'Order ID', retailerName: 'Retailer', licenseNumber: 'License number', county: 'County' }[key] ?? key));
+  if (kind === 'contacts' && !('accountName' in columns) && !('accountLicense' in columns)) missing.push('Account name or Account license');
   if (missing.length) return { rows: [], missing, unmatched };
     const cell = (row: string[], key: string) => (key in columns ? (row[columns[key]] ?? '').trim() : '');
   const rows = body.slice(0, IMPORT_MAX_ROWS).map((row, index): ImportRow => {
@@ -262,13 +284,38 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
       const expiry = parseDate(cell(row, 'licenseExpiry'));
       if (expiry === 'invalid') return { line, error: `License expiry "${cell(row, 'licenseExpiry')}" is not a date.` };
       if (expiry) record.licenseExpiry = expiry;
-      for (const key of ['city', 'assignedRep', 'licenseRef', 'notes']) if (cell(row, key)) record[key] = cell(row, key);
+      for (const key of ['city', 'assignedRep', 'licenseRef']) if (cell(row, key)) record[key] = cell(row, key);
+      let countyName = '';
       if (cell(row, 'county')) {
         const county = parseCounty(cell(row, 'county'));
         if (!county.ok) return { line, error: county.reason };
-        if (county.county) record.county = county.county;
+        if (county.county) {
+          record.county = county.county;
+          countyName = county.county;
+        }
       }
+      const extra = [
+        ['Address', [cell(row, 'address'), cell(row, 'zip')].filter(Boolean).join(' ')],
+        ['County', countyName],
+        ['Region', cell(row, 'region')],
+        ['Store phone', cell(row, 'phone')],
+        ['Store email', cell(row, 'email')],
+        ['Website', cell(row, 'website')],
+        ['License status', cell(row, 'licenseStatus')],
+        ['Operating', cell(row, 'operating')],
+      ].filter(([, value]) => value).map(([name, value]) => `${name}: ${value}`);
+      const notes = [cell(row, 'notes'), ...extra].filter(Boolean).join('\n');
+      if (notes) record.notes = notes.slice(0, 4000);
       return { line, record };
+    }
+    if (kind === 'contacts') {
+      const record: Record<string, unknown> = { name: cell(row, 'name') };
+      if (!record.name) return { line, error: 'Contact name is empty.' };
+      const accountName = cell(row, 'accountName');
+      const accountLicense = cell(row, 'accountLicense');
+      if (!accountName && !accountLicense) return { line, error: 'No account for this contact. Link it to an account first.' };
+      for (const key of ['email', 'phone', 'title']) if (cell(row, key)) record[key] = cell(row, key);
+      return { line, record, accountName, accountLicense };
     }
     const accountName = cell(row, 'accountName');
     const record: Record<string, unknown> = { name: cell(row, 'name') };
@@ -299,8 +346,9 @@ export function mapRows(kind: ImportKind, table: string[][]): { rows: ImportRow[
 }
 
 export const TEMPLATES: Record<ImportKind, string> = {
-  accounts: 'Account name,Status,Account type,Lead source,Sales rep,City,County,License number,License expiry,Notes\n',
+  accounts: 'Account name,Status,Account type,Lead source,Sales rep,City,County,License number,License expiry,Address,ZIP,Region,Phone,Email,Website,License status,Operating,Notes\n',
   retailers: 'License number,Name,County,License type\n',
   deals: 'Account,Deal name,Stage,Amount,Close date,Product line,Quantity,Next action,Loss reason,Notes\n',
   orders: 'Order ID,Retailer,License,Order Date,Delivery Date,Status,Invoice Total,Payment Status,Paid Date,Payout,Payout Date\n',
+  contacts: 'Contact name,Email,Phone,Title,Account name,Account license\n',
 };

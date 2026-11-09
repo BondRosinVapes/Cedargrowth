@@ -205,6 +205,7 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
         <label className={label}>What is in the file
           <select value={kind} onChange={(event) => { setKind(event.target.value as ImportKind); reset(); }} className={input}>
             <option value="accounts">Accounts (stores and buyers)</option>
+            <option value="contacts">Contacts (people at accounts)</option>
             <option value="deals">Deals</option>
             <option value="orders">Distributor orders</option>
             <option value="retailers">State dispensary list</option>
@@ -217,8 +218,10 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
       </div>
       <p className="text-caption text-tertiary">
         {kind === 'accounts'
-          ? 'Needs an Account name column. Optional: Status, Account type, Lead source, Sales rep, City, County, License number, License expiry, Notes. County must be a New York county. Accounts that already exist by name are skipped.'
-          : kind === 'orders'
+          ? 'Needs an Account name column. Optional: Status, Account type, Lead source, Sales rep, City, County, License number, License expiry, Notes, plus Address, ZIP, Region, Phone, Email, Website, License status, and Operating, which are kept in the account notes. County must be a New York county. An account whose license number is already in the CRM is skipped. Without a license number, an existing name is skipped.'
+          : kind === 'contacts'
+            ? 'Needs Contact name plus Account license or Account name. Optional: Email, Phone, Title. Import accounts first. Each contact is matched by license number, then by a unique account name. More than one match is reported. Saving a contact is not consent to contact them.'
+            : kind === 'orders'
             ? 'Needs Order ID and Retailer. Optional: License, Order Date, Delivery Date, Status, Invoice Total, Payment Status, Paid Date, Payout, Payout Date. A repeat Order ID updates that order. Unmatched retailers are not created.'
             : kind === 'retailers'
               ? 'Needs License number, Name, and County. License type is optional. County must be a New York county. This list is the coverage denominator, not a set of CRM accounts.'
