@@ -12,7 +12,7 @@ import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmat
 import { buildDigest, hoodieSignals, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
 import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, parseCounty, regionForCounty } from '../src/lib/crm/nyRegions.ts';
 import { coverageLabel } from '../src/lib/crm/territory.ts';
-import { cityChoices, clusterPins, countyAt, countyChoices, countyFrame, framePoints, pinCard, placePins, projectNy, unmappedAccountCount, type MapPin } from '../src/lib/crm/nyMap.ts';
+import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, cityChoices, clusterPins, countyAt, countyChoices, countyFrame, framePoints, pinCard, placePins, projectNy, unmappedAccountCount, wholeStateFrame, type MapPin } from '../src/lib/crm/nyMap.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
@@ -1449,6 +1449,9 @@ const erieFrame = countyFrame('Erie');
 const buffalo = projectNy(-78.878, 42.886);
 const cityFrame = framePoints(placePins(menuPins.filter((pin) => pin.city === 'Buffalo')).placed);
 assert(!!erieFrame && buffalo.x >= erieFrame.x && buffalo.x <= erieFrame.x + erieFrame.w && buffalo.y >= erieFrame.y && buffalo.y <= erieFrame.y + erieFrame.h && !!cityFrame && cityFrame.w < 1000, 'a county frame contains the county and a city frame fits its pins');
+const opening = wholeStateFrame();
+const mapUi = readFileSync('src/app/admin/crm/NyDispensaryMap.tsx', 'utf8');
+assert(CITY_MENU_LABEL === 'Search cities' && COUNTY_MENU_LABEL === 'Search counties' && opening.w > (erieFrame?.w ?? opening.w) && opening.h > (erieFrame?.h ?? opening.h) && mapUi.includes('label={CITY_MENU_LABEL}') && mapUi.includes('label={COUNTY_MENU_LABEL}') && mapUi.includes('const WHOLE = wholeStateFrame()') && mapUi.includes('useState(WHOLE)'), 'TEST ONLY: the map opens on the whole state and the menus stay labeled Search cities and Search counties');
 
 const suiteSql = readFileSync('supabase/migrations/0123_crm_suite_workflows.sql', 'utf8');
 const raiseAt = suiteSql.indexOf('unsupported opportunity stage');

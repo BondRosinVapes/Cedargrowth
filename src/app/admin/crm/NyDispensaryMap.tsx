@@ -9,18 +9,21 @@ import {
   countyChoices,
   countyFrame,
   framePoints,
+  CITY_MENU_LABEL,
+  COUNTY_MENU_LABEL,
   MAP_HEIGHT,
   MAP_WIDTH,
   nycFrame,
   pinCard,
   placePins,
+  wholeStateFrame,
   type MapChoice,
   type MapPin,
   type PlacedPin,
 } from '@/lib/crm/nyMap';
 
 const REGION_TONE = [0.06, 0.09, 0.12, 0.15, 0.18, 0.22, 0.26, 0.3, 0.34, 0.4];
-const WHOLE = { x: -24, y: -24, w: MAP_WIDTH + 48, h: MAP_HEIGHT + 48 };
+const WHOLE = wholeStateFrame();
 
 export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPin[]; unmapped: number; onOpenAccount: (id: string) => void }) {
   const [view, setView] = useState(WHOLE);
@@ -62,7 +65,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
           <button type="button" onClick={() => zoomAt(1 / 1.4, view.x + view.w / 2, view.y + view.h / 2)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">-</button>
           <MapMenu
             id="city-menu"
-            label="New York City"
+            label={CITY_MENU_LABEL}
             placeholder="Search cities"
             options={(query) => cityChoices(placed, query)}
             onPick={(choice) => {
@@ -80,7 +83,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
           />
           <MapMenu
             id="county-menu"
-            label="Whole state"
+            label={COUNTY_MENU_LABEL}
             placeholder="Search counties"
             options={(query) => countyChoices(placed, query)}
             onPick={(choice) => {
@@ -188,7 +191,6 @@ function MapMenu({ id, label, placeholder, options, onPick }: { id: string; labe
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
-  const [chosen, setChosen] = useState(label);
   const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -222,7 +224,6 @@ function MapMenu({ id, label, placeholder, options, onPick }: { id: string; labe
   }
 
   function pick(choice: MapChoice) {
-    setChosen(choice.label);
     onPick(choice);
     hide();
   }
@@ -245,7 +246,7 @@ function MapMenu({ id, label, placeholder, options, onPick }: { id: string; labe
 
   return (
     <div ref={root} className="relative">
-      <button ref={button} type="button" aria-haspopup="listbox" aria-expanded={open} aria-controls={`${id}-list`} onClick={() => (open ? hide() : show())} className="min-h-[44px] border border-ink bg-clinical px-3 font-mono text-specimen uppercase text-primary">{chosen}</button>
+      <button ref={button} type="button" aria-label={label} aria-haspopup="listbox" aria-expanded={open} aria-controls={`${id}-list`} onClick={() => (open ? hide() : show())} className="min-h-[44px] border border-ink bg-clinical px-3 font-mono text-specimen uppercase text-primary">{label}</button>
       {open ? (
         <div className="absolute left-0 z-10 mt-1 w-[min(18rem,calc(100vw-2rem))] border border-ink bg-clinical">
           <input
