@@ -48,6 +48,7 @@ export type ForecastColumn = {
   id: string;
   label: string;
   dates: string;
+  kicker: string;
   caption: string;
   start: string;
   end: string;
@@ -325,6 +326,11 @@ export function monthYearLabel(month: string): string {
   return `${MONTH_NAMES[mon - 1]} ${year}`;
 }
 
+function monthCaption(month: string): string {
+  const [year, mon] = month.split('-').map(Number);
+  return `${MONTH_NAMES[mon - 1]} ${String(year).slice(2)}`;
+}
+
 export function containsDay(start: string, end: string, today: string): boolean {
   return start <= today && today <= end;
 }
@@ -417,11 +423,13 @@ export function buildWeeklyBoard(cells: readonly WeeklyForecastCell[], only?: Pr
   const ordered = [...weeks.entries()].sort((a, b) => a[1].start.localeCompare(b[1].start) || a[0].localeCompare(b[0]));
   const columns: ForecastColumn[] = ordered.map(([id, week]) => {
     const end = addDays(week.start, 6);
-    const current = containsDay(week.start, end, today);
+    const head = weekLabel(id).toUpperCase();
+    const day = formatDay(week.start).toUpperCase();
     return {
     id,
-    label: current ? 'This week' : weekLabel(id),
-    dates: shortDateSpan(week.start, end),
+    label: head,
+    dates: day,
+    kicker: `${head} · ${day}`,
     caption: exactDateSpan(week.start, end),
     start: week.start,
     end,
@@ -470,11 +478,12 @@ export function buildMonthlyBoard(cells: readonly MonthlyForecastCell[], only?: 
   const months = [...new Set(scoped.map((cell) => cell.month))].sort();
   const columns: ForecastColumn[] = months.map((month) => {
     const end = monthEnd(month);
-    const current = month.slice(0, 7) === today.slice(0, 7);
+    const head = monthCaption(month).toUpperCase();
     return {
     id: month,
-    label: current ? 'This month' : monthYearLabel(month),
-    dates: monthYearLabel(month),
+    label: head,
+    dates: '',
+    kicker: head,
     caption: exactDateSpan(month, end),
     start: month,
     end,
@@ -508,6 +517,21 @@ export function buildMonthlyBoard(cells: readonly MonthlyForecastCell[], only?: 
     });
   }
   return { columns, lines: series };
+}
+
+// The chart follows real capacity. A blank product line does not erase the
+// others. The line breaks only when every line in that period is null.
+export function chartSeries(board: ForecastBoard): Array<{ demand: number; capacityUnits: number | null; extended: boolean }> {
+  return board.columns.map((_, index) => {
+    const points = board.lines.map((line) => line.points[index]);
+    const demand = points.reduce((sum, point) => sum + (typeof point.demand === 'number' ? point.demand : 0), 0);
+    const known = points.filter((point) => typeof point.capacityUnits === 'number');
+    return {
+      demand,
+      capacityUnits: known.length ? known.reduce((sum, point) => sum + (point.capacityUnits as number), 0) : null,
+      extended: known.length > 0 && known.every((point) => point.capacitySource === 'extended'),
+    };
+  });
 }
 
 export function heldIndex(columns: readonly ForecastColumn[], today = todayInNewYork()): number {

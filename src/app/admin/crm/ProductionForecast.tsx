@@ -9,6 +9,7 @@ import {
   forecastStats,
   asOfLine,
   carriedForwardLabel,
+  chartSeries,
   currentMonthStart,
   formatCapacity,
   formatUnits,
@@ -40,9 +41,9 @@ const STATUS_LABEL: Record<ForecastStatus, string> = {
 };
 
 const CHIP: Record<ForecastStatus, string> = {
-  ok: 'border-pass text-secondary',
-  tight: 'border-attention text-secondary',
-  short: 'border-fail text-fail',
+  ok: 'border-hairline text-tertiary',
+  tight: 'border-attention/50 text-attention',
+  short: 'border-fail/50 text-fail',
   no_capacity: 'border-hairline text-tertiary',
 };
 
@@ -150,25 +151,68 @@ function onArrow(event: KeyboardEvent, held: number, count: number, onHold: (ind
   onHold(next);
 }
 
-function Readout({ column }: { column: ForecastColumn }) {
+function monthLong(iso: string): string {
+  const [year, month, day] = iso.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day, 12)).toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' });
+}
+
+function readoutColumn(board: ForecastBoard, index: number): ForecastColumn {
+  const column = board.columns[index];
+  const point = chartSeries(board)[index];
+  if (!column || !point || point.capacityUnits === null) return column;
+  const froms = [...new Set(board.lines.flatMap((line) => {
+    const cell = line.points[index];
+    return cell?.capacitySource === 'extended' && cell.carriedFrom ? [cell.carriedFrom] : [];
+  }))];
+  const demand = column.demand ?? 0;
+  return {
+    ...column,
+    capacityUnits: point.capacityUnits,
+    gap: Math.round((point.capacityUnits - demand) * 10) / 10,
+    capacitySource: point.extended ? 'extended' : 'entered',
+    carriedFrom: point.extended && froms.length === 1 ? froms[0] : null,
+  };
+}
+
+function capacitySentence(column: ForecastColumn, weekly: boolean): string {
+  if (column.capacityUnits === null) return 'No capacity entered.';
+  const amount = formatCapacity(column.capacityUnits);
+  const from = column.carriedFrom ? monthLong(column.carriedFrom) : monthLong(column.start);
+  const lead = weekly ? `Capacity ${amount}, pro-rated from ${from}.` : `Capacity ${amount}.`;
+  if (column.gap !== null && column.gap < 0) return `${lead} Short by ${formatUnits(Math.abs(column.gap))} units.`;
+  if (column.capacitySource === 'extended') return `${lead} Carried forward from ${from}.`;
+  if (column.gap !== null && column.gap > 0 && column.demand !== null && column.demand >= column.capacityUnits * 0.9) return `${lead} Tight.`;
+  if (column.gap !== null && column.gap > 0) return `${lead} Spare room ${formatUnits(column.gap)} units.`;
+  return lead;
+}
+
+function Readout({ column, label, weekly }: { column: ForecastColumn; label: string; weekly: boolean }) {
   const { ref, revealed } = useReveal<HTMLDivElement>();
   return (
-    <div ref={ref} className={`flex items-end gap-4 ${revealed ? 'prod-rise prod-in' : ''}`}>
-      <p className="font-display text-[64px] leading-none tabular-nums text-primary md:text-[96px]" aria-live="polite">
+    <div ref={ref} className={`flex items-end gap-5 ${revealed ? 'prod-rise prod-in' : ''}`}>
+      <p className="font-display text-[72px] leading-none tabular-nums text-primary md:text-[96px]" aria-live="polite">
         {column.demand === null ? 'None' : <CountFigure value={column.demand} />}
       </p>
-      <div className="pb-2">
-        <p className="font-display text-heading-s text-primary">Units of demand</p>
-        <p className="font-display text-body-m text-secondary">{column.caption}</p>
+      <div className="min-w-0 pb-2">
+        <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{column.kicker}</p>
+        <p className="font-display text-heading-s text-primary">{label}</p>
+        <p className="max-w-md text-caption text-secondary">{capacitySentence(column, weekly)}</p>
       </div>
     </div>
   );
 }
 
-function ForecastChart({ columns, held, onHold, label }: { columns: ForecastColumn[]; held: number; onHold: (index: number) => void; label: string }) {
+function ForecastChart({ board, held, onHold, label }: { board: ForecastBoard; held: number; onHold: (index: number) => void; label: string }) {
+  const series = chartSeries(board);
+  const columns = board.columns.map((column, index) => ({
+    ...column,
+    demand: series[index]?.demand ?? 0,
+    capacityUnits: series[index]?.capacityUnits ?? null,
+    capacitySource: series[index]?.extended ? 'extended' as const : series[index]?.capacityUnits === null ? null : 'entered' as const,
+  }));
   const { ref } = useReveal<HTMLDivElement>();
   const width = 960;
-  const height = 240;
+  const height = 150;
   const pad = { left: 44, right: 8, top: 12, bottom: 28 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
@@ -217,7 +261,7 @@ function ForecastChart({ columns, held, onHold, label }: { columns: ForecastColu
       className="min-w-0 outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cedar"
     >
       {live ? null : <p className="mb-2 font-display text-body-m text-secondary">No weighted demand in this window</p>}
-      <svg viewBox={`0 0 ${width} ${height}`} className="block h-[240px] w-full" role="img" aria-label={summary}>
+      <svg viewBox={`0 0 ${width} ${height}`} className="block h-[150px] w-full" role="img" aria-label={summary}>
         {live ? ticks.map((tick) => (
           <g key={tick}>
             <line x1={pad.left} x2={width - pad.right} y1={yAt(tick)} y2={yAt(tick)} stroke="rgb(var(--line-hairline))" strokeWidth="1" vectorEffect="non-scaling-stroke" />
@@ -239,7 +283,7 @@ function ForecastChart({ columns, held, onHold, label }: { columns: ForecastColu
                 {column.capacitySource === 'extended' ? <title>{carriedForwardLabel(column.carriedFrom)}</title> : null}
               </rect>
             ) : null}
-            <text x={xAt(index)} y={height - 8} textAnchor="middle" fill={index === held ? 'rgb(var(--text-primary))' : 'rgb(var(--text-tertiary))'} fontFamily="var(--font-mono)" fontSize="11">{column.label}</text>
+            <text x={index === 0 ? pad.left : index === columns.length - 1 ? width - pad.right : xAt(index)} y={height - 6} textAnchor={index === 0 ? 'start' : index === columns.length - 1 ? 'end' : 'middle'} fill={index === held ? 'rgb(var(--text-primary))' : 'rgb(var(--text-tertiary))'} fontFamily="var(--font-mono)" fontSize="10">{column.label}</text>
             <rect x={xAt(index) - colW / 2} y={pad.top} width={colW} height={plotH + 20} fill="transparent" onMouseEnter={() => onHold(index)} />
           </g>
         ))}
@@ -306,21 +350,21 @@ function LineMatrix({
           className={`min-h-[44px] px-0.5 py-2 text-center font-mono text-[11px] leading-tight ${index === held ? 'bg-bone text-primary' : 'text-tertiary'}`}
         >
           <span className="block uppercase tracking-specimen">{column.label}</span>
-          <span className="mt-1 block tabular-nums">{column.dates}</span>
+          {column.dates ? <span className="mt-1 block tabular-nums">{column.dates}</span> : null}
         </button>
       ))}
-      {board.lines.map((line) => (
+      {board.lines.map((line, lineIndex) => (
         <div key={line.productLine} className="contents">
           {linkLines ? (
             <a
               href={productionHref({ brand, line: line.productLine })}
               onClick={(event) => onOpenLine?.(event, line.productLine)}
-              className="flex min-h-[44px] items-center border-t border-hairline pr-3 font-display text-[22px] leading-none text-primary"
+              className={`flex items-center border-t border-hairline py-3 pr-3 font-display text-[22px] leading-none text-primary ${lineIndex === board.lines.length - 1 ? 'border-b' : ''}`}
             >
               {line.label}
             </a>
           ) : (
-            <div className="flex min-h-[44px] items-center border-t border-hairline pr-3 font-display text-[22px] leading-none text-primary">{line.label}</div>
+            <div className={`flex items-center border-t border-hairline py-3 pr-3 font-display text-[22px] leading-none text-primary ${lineIndex === board.lines.length - 1 ? 'border-b' : ''}`}>{line.label}</div>
           )}
           {line.points.map((point, index) => (
             <button
@@ -331,11 +375,11 @@ function LineMatrix({
               onMouseEnter={() => onHold(index)}
               onFocus={() => onHold(index)}
               onClick={() => onHold(index)}
-              className={`flex min-h-[44px] flex-col items-center justify-center gap-1 border-t border-hairline px-1 py-2 ${index === held ? 'bg-bone' : ''}`}
+              className={`flex min-h-[52px] flex-col items-start justify-center gap-0.5 border-t border-hairline px-1 py-3 text-left ${lineIndex === board.lines.length - 1 ? 'border-b' : ''} ${index === held ? 'bg-bone' : ''}`}
             >
               <span className="font-mono text-[13px] tabular-nums leading-none text-primary">{demandText(point.demand)}</span>
-              <span className="text-center font-mono text-[11px] tabular-nums leading-tight text-tertiary">{formatCapacity(point.capacityUnits)}</span>
-              <StatusSquare status={point.status} />
+              <span className="font-mono text-[12px] tabular-nums leading-none text-secondary">{point.capacityUnits === null ? 'No capacity entered' : `/ ${formatCapacity(point.capacityUnits)}`}</span>
+              <span className="mt-1"><StatusSquare status={point.status} /></span>
               {point.capacitySource === 'extended' ? <ExtMark from={point.carriedFrom} /> : null}
             </button>
           ))}
@@ -402,12 +446,16 @@ function BoardView({
   brand,
   board,
   kicker,
+  demandLabel,
+  weekly,
   linkLines,
   onOpenLine,
 }: {
   brand: CrmBrand;
   board: ForecastBoard;
   kicker: string;
+  demandLabel: string;
+  weekly: boolean;
   linkLines: boolean;
   onOpenLine?: (event: MouseEvent<HTMLAnchorElement>, line: ProductLine) => void;
 }) {
@@ -417,13 +465,12 @@ function BoardView({
   return (
     <HeldFrame board={board}>
       {(held, onHold) => {
-        const column = board.columns[held];
         return (
           <div className="flex min-w-0 flex-col gap-6">
             <div className="flex flex-col gap-6 lg:col-span-2 lg:grid lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)] lg:items-end">
-            <Readout column={column} />
+            <Readout column={readoutColumn(board, held)} label={demandLabel} weekly={weekly} />
             <div className="hidden min-w-0 md:block">
-              <ForecastChart columns={board.columns} held={held} onHold={onHold} label={kicker} />
+              <ForecastChart board={board} held={held} onHold={onHold} label={kicker} />
             </div>
           </div>
             <LineMatrix brand={brand} board={board} held={held} onHold={onHold} onOpenLine={onOpenLine} linkLines={linkLines} />
@@ -437,7 +484,7 @@ function BoardView({
 
 export function SpanControl({ span, onSpan }: { span: ForecastSpan; onSpan: (span: ForecastSpan) => void }) {
   return (
-    <div role="radiogroup" aria-label="Forecast range" className="flex w-full max-w-md border border-hairline">
+    <div role="radiogroup" aria-label="Forecast range" className="inline-flex border border-hairline">
       {(['week', 'month', 'year'] as const).map((item, index) => (
         <button
           key={item}
@@ -451,7 +498,7 @@ export function SpanControl({ span, onSpan }: { span: ForecastSpan; onSpan: (spa
             event.preventDefault();
             onSpan(next);
           }}
-          className={`min-h-[44px] flex-1 font-mono text-specimen uppercase tracking-specimen ${index ? 'border-l border-hairline' : ''} ${span === item ? 'bg-ink text-inverse' : 'bg-transparent text-primary'}`}
+          className={`min-h-[36px] px-3 font-mono text-specimen uppercase tracking-specimen ${index ? 'border-l border-hairline' : ''} ${span === item ? 'bg-ink text-inverse' : 'bg-transparent text-primary'}`}
         >
           {SPAN_LABEL[item]}
         </button>
@@ -469,11 +516,11 @@ function StatsRow({ board }: { board: ForecastBoard }) {
     ['Periods without capacity', String(stats.noCapacity)],
   ];
   return (
-    <dl className="flex flex-col divide-y border-y border-hairline md:flex-row md:divide-x md:divide-y-0">
+    <dl className="grid grid-cols-2 gap-x-8 gap-y-6 md:grid-cols-4">
       {items.map(([label, value]) => (
-        <div key={label} className="flex flex-1 flex-col gap-1 py-4 md:px-6 md:first:pl-0">
-          <dt className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{label}</dt>
+        <div key={label} className="flex flex-col gap-1">
           <dd className="font-display text-[40px] leading-none tabular-nums text-primary">{value}</dd>
+          <dt className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{label}</dt>
         </div>
       ))}
     </dl>
@@ -490,13 +537,11 @@ function PeriodBreakdown({ board }: { board: ForecastBoard }) {
         {board.columns.map((column, index) => {
           const point = line.points[index];
           return (
-            <li key={column.id} className="flex flex-col gap-1 border-t border-hairline px-4 py-3">
-              <span className="flex items-center justify-between gap-3">
-                <span className="font-sans text-body-m text-primary">{column.label}</span>
-                {point?.status ? <StatusChip status={point.status} /> : <span className="font-mono text-specimen text-tertiary">Not returned</span>}
-              </span>
-              <span className="font-mono text-data tabular-nums text-primary">Demand {demandText(point?.demand ?? null)}</span>
-              <span className="font-mono text-data tabular-nums text-primary">Capacity <CapacityValue value={point?.capacityUnits ?? null} source={point?.capacitySource ?? null} from={point?.carriedFrom ?? null} /></span>
+            <li key={column.id} className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-hairline py-2">
+              <span className="w-24 font-mono text-specimen uppercase text-tertiary">{column.label}</span>
+              <span className="font-mono text-data tabular-nums text-primary">{demandText(point?.demand ?? null)} / {point?.capacityUnits === null ? 'No capacity entered' : formatCapacity(point?.capacityUnits ?? null)}</span>
+              {point?.capacitySource === 'extended' ? <ExtMark from={point.carriedFrom} /> : null}
+              {point?.status ? <StatusChip status={point.status} /> : null}
             </li>
           );
         })}
@@ -516,10 +561,10 @@ function PeriodBreakdown({ board }: { board: ForecastBoard }) {
               const point = line.points[index];
               return (
                 <tr key={column.id} className="border-t border-hairline">
-                  <th className="px-4 py-3 text-left font-sans text-body-m font-normal text-primary">{column.label}</th>
-                  <td className="px-4 py-3 text-right font-mono text-data tabular-nums text-primary">{demandText(point?.demand ?? null)}</td>
-                  <td className="px-4 py-3 text-right font-mono text-data tabular-nums text-primary"><CapacityValue value={point?.capacityUnits ?? null} source={point?.capacitySource ?? null} from={point?.carriedFrom ?? null} /></td>
-                  <td className="px-4 py-3">{point?.status ? <StatusChip status={point.status} /> : <span className="font-mono text-specimen text-tertiary">Not returned</span>}</td>
+                  <th className="py-2 pr-4 text-left font-mono text-specimen font-normal uppercase text-tertiary">{column.label}</th>
+                  <td className="py-2 font-mono text-data tabular-nums text-primary">{demandText(point?.demand ?? null)} / {point?.capacityUnits === null ? 'No capacity entered' : formatCapacity(point?.capacityUnits ?? null)}{point?.capacitySource === 'extended' ? ' ' : ''}</td>
+                  <td className="py-2 pl-3">{point?.capacitySource === 'extended' ? <ExtMark from={point.carriedFrom} /> : null}</td>
+                  <td className="py-2 pl-3">{point?.status ? <StatusChip status={point.status} /> : null}</td>
                 </tr>
               );
             })}
@@ -616,7 +661,7 @@ export function WeeklyOverview({
       {view.state === 'pending' ? <p className="border border-hairline bg-clinical px-4 py-8 text-center text-body-m text-secondary">{WEEKLY_PENDING}</p> : null}
       {view.state === 'error' ? <p className="border border-hairline bg-clinical px-4 py-3 text-body-m text-secondary">{view.reason}</p> : null}
       {view.state === 'ready' ? (
-        <BoardView brand={brand} board={view.board} kicker="Held week" linkLines onOpenLine={onOpenLine} />
+        <BoardView brand={brand} board={view.board} kicker="Held week" demandLabel="Demand this week" weekly linkLines onOpenLine={onOpenLine} />
       ) : null}
       {view.state === 'pending' ? (
         <ul className="border-t border-hairline">
@@ -723,7 +768,7 @@ export function LineDashboard({
       {view.state === 'error' ? <p className="border border-hairline bg-clinical px-4 py-3 text-body-m text-secondary">{view.reason}</p> : null}
       {view.state === 'ready' ? (
         <>
-          <BoardView brand={brand} board={view.board} kicker={kicker} linkLines={false} />
+          <BoardView brand={brand} board={view.board} kicker={kicker} demandLabel={`${PRODUCT_LINE_LABELS[line]} demand`} weekly={span === 'week'} linkLines={false} />
           <StatsRow board={view.board} />
           <PeriodBreakdown board={view.board} />
         </>
