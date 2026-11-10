@@ -131,7 +131,10 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     && blankHtml.includes('name="capacityUnits"')
     && blankHtml.includes('Save capacity')
     && blankHtml.includes('href="/admin/crm?section=production&amp;brand=cedargrowth&amp;line=vape"')
-    && blankHtml.includes('h-[150px]')
+    && blankHtml.includes('h-[120px]')
+    && blankHtml.includes('Enter capacity')
+    && blankHtml.includes('bg-parchment')
+    && blankHtml.includes('text-[96px]')
     && blankHtml.includes('md:hidden')
     && blankHtml.includes('md:grid'),
     'a blank capacity renders No capacity entered, and the capacity form still saves',
@@ -148,6 +151,31 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     onOpenLine: () => {},
   }));
   assert(zeroHtml.includes('data-capacity="0"') && zero.columns[0].capacityUnits === 0, 'an entered capacity of zero stays zero');
+
+  const holeCells = ['2026-11-09', '2026-11-16', '2026-11-23'].map((weekStart, index) => ({
+    isoWeek: `2026-W${46 + index}`,
+    weekStart,
+    productLine: 'vape' as const,
+    demand: 4,
+    capacityUnits: index === 1 ? null : 20,
+    gap: index === 1 ? null : 16,
+    status: (index === 1 ? 'no_capacity' : 'ok') as 'no_capacity' | 'ok',
+  }));
+  const holeBoard = buildWeeklyBoard(holeCells, null, '2026-11-10');
+  const holeHtml = renderToStaticMarkup(createElement(WeeklyOverview, {
+    brand: 'cedargrowth',
+    view: { state: 'ready', board: holeBoard, notForecastable: 0 },
+    canEdit: false,
+  }));
+  const gummyCells = holeHtml.split('aria-label="Gummy,').slice(1).map((chunk) => chunk.slice(0, chunk.indexOf('</button>')));
+  const vapeHole = holeHtml.split('aria-label="Vape, WK 47.').slice(1).map((chunk) => chunk.slice(0, chunk.indexOf('</button>')));
+  assert(
+    gummyCells.length === 3
+    && gummyCells.every((chunk) => chunk.includes(`>${NO_CAPACITY}<`) === false)
+    && holeHtml.includes(`>${NO_CAPACITY}<`)
+    && vapeHole.some((chunk) => chunk.includes(`>${NO_CAPACITY}<`)),
+    'a blank line gets one chip, and only an isolated empty period repeats No capacity entered',
+  );
 
   const coming = renderToStaticMarkup(createElement(LineDashboard, {
     brand: 'cedargrowth',

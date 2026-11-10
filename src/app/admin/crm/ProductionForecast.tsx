@@ -227,19 +227,19 @@ function Readout({ column, label, weekly }: { column: ForecastColumn; label: str
   const { ref, revealed } = useReveal<HTMLDivElement>();
   return (
     <div ref={ref} className={`flex items-end gap-5 ${revealed ? 'prod-rise prod-in' : ''}`}>
-      <p className="font-display text-[72px] leading-none tabular-nums text-primary md:text-[96px]" aria-live="polite">
+      <p className="font-display text-[64px] font-normal leading-none tabular-nums text-primary md:text-[96px]" aria-live="polite">
         {column.demand === null ? 'None' : <CountFigure value={column.demand} />}
       </p>
       <div className="min-w-0 pb-2">
         <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{column.kicker}</p>
-        <p className="font-display text-heading-s text-primary">{label}</p>
-        <p className="max-w-md text-caption text-secondary">{capacitySentence(column, weekly)}</p>
+        <p className="font-display text-[22px] font-medium leading-none text-primary">{label}</p>
+        <p className="mt-1 max-w-md text-caption text-secondary">{capacitySentence(column, weekly)}</p>
       </div>
     </div>
   );
 }
 
-function ForecastChart({ board, held, onHold, label }: { board: ForecastBoard; held: number; onHold: (index: number) => void; label: string }) {
+function ForecastChart({ board, held, onHold, label, height }: { board: ForecastBoard; held: number; onHold: (index: number) => void; label: string; height: 120 | 200 }) {
   const series = chartSeries(board);
   const columns = board.columns.map((column, index) => ({
     ...column,
@@ -249,8 +249,7 @@ function ForecastChart({ board, held, onHold, label }: { board: ForecastBoard; h
   }));
   const { ref } = useReveal<HTMLDivElement>();
   const width = 960;
-  const height = 150;
-  const pad = { left: 44, right: 8, top: 12, bottom: 28 };
+  const pad = { left: 4, right: 4, top: 8, bottom: 22 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const live = columns.some((column) => (column.demand ?? 0) > 0 || (column.capacityUnits ?? 0) > 0);
@@ -282,7 +281,7 @@ function ForecastChart({ board, held, onHold, label }: { board: ForecastBoard; h
   }
   const demand = segments('demand');
   const capacity = segments('capacity');
-  const ticks = live ? [0, yMax / 2, yMax] : [0];
+  const middle = Math.round((columns.length - 1) / 2);
   const summary = columns.map((column) => {
     const carried = column.capacitySource === 'extended' ? ` ${carriedForwardLabel(column.carriedFrom)}` : '';
     return `${column.label} demand ${demandText(column.demand)}, capacity ${formatCapacity(column.capacityUnits)}${carried}`;
@@ -297,17 +296,8 @@ function ForecastChart({ board, held, onHold, label }: { board: ForecastBoard; h
       className="min-w-0 outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cedar"
     >
       {live ? null : <p className="mb-2 font-display text-body-m text-secondary">No weighted demand in this window</p>}
-      <svg viewBox={`0 0 ${width} ${height}`} className="block h-[150px] w-full" role="img" aria-label={summary}>
-        {live ? ticks.map((tick) => (
-          <g key={tick}>
-            <line x1={pad.left} x2={width - pad.right} y1={yAt(tick)} y2={yAt(tick)} stroke="rgb(var(--line-hairline))" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-            <text x={pad.left - 6} y={yAt(tick) + 3} textAnchor="end" fill="rgb(var(--text-tertiary))" fontFamily="var(--font-mono)" fontSize="11">{formatUnits(tick)}</text>
-          </g>
-        )) : <line x1={pad.left} x2={width - pad.right} y1={base} y2={base} stroke="rgb(var(--line-hairline))" strokeWidth="1" />}
-        {live && columns.length ? (
-          <rect x={Math.max(pad.left, xAt(held) - colW / 2)} y={pad.top} width={Math.min(colW, plotW)} height={plotH} fill="rgb(var(--surface-bone))" />
-        ) : null}
-        {live ? <line x1={pad.left} x2={width - pad.right} y1={base} y2={base} stroke="rgb(var(--text-tertiary))" strokeWidth="1" vectorEffect="non-scaling-stroke" /> : null}
+      <svg viewBox={`0 0 ${width} ${height}`} className={`block w-full ${height === 120 ? 'h-[120px]' : 'h-[200px]'}`} role="img" aria-label={summary}>
+        <line x1={pad.left} x2={width - pad.right} y1={base} y2={base} stroke="rgb(var(--line-hairline))" strokeWidth="1" vectorEffect="non-scaling-stroke" />
         {demand.solid ? <path d={demand.solid} fill="none" stroke="rgb(var(--accent-verdant))" strokeWidth="1.5" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
         {capacity.solid ? <path d={capacity.solid} fill="none" stroke="rgb(var(--surface-ink))" strokeWidth="1" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
         {capacity.dotted ? <path d={capacity.dotted} fill="none" stroke="rgb(var(--surface-ink))" strokeWidth="1" strokeDasharray="2 7" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
@@ -319,7 +309,9 @@ function ForecastChart({ board, held, onHold, label }: { board: ForecastBoard; h
                 {column.capacitySource === 'extended' ? <title>{carriedForwardLabel(column.carriedFrom)}</title> : null}
               </rect>
             ) : null}
-            <text x={index === 0 ? pad.left : index === columns.length - 1 ? width - pad.right : xAt(index)} y={height - 6} textAnchor={index === 0 ? 'start' : index === columns.length - 1 ? 'end' : 'middle'} fill={index === held ? 'rgb(var(--text-primary))' : 'rgb(var(--text-tertiary))'} fontFamily="var(--font-mono)" fontSize="10">{column.label}</text>
+            {index === 0 || index === middle || index === columns.length - 1 ? (
+              <text x={index === 0 ? pad.left : index === columns.length - 1 ? width - pad.right : xAt(index)} y={height - 4} textAnchor={index === 0 ? 'start' : index === columns.length - 1 ? 'end' : 'middle'} fill="rgb(var(--text-tertiary))" fontFamily="var(--font-mono)" fontSize="10">{column.label}</text>
+            ) : null}
             <rect x={xAt(index) - colW / 2} y={pad.top} width={colW} height={plotH + 20} fill="transparent" onMouseEnter={() => onHold(index)} />
           </g>
         ))}
@@ -335,6 +327,24 @@ function ForecastChart({ board, held, onHold, label }: { board: ForecastBoard; h
       ) : null}
     </div>
   );
+}
+
+function lineIsBlank(points: readonly ForecastPoint[]): boolean {
+  return points.length > 0 && points.every((point) => point.capacityUnits === null);
+}
+
+function isolatedBlank(points: readonly ForecastPoint[], index: number): boolean {
+  const point = points[index];
+  if (!point || point.capacityUnits !== null || lineIsBlank(points) || points.length < 2) return false;
+  const prev = index > 0 ? points[index - 1] : null;
+  const next = index < points.length - 1 ? points[index + 1] : null;
+  const prevHas = !prev || typeof prev.capacityUnits === 'number';
+  const nextHas = !next || typeof next.capacityUnits === 'number';
+  return prevHas && nextHas && (!!prev || !!next);
+}
+
+function NoCapacityChip() {
+  return <span className="mt-1 inline-flex max-w-full rounded-chip border border-hairline px-1.5 py-0.5 font-mono text-[10px] uppercase leading-tight tracking-specimen text-tertiary">{NO_CAPACITY}</span>;
 }
 
 function pointLabel(line: ForecastLine, column: ForecastColumn, point: ForecastPoint): string {
@@ -388,20 +398,26 @@ function LineMatrix({
           {column.dates ? <span className="mt-1 block tabular-nums">{column.dates}</span> : null}
         </button>
       ))}
-      {board.lines.map((line, lineIndex) => (
+      {board.lines.map((line, lineIndex) => {
+        const blank = lineIsBlank(line.points);
+        const nameClass = `flex flex-col items-start justify-center border-0 border-t border-solid border-hairline py-3 pr-3 font-display text-[22px] leading-none text-primary ${lineIndex === board.lines.length - 1 ? 'border-b' : ''}`;
+        return (
         <div key={line.productLine} className="contents">
           {linkLines ? (
             <a
               href={productionHref({ brand, line: line.productLine })}
               onClick={(event) => onOpenLine?.(event, line.productLine)}
-              className={`flex items-center border-0 border-t border-solid border-hairline py-3 pr-3 font-display text-[22px] leading-none text-primary ${lineIndex === board.lines.length - 1 ? 'border-b' : ''}`}
+              className={nameClass}
             >
               {line.label}
+              {blank ? <NoCapacityChip /> : null}
             </a>
           ) : (
-            <div className={`flex items-center border-0 border-t border-solid border-hairline py-3 pr-3 font-display text-[22px] leading-none text-primary ${lineIndex === board.lines.length - 1 ? 'border-b' : ''}`}>{line.label}</div>
+            <div className={nameClass}>{line.label}{blank ? <NoCapacityChip /> : null}</div>
           )}
-          {line.points.map((point, index) => (
+          {line.points.map((point, index) => {
+            const hole = isolatedBlank(line.points, index);
+            return (
             <button
               key={`${line.productLine}-${board.columns[index].id}`}
               type="button"
@@ -412,14 +428,18 @@ function LineMatrix({
               onClick={() => onHold(index)}
               className={`flex min-h-[52px] appearance-none flex-col items-start justify-center gap-0.5 rounded-none border-0 border-t border-solid border-hairline px-1 py-3 text-left shadow-none ${lineIndex === board.lines.length - 1 ? 'border-b' : ''} ${index === held ? 'bg-bone' : 'bg-transparent'}`}
             >
-              <span className="font-mono text-[13px] tabular-nums leading-none text-primary">{demandText(point.demand)}</span>
-              <span className="font-mono text-[12px] tabular-nums leading-none text-secondary">{point.capacityUnits === null ? 'No capacity entered' : `/ ${formatCapacity(point.capacityUnits)}`}</span>
-              <span className="mt-1"><StatusSquare status={point.status} /></span>
-              {point.capacitySource === 'extended' ? <ExtMark from={point.carriedFrom} /> : null}
+              <span className={`font-mono text-[13px] tabular-nums leading-none ${blank ? 'text-tertiary' : 'text-primary'}`}>{demandText(point.demand)}</span>
+              {blank ? null : (
+                <span className="font-mono text-[12px] tabular-nums leading-none text-secondary">{point.capacityUnits === null ? (hole ? NO_CAPACITY : '') : `/ ${formatCapacity(point.capacityUnits)}`}</span>
+              )}
+              {blank ? null : <span className="mt-1"><StatusSquare status={point.status} /></span>}
+              {!blank && point.capacitySource === 'extended' ? <ExtMark from={point.carriedFrom} /> : null}
             </button>
-          ))}
+            );
+          })}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -450,14 +470,22 @@ function PhoneLines({
       <ul>
         {board.lines.map((line) => {
           const point = line.points[held];
-          const body = (
+          const blank = lineIsBlank(line.points);
+          const hole = point ? isolatedBlank(line.points, held) : false;
+          const body = blank ? (
+            <>
+              <span className="font-display text-[22px] leading-none text-primary">{line.label}</span>
+              <NoCapacityChip />
+              <span className="font-mono text-data tabular-nums text-tertiary">{demandText(point?.demand ?? null)}</span>
+            </>
+          ) : (
             <>
               <span className="flex items-center justify-between gap-3">
                 <span className="font-display text-[22px] leading-none text-primary">{line.label}</span>
                 <StatusSquare status={point?.status ?? null} />
               </span>
               <span className="font-mono text-data tabular-nums text-primary">Demand {demandText(point?.demand ?? null)}</span>
-              <span className="font-mono text-data tabular-nums text-primary">Capacity <CapacityValue value={point?.capacityUnits ?? null} source={point?.capacitySource ?? null} from={point?.carriedFrom ?? null} /></span>
+              <span className="font-mono text-data tabular-nums text-primary">Capacity {point?.capacityUnits === null ? (hole ? NO_CAPACITY : '') : <CapacityValue value={point?.capacityUnits ?? null} source={point?.capacitySource ?? null} from={point?.carriedFrom ?? null} />}</span>
             </>
           );
           return (
@@ -484,6 +512,7 @@ function BoardView({
   demandLabel,
   weekly,
   linkLines,
+  chartHeight,
   onOpenLine,
 }: {
   brand: CrmBrand;
@@ -492,6 +521,7 @@ function BoardView({
   demandLabel: string;
   weekly: boolean;
   linkLines: boolean;
+  chartHeight: 120 | 200;
   onOpenLine?: (event: MouseEvent<HTMLAnchorElement>, line: ProductLine) => void;
 }) {
   if (!board.columns.length) {
@@ -502,10 +532,10 @@ function BoardView({
       {(held, onHold) => {
         return (
           <div className="flex min-w-0 flex-col gap-6">
-            <div className="flex flex-col gap-6 lg:col-span-2 lg:grid lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)] lg:items-end">
+            <div className="flex flex-col gap-6 md:grid md:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)] md:items-end">
             <Readout column={readoutColumn(board, held)} label={demandLabel} weekly={weekly} />
             <div className="hidden min-w-0 md:block">
-              <ForecastChart board={board} held={held} onHold={onHold} label={kicker} />
+              <ForecastChart board={board} held={held} onHold={onHold} label={kicker} height={chartHeight} />
             </div>
           </div>
             <LineMatrix brand={brand} board={board} held={held} onHold={onHold} onOpenLine={onOpenLine} linkLines={linkLines} />
@@ -635,20 +665,20 @@ function CapacityForm({ brand, canEdit, onChanged }: { brand: CrmBrand; canEdit:
       {message ? <p role="status" className="border border-hairline bg-bone px-3 py-2 text-body-m text-primary">{message}</p> : null}
       {canEdit ? (
         <form onSubmit={(event) => { event.preventDefault(); save(event.currentTarget); }} className="grid grid-cols-1 gap-4 border-t border-hairline pt-6 md:grid-cols-2">
-          <h3 className="font-display text-heading-s text-primary md:col-span-2">Capacity</h3>
+          <h3 className="font-display text-heading-s text-primary md:col-span-2">Enter capacity</h3>
           <label className="flex flex-col gap-1 text-caption text-tertiary">Month
-            <input name="month" type="month" required className="border border-hairline bg-transparent px-3 py-2 text-body-m text-primary" />
+            <input name="month" type="month" required className="appearance-none rounded-none border border-hairline bg-parchment px-3 py-2 text-body-m text-primary shadow-none" />
           </label>
           <label className="flex flex-col gap-1 text-caption text-tertiary">Product line
-            <select name="productLine" required defaultValue="vape" className="border border-hairline bg-transparent px-3 py-2 text-body-m text-primary">
+            <select name="productLine" required defaultValue="vape" className="appearance-none rounded-none border border-hairline bg-parchment px-3 py-2 text-body-m text-primary shadow-none">
               {PRODUCT_LINES.map((line) => <option key={line} value={line}>{PRODUCT_LINE_LABELS[line]}</option>)}
             </select>
           </label>
           <label className="flex flex-col gap-1 text-caption text-tertiary">Units
-            <input name="capacityUnits" required inputMode="numeric" className="border border-hairline bg-transparent px-3 py-2 text-body-m text-primary" />
+            <input name="capacityUnits" required inputMode="numeric" className="appearance-none rounded-none border border-hairline bg-parchment px-3 py-2 text-body-m text-primary shadow-none" />
           </label>
           <label className="flex flex-col gap-1 text-caption text-tertiary">Notes
-            <input name="notes" className="border border-hairline bg-transparent px-3 py-2 text-body-m text-primary" />
+            <input name="notes" className="appearance-none rounded-none border border-hairline bg-parchment px-3 py-2 text-body-m text-primary shadow-none" />
           </label>
           <button type="submit" className="w-fit border border-ink bg-ink px-4 py-2 font-mono text-specimen uppercase text-inverse">Save capacity</button>
         </form>
@@ -693,7 +723,7 @@ export function WeeklyOverview({
       {view.state === 'pending' ? <p className="border border-hairline bg-clinical px-4 py-8 text-center text-body-m text-secondary">{WEEKLY_PENDING}</p> : null}
       {view.state === 'error' ? <p className="border border-hairline bg-clinical px-4 py-3 text-body-m text-secondary">{view.reason}</p> : null}
       {view.state === 'ready' ? (
-        <BoardView brand={brand} board={view.board} kicker="Held week" demandLabel="Demand this week" weekly linkLines onOpenLine={onOpenLine} />
+        <BoardView brand={brand} board={view.board} kicker="Held week" demandLabel="Demand this week" weekly linkLines chartHeight={120} onOpenLine={onOpenLine} />
       ) : null}
       {view.state === 'pending' ? (
         <ul className="border-t border-hairline">
@@ -801,7 +831,7 @@ export function LineDashboard({
       {view.state === 'error' ? <p className="border border-hairline bg-clinical px-4 py-3 text-body-m text-secondary">{view.reason}</p> : null}
       {view.state === 'ready' ? (
         <>
-          <BoardView brand={brand} board={view.board} kicker={kicker} demandLabel={`${PRODUCT_LINE_LABELS[line]} demand`} weekly={span === 'week'} linkLines={false} />
+          <BoardView brand={brand} board={view.board} kicker={kicker} demandLabel={`${PRODUCT_LINE_LABELS[line]} demand`} weekly={span === 'week'} linkLines={false} chartHeight={200} />
           <StatsRow board={view.board} />
           <PeriodBreakdown board={view.board} />
         </>
