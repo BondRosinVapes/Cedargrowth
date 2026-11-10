@@ -1,10 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, LEAD_SOURCE_LABELS, LEAD_SOURCES, OPPORTUNITY_STAGES, type CrmBrand } from '@/lib/crm/engine';
+import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, LEAD_SOURCE_LABELS, LEAD_SOURCES, OPPORTUNITY_STAGES, type CrmBrand, type ProductLine } from '@/lib/crm/engine';
 import { ORDER_STATUS_LABELS } from '@/lib/crm/distributor';
-import { PRODUCT_LINES, PRODUCT_LINE_LABELS, type ProductLine } from '@/lib/crm/engine';
-import { monthCaption, rateCaption, stageRateLabel } from '@/lib/crm/forecast';
 import {
   DEAL_STATUSES,
   MONTH_LABELS,
@@ -19,6 +17,7 @@ import { QuickAdd, SpreadsheetUpload } from './DataIntake';
 import { DashboardSectionHost, DashboardTabs } from './DashboardTabs';
 import { DigestPanel } from './DigestPanel';
 import { NextActions, TerritoryMap } from './TerritoryMap';
+import { ProductionSection } from './ProductionForecast';
 
 type Source = { connected: boolean; label: string };
 type DashboardBody = {
@@ -90,8 +89,10 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
   // Live refresh: every 60 seconds while the tab is visible, when the tab regains focus,
   // and right after anything is added or imported from this screen.
   useEffect(() => {
-    const stored = sectionFromSearch(new URLSearchParams(window.location.search).get('section'));
-    if (stored !== 'overview') setSection(stored);
+    const sync = () => setSection(sectionFromSearch(new URLSearchParams(window.location.search).get('section')));
+    sync();
+    window.addEventListener('popstate', sync);
+    return () => window.removeEventListener('popstate', sync);
   }, []);
 
   function selectSection(next: DashboardSection) {
@@ -99,6 +100,10 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
     const url = new URL(window.location.href);
     if (next === 'overview') url.searchParams.delete('section');
     else url.searchParams.set('section', next);
+    if (next !== 'production') {
+      url.searchParams.delete('line');
+      url.searchParams.delete('span');
+    }
     window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
   }
 
@@ -284,7 +289,7 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
           </div>
             ),
             distributor: <DistributorSection brand={brand} data={data} onChanged={refresh} />,
-            production: <ProductionSection brand={brand} forecast={forecast} canEdit={canEditCapacity} onChanged={refresh} />,
+            production: <ProductionSection brand={brand} canEdit={canEditCapacity} onChanged={refresh} notForecastable={forecast?.notForecastable ?? 0} />,
             timeline: (
           <div className="grid grid-cols-1 gap-4">
             <Card title={`Deals by expected close, ${data.monthsLabel}`} note={data.overdueOpen ? `${data.overdueOpen} open deals are past their close date` : undefined}>
@@ -394,111 +399,6 @@ function DistributorSection({ brand, data, onChanged }: { brand: CrmBrand; data:
   );
 }
 
-const CHIP: Record<string, string> = {
-  short: 'border-fail text-fail',
-  tight: 'border-attention text-secondary',
-  ok: 'border-pass text-secondary',
-  no_capacity: 'border-hairline text-tertiary',
-};
-const CHIP_LABEL: Record<string, string> = {
-  short: 'Short',
-  tight: 'Tight',
-  ok: 'OK',
-  no_capacity: 'No capacity entered',
-};
-
-function units(value: number): string {
-  return value.toLocaleString('en-US', { maximumFractionDigits: 1 });
-}
-
-function ProductionSection({ brand, forecast, canEdit, onChanged }: { brand: CrmBrand; forecast: ForecastBody | null; canEdit: boolean; onChanged: () => void }) {
-  const [message, setMessage] = useState('');
-  const cells = forecast?.cells || [];
-  const months = Array.from(new Set(cells.map((cell) => cell.month)));
-  async function save(form: HTMLFormElement) {
-    const data = new FormData(form);
-    const res = await fetch('/api/admin/crm/capacity', {
-      method: 'PUT',
-      headers: { 'x-cedargrowth-crm': '1', 'content-type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({
-        brand,
-        month: String(data.get('month') || ''),
-        productLine: String(data.get('productLine') || ''),
-        capacityUnits: Number(data.get('capacityUnits')),
-        notes: String(data.get('notes') || ''),
-      }),
-    });
-    const json = await res.json().catch(() => ({})) as { ok?: boolean; reason?: string };
-    setMessage(json.ok ? 'Capacity saved.' : String(json.reason || 'Capacity was not saved.'));
-    if (json.ok) { form.reset(); onChanged(); }
-  }
-  if (!forecast?.ok) return <Notice text={forecast?.reason || 'Production forecast is not available yet.'} />;
-  return (
-    <div className="flex flex-col gap-4">
-      <p className="text-caption text-tertiary">Weighted demand uses the win rate for the current stage. Won deals count in full. A blank capacity is not zero.</p>
-      {message ? <p role="status" className="border border-hairline bg-bone px-3 py-2 text-body-m text-primary">{message}</p> : null}
-      {(forecast.notForecastable || 0) > 0 ? <p className="text-body-m text-secondary">{forecast.notForecastable} deals have no product line or quantity, so they are not in this forecast.</p> : null}
-      <div className="overflow-x-auto border border-hairline bg-clinical">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="font-mono text-specimen uppercase tracking-specimen text-tertiary">
-              <th className="px-3 py-2 font-normal">Product line</th>
-              {months.map((month) => <th key={month} className="px-3 py-2 font-normal">{monthCaption(month)}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {PRODUCT_LINES.map((line) => (
-              <tr key={line} className="border-t border-hairline">
-                <th className="px-3 py-2 text-left font-sans text-body-m font-normal text-primary">{PRODUCT_LINE_LABELS[line]}</th>
-                {months.map((month) => {
-                  const cell = cells.find((item) => item.productLine === line && item.month === month);
-                  if (!cell) return <td key={month} className="px-3 py-2 text-caption text-tertiary">No capacity entered</td>;
-                  return (
-                    <td key={month} className="px-3 py-2">
-                      <p className="font-mono text-data tabular-nums text-primary">{units(cell.demand)} / {cell.capacityUnits === null ? 'No capacity' : units(cell.capacityUnits)}</p>
-                      <p className={`mt-1 inline-flex rounded-chip border px-2 py-0.5 font-mono text-specimen uppercase ${CHIP[cell.status]}`}>{CHIP_LABEL[cell.status]}</p>
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <Card title="Win rates used">
-        <ul className="flex flex-col gap-2">
-          {(forecast.rates || []).map((rate) => (
-            <li key={rate.stage} className="flex flex-wrap justify-between gap-2 text-body-m text-primary">
-              <span>{stageRateLabel(rate.stage)}</span>
-              <span className="font-mono text-data tabular-nums">{(rate.rate * 100).toFixed(0)}%. {rateCaption(rate)}</span>
-            </li>
-          ))}
-        </ul>
-      </Card>
-      {canEdit ? (
-        <form onSubmit={(event) => { event.preventDefault(); save(event.currentTarget); }} className="grid grid-cols-1 gap-3 border border-hairline bg-clinical p-4 md:grid-cols-2">
-          <h3 className="font-display text-body-l text-primary md:col-span-2">Capacity</h3>
-          <label className="flex flex-col gap-1 text-caption text-tertiary">Month
-            <input name="month" type="month" required className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
-          </label>
-          <label className="flex flex-col gap-1 text-caption text-tertiary">Product line
-            <select name="productLine" required defaultValue="vape" className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary">
-              {PRODUCT_LINES.map((line) => <option key={line} value={line}>{PRODUCT_LINE_LABELS[line]}</option>)}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-caption text-tertiary">Units
-            <input name="capacityUnits" required inputMode="numeric" className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
-          </label>
-          <label className="flex flex-col gap-1 text-caption text-tertiary">Notes
-            <input name="notes" className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
-          </label>
-          <button type="submit" className="w-fit border border-ink bg-ink px-4 py-2 font-mono text-specimen uppercase text-inverse">Save capacity</button>
-        </form>
-      ) : <p className="text-caption text-tertiary">Capacity is edited by an owner or administrator.</p>}
-    </div>
-  );
-}
 
 function Notice({ text }: { text: string }) {
   return <p className="border border-hairline bg-clinical px-4 py-3 text-body-m text-secondary">{text}</p>;

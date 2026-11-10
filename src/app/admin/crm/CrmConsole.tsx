@@ -6,6 +6,7 @@ import {
   ACCOUNT_TYPE_LABELS,
   ACCOUNT_TYPES,
   brandLabel,
+  parseBrand,
   LEAD_SOURCE_LABELS,
   LEAD_SOURCES,
   dollarsToCents,
@@ -192,6 +193,7 @@ export function CrmConsole({
   roleLabel: string;
 }) {
   const [brand, setBrand] = useState<CrmBrand>(brands[0] ?? 'cedargrowth');
+  const brandKey = brands.join(',');
   const [wing, setWing] = useState<Wing>('dashboard');
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [notice, setNotice] = useState('');
@@ -211,6 +213,11 @@ export function CrmConsole({
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [refresh, setRefresh] = useState(0);
+
+  useEffect(() => {
+    const requested = parseBrand(new URLSearchParams(window.location.search).get('brand'));
+    if (requested && brands.includes(requested)) setBrand(requested);
+  }, [brandKey, brands]);
 
   useEffect(() => {
     let cancel = false;
@@ -422,7 +429,12 @@ export function CrmConsole({
               key={item}
               type="button"
               aria-pressed={item === brand}
-              onClick={() => setBrand(item)}
+              onClick={() => {
+                setBrand(item);
+                const url = new URL(window.location.href);
+                url.searchParams.set('brand', item);
+                window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+              }}
               className={`border px-3 py-2 font-mono text-specimen uppercase tracking-specimen ${item === brand ? 'border-ink bg-ink text-inverse' : 'border-hairline bg-clinical text-primary'}`}
             >
               {brandLabel(item)}
