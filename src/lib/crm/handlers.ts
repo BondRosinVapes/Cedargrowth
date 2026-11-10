@@ -35,6 +35,7 @@ import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
 import { monthStart, monthStarts, parseCapacityWrite, parseForecastQuery, productionForecast, stageWinRates, weekStarts, weeklyProductionForecast } from './forecast';
+import { monthCloseWindow, weekCloseWindow } from './forecastRead';
 import { buildDigest, digestConfigured, digestFromAddress, digestRecipients, digestSummary, nyWeek, renderDigestHtml, renderDigestText, secretMatches } from './digest';
 import { COVERAGE_UPLOAD, NEEDS_HOODIE, NY_REGIONS } from './nyRegions';
 import { coverageLabel, territoryTiles, TERRITORY_METRICS, type TerritoryMetric } from './territory';
@@ -746,46 +747,52 @@ export async function handleForecast(ctx: CrmContext): Promise<CrmResult> {
   if (isResult(auth)) return auth;
   const parsed = parseForecastQuery(url.searchParams);
   if (!parsed.ok) return { status: 400, body: { ok: false, reason: parsed.reason } };
-  const [opps, events, capacity] = await Promise.all([
-    ctx.store.listOpportunities(auth.brand),
-    ctx.store.listStageEvents(auth.brand),
+  const today = new Date().toISOString().slice(0, 10);
+  const weeks = parsed.shape === 'week' ? weekStarts(today, parsed.weeks) : null;
+  const from = parsed.shape === 'week' ? null : parsed.shape === 'legacy' ? monthStart(today) : (parsed.from ?? monthStart(today));
+  const months = parsed.shape === 'week' || !from ? null : monthStarts(from, parsed.months);
+  const window = weeks ? weekCloseWindow(weeks) : months ? monthCloseWindow(months) : null;
+  if (!window || (parsed.shape !== 'week' && !from) || (parsed.shape !== 'week' && !months)) {
+    return { status: 400, body: { ok: false, reason: 'Month must be the first day of a month.' } };
+  }
+  const [inputs, capacity] = await Promise.all([
+    ctx.store.listForecastInputs(auth.brand, window),
     ctx.store.listCapacity(auth.brand),
   ]);
-  for (const result of [opps, events, capacity]) {
+  for (const result of [inputs, capacity]) {
     if (result.state !== 'ok') return storageBody(auth.brand, result.state === 'rejected' || result.state === 'missing' ? 'unavailable' : result.state);
   }
-  if (opps.state !== 'ok' || events.state !== 'ok' || capacity.state !== 'ok') return storageBody(auth.brand, 'unavailable');
-  const today = new Date().toISOString().slice(0, 10);
-  const rates = stageWinRates(events.value, opps.value);
+  if (inputs.state !== 'ok' || capacity.state !== 'ok') return storageBody(auth.brand, 'unavailable');
+  const rates = stageWinRates(inputs.value.events, inputs.value.opportunities);
   // listCapacity is the brand's full history, including months before this window.
+  // Legacy keeps the original keys: months, rates, cells, notForecastable, shorts.
   if (parsed.shape === 'legacy') {
     const forecast = productionForecast({
-      opportunities: opps.value,
+      opportunities: inputs.value.opportunities,
       capacity: capacity.value,
       rates,
-      months: monthStarts(today, parsed.months),
+      months: months ?? [],
     });
     return { status: 200, body: { ok: true, configured: true, brand: auth.brand, months: parsed.months, rates, ...forecast } };
   }
   if (parsed.shape === 'week') {
     const forecast = weeklyProductionForecast({
-      opportunities: opps.value,
+      opportunities: inputs.value.opportunities,
       capacity: capacity.value,
       rates,
-      weeks: weekStarts(today, parsed.weeks),
+      weeks: weeks || [],
       productLine: parsed.productLine,
       brand: auth.brand,
       carryForward: true,
     });
     return { status: 200, body: { ok: true, configured: true, brand: auth.brand, period: 'week', weeks: parsed.weeks, productLine: parsed.productLine, rates, ...forecast } };
   }
-  const from = parsed.from ?? monthStart(today);
-  if (!from) return { status: 400, body: { ok: false, reason: 'Month must be the first day of a month.' } };
+  if (!from || !months) return { status: 400, body: { ok: false, reason: 'Month must be the first day of a month.' } };
   const forecast = productionForecast({
-    opportunities: opps.value,
+    opportunities: inputs.value.opportunities,
     capacity: capacity.value,
     rates,
-    months: monthStarts(from, parsed.months),
+    months,
     productLine: parsed.productLine,
     brand: auth.brand,
     carryForward: true,
@@ -1307,21 +1314,25 @@ function emailStatusRow(row: { recipient: string; lastEvent: string | null; last
 }
 
 async function loadDigest(store: CrmStore, brand: CrmBrand, nowMs: number): Promise<{ model: ReturnType<typeof buildDigest> } | CrmResult> {
-  const [all, notes, orders, visits, events, capacity] = await Promise.all([
+  const today = nyWeek(nowMs).today;
+  const digestMonths = monthStarts(today, 6);
+  const digestWindow = monthCloseWindow(digestMonths);
+  const [all, notes, orders, visits, events, capacity, forecastInputs] = await Promise.all([
     store.exportBrand(brand),
     store.listNotes(brand, null),
     store.listDistributorOrders(brand),
     store.listVisits(brand),
     store.listStageEvents(brand),
     store.listCapacity(brand),
+    digestWindow ? store.listForecastInputs(brand, digestWindow) : Promise.resolve({ state: 'unavailable' as const }),
   ]);
   if (all.state !== 'ok') return storageBody(brand, all.state === 'rejected' || all.state === 'missing' ? 'unavailable' : all.state);
   if (notes.state !== 'ok') return storageBody(brand, notes.state === 'rejected' || notes.state === 'missing' ? 'unavailable' : notes.state);
   if (events.state !== 'ok' && events.state !== 'absent') return storageBody(brand, events.state === 'rejected' || events.state === 'missing' ? 'unavailable' : events.state);
   if (capacity.state !== 'ok' && capacity.state !== 'absent') return storageBody(brand, capacity.state === 'rejected' || capacity.state === 'missing' ? 'unavailable' : capacity.state);
-  const today = nyWeek(nowMs).today;
-  const forecast = events.state === 'ok' && capacity.state === 'ok'
-    ? productionForecast({ opportunities: all.value.opportunities, capacity: capacity.value, rates: stageWinRates(events.value, all.value.opportunities), months: monthStarts(today, 6) })
+  if (forecastInputs.state !== 'ok' && forecastInputs.state !== 'absent') return storageBody(brand, forecastInputs.state === 'rejected' || forecastInputs.state === 'missing' ? 'unavailable' : forecastInputs.state);
+  const forecast = forecastInputs.state === 'ok' && capacity.state === 'ok'
+    ? productionForecast({ opportunities: forecastInputs.value.opportunities, capacity: capacity.value, rates: stageWinRates(forecastInputs.value.events, forecastInputs.value.opportunities), months: digestMonths })
     : { shorts: [] as string[] };
   const model = buildDigest({
     brand,
