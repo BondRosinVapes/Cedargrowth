@@ -28,7 +28,7 @@ export function DashboardTabs({ section, onSelect }: { section: DashboardSection
             tabIndex={selected ? 0 : -1}
             onClick={() => onSelect(item.id)}
             onKeyDown={(event) => onKey(event, item.id)}
-            className={`min-h-[44px] flex-1 whitespace-nowrap px-2 py-2 text-center font-sans text-data ${selected ? 'border-b-2 border-cedar bg-parchment text-primary' : 'border-b-2 border-transparent text-inverse'}`}
+            className={`min-h-[44px] flex-auto whitespace-nowrap px-0.5 py-2 text-center font-sans text-[clamp(11px,1.65cqi,15px)] ${selected ? 'border-b-2 border-cedar bg-parchment text-primary' : 'border-b-2 border-transparent text-inverse'}`}
           >
             {item.label}
           </button>
