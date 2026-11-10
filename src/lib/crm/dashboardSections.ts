@@ -12,7 +12,7 @@ export const DASHBOARD_SECTIONS = [
 
 export type DashboardSection = (typeof DASHBOARD_SECTIONS)[number]['id'];
 
-export const DASHBOARD_TABLIST_CLASS = 'flex flex-wrap bg-ink lg:flex-nowrap';
+export const DASHBOARD_TABLIST_CLASS = 'flex w-full flex-wrap bg-ink lg:flex-nowrap';
 
 export function sectionFromSearch(value: string | null): DashboardSection {
   const match = DASHBOARD_SECTIONS.find((item) => item.id === value);
