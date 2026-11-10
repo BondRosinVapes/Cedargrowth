@@ -12,7 +12,7 @@ import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmat
 import { buildDigest, hoodieSignals, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
 import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, parseCounty, regionForCounty } from '../src/lib/crm/nyRegions.ts';
 import { coverageLabel } from '../src/lib/crm/territory.ts';
-import { clusterPins, countyAt, pinCard, placePins, unmappedAccountCount, type MapPin } from '../src/lib/crm/nyMap.ts';
+import { cityChoices, clusterPins, countyAt, countyChoices, countyFrame, framePoints, pinCard, placePins, projectNy, unmappedAccountCount, type MapPin } from '../src/lib/crm/nyMap.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
@@ -1438,6 +1438,17 @@ assert(clusterPins(placed, 40).clusters.length === 1 && clusterPins(placed, 0.05
 const card = pinCard(testPin('card', 42.89, -78.88));
 assert(card.some((row) => row.label === 'Rep' && row.value === 'No rep') && card.some((row) => row.mono && row.value === 'TEST-ONLY-LIC') && card.some((row) => row.label === 'Distributor' && row.value === 'Nabis') && card.some((row) => row.label === 'Contacts' && row.value === '2'), 'a pin card shows the dispensary fields and No rep');
 assert(unmappedAccountCount([{ latitude: null, longitude: null }, { latitude: 42.8, longitude: -78.8 }, { latitude: 10, longitude: -78.8 }, { latitude: 10, longitude: -78.8, recordMarker: 'test' }]) === 2, 'accounts without a New York coordinate stay off the map');
+const menuPins = [testPin('north', 42.89, -78.88), { ...testPin('south', 40.75, -73.99), city: 'New York', county: 'New York' }];
+const cities = cityChoices(menuPins, '');
+const buffaloOnly = cityChoices(menuPins, 'BUFF');
+assert(cities[0]?.label === 'New York City' && cities[0].count === 1 && cities.slice(1).map((row) => row.label).join(',') === 'Buffalo,New York' && buffaloOnly.length === 1 && buffaloOnly[0].label === 'Buffalo' && buffaloOnly[0].count === 1, 'city search lists New York City first, then account cities, and filters without case');
+const counties = countyChoices(menuPins, '');
+const erie = countyChoices(menuPins, 'erie');
+assert(counties[0]?.label === 'Whole state' && counties.length === 63 && counties.find((row) => row.label === 'Hamilton')?.count === 0 && erie.length === 1 && erie[0].label === 'Erie' && erie[0].count === 1, 'county search lists all 62 counties, keeps a zero, and filters');
+const erieFrame = countyFrame('Erie');
+const buffalo = projectNy(-78.878, 42.886);
+const cityFrame = framePoints(placePins(menuPins.filter((pin) => pin.city === 'Buffalo')).placed);
+assert(!!erieFrame && buffalo.x >= erieFrame.x && buffalo.x <= erieFrame.x + erieFrame.w && buffalo.y >= erieFrame.y && buffalo.y <= erieFrame.y + erieFrame.h && !!cityFrame && cityFrame.w < 1000, 'a county frame contains the county and a city frame fits its pins');
 
 const suiteSql = readFileSync('supabase/migrations/0123_crm_suite_workflows.sql', 'utf8');
 const raiseAt = suiteSql.indexOf('unsupported opportunity stage');

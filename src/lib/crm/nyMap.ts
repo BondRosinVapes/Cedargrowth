@@ -2,7 +2,7 @@
 // The county file is a Census cartographic boundary, generalized from TIGER/Line.
 
 import { DISTRIBUTOR_LABELS, type Distributor } from './distributor';
-import { COUNTY_REGION, regionForCounty, type NyRegion } from './nyRegions';
+import { COUNTY_REGION, NY_COUNTIES, regionForCounty, type NyRegion } from './nyRegions';
 import shapes from './nyCounties.json' with { type: 'json' };
 
 export type MapPin = {
@@ -147,6 +147,69 @@ export function pinCard(pin: MapPin): { label: string; value: string; mono?: boo
     { label: 'Distributor', value: pin.distributor ? DISTRIBUTOR_LABELS[pin.distributor] : 'Not set' },
     { label: 'Contacts', value: String(pin.contactCount) },
   ];
+}
+
+export type MapChoice = { id: string; label: string; count: number };
+
+const BOROUGHS = new Set(['Bronx', 'Kings', 'New York', 'Queens', 'Richmond']);
+
+function matches(label: string, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  return !needle || label.toLowerCase().includes(needle);
+}
+
+export function cityChoices(pins: readonly { city: string | null; county: string | null }[], query: string): MapChoice[] {
+  const counts = new Map<string, { label: string; count: number }>();
+  let boroughs = 0;
+  for (const pin of pins) {
+    if (pin.county && BOROUGHS.has(pin.county)) boroughs += 1;
+    const label = pin.city?.trim();
+    if (!label) continue;
+    const key = label.toLowerCase();
+    const row = counts.get(key);
+    if (row) row.count += 1;
+    else counts.set(key, { label, count: 1 });
+  }
+  const cities = [...counts.values()]
+    .filter((row) => matches(row.label, query))
+    .sort((a, b) => a.label.localeCompare(b.label, 'en', { sensitivity: 'base' }))
+    .map((row) => ({ id: `city:${row.label.toLowerCase()}`, label: row.label, count: row.count }));
+  const top = matches('New York City', query) ? [{ id: 'nyc', label: 'New York City', count: boroughs }] : [];
+  return [...top, ...cities];
+}
+
+export function countyChoices(pins: readonly { county: string | null }[], query: string): MapChoice[] {
+  const counts = new Map<string, number>(NY_COUNTIES.map((name) => [name, 0]));
+  for (const pin of pins) {
+    const name = NY_COUNTIES.find((county) => county.toLowerCase() === (pin.county || '').trim().toLowerCase());
+    if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  const rows = [...NY_COUNTIES]
+    .filter((name) => matches(name, query))
+    .sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' }))
+    .map((name) => ({ id: `county:${name}`, label: name, count: counts.get(name) ?? 0 }));
+  const top = matches('Whole state', query) ? [{ id: 'state', label: 'Whole state', count: pins.length }] : [];
+  return [...top, ...rows];
+}
+
+export function framePoints(points: readonly { x: number; y: number }[]): { x: number; y: number; w: number; h: number } | null {
+  if (!points.length) return null;
+  const left = Math.min(...points.map((point) => point.x));
+  const right = Math.max(...points.map((point) => point.x));
+  const top = Math.min(...points.map((point) => point.y));
+  const bottom = Math.max(...points.map((point) => point.y));
+  const pad = Math.max(right - left, bottom - top, MAP_WIDTH / 14) * 0.18;
+  const span = Math.max(right - left + pad * 2, MAP_WIDTH / 14);
+  const height = Math.max(bottom - top + pad * 2, span * (MAP_HEIGHT / MAP_WIDTH));
+  const width = Math.max(span, height / (MAP_HEIGHT / MAP_WIDTH));
+  return { x: (left + right) / 2 - width / 2, y: (top + bottom) / 2 - height / 2, w: width, h: width * (MAP_HEIGHT / MAP_WIDTH) };
+}
+
+export function countyFrame(name: string): { x: number; y: number; w: number; h: number } | null {
+  const county = file.counties.find((row) => row.name === name);
+  if (!county) return null;
+  const points = county.rings.flatMap((ring) => ring.map(([lon, lat]) => projectNy(lon, lat)));
+  return framePoints(points);
 }
 
 export function unmappedAccountCount(rows: readonly { latitude?: number | null; longitude?: number | null; recordMarker?: 'test' | null }[]): number {
