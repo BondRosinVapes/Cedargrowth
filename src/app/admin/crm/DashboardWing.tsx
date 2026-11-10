@@ -14,7 +14,9 @@ import {
   type Dashboard,
   type RepRow,
 } from '@/lib/crm/dashboard';
+import { sectionFromSearch, type DashboardSection } from '@/lib/crm/dashboardSections';
 import { QuickAdd, SpreadsheetUpload } from './DataIntake';
+import { DashboardSectionHost, DashboardTabs } from './DashboardTabs';
 import { DigestPanel } from './DigestPanel';
 import { NextActions, TerritoryMap } from './TerritoryMap';
 
@@ -28,7 +30,6 @@ type DashboardBody = {
   refreshedAt?: string;
   truncated?: boolean;
 };
-type Section = 'overview' | 'reps' | 'accounts' | 'sources' | 'timeline' | 'distributor' | 'production';
 type ForecastBody = {
   ok?: boolean;
   reason?: string;
@@ -38,16 +39,6 @@ type ForecastBody = {
   shorts?: string[];
 };
 type Jump = 'accounts' | 'pipeline' | 'canix' | 'signals';
-
-const SECTIONS: { id: Section; label: string }[] = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'reps', label: 'Sales rep analysis' },
-  { id: 'accounts', label: 'Account breakdown' },
-  { id: 'sources', label: 'Source effectiveness' },
-  { id: 'timeline', label: 'Timeline analysis' },
-  { id: 'distributor', label: 'Distributor' },
-  { id: 'production', label: 'Production forecast' },
-];
 
 // Categorical order from the house tokens, checked for adjacent color-blind separation:
 // cedar, verdant, tertiary, ink. Every chart also carries a legend and direct labels.
@@ -88,7 +79,7 @@ function topWithOther(rows: Bucket[]): Bucket[] {
 }
 
 export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpenAccount }: { brand: CrmBrand; brandName: string; onOpen?: (wing: Jump) => void; canEditCapacity?: boolean; onOpenAccount: (id: string) => void }) {
-  const [section, setSection] = useState<Section>('overview');
+  const [section, setSection] = useState<DashboardSection>('overview');
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [body, setBody] = useState<DashboardBody | null>(null);
   const [failed, setFailed] = useState(false);
@@ -98,6 +89,19 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
 
   // Live refresh: every 60 seconds while the tab is visible, when the tab regains focus,
   // and right after anything is added or imported from this screen.
+  useEffect(() => {
+    const stored = sectionFromSearch(new URLSearchParams(window.location.search).get('section'));
+    if (stored !== 'overview') setSection(stored);
+  }, []);
+
+  function selectSection(next: DashboardSection) {
+    setSection(next);
+    const url = new URL(window.location.href);
+    if (next === 'overview') url.searchParams.delete('section');
+    else url.searchParams.set('section', next);
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+
   useEffect(() => {
     const bump = () => { if (document.visibilityState === 'visible') setTick((value) => value + 1); };
     const timer = window.setInterval(bump, 60_000);
@@ -162,24 +166,9 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
   );
 
   return (
-    <section aria-label={`${brandName} dashboard`} className="grid grid-cols-1 gap-4 lg:grid-cols-[13rem_minmax(0,1fr)_14rem]">
-      <nav aria-label="Dashboard sections" className="bg-ink lg:min-h-full">
-        <ul className="flex overflow-x-auto lg:flex-col lg:py-6">
-          {SECTIONS.map((item) => (
-            <li key={item.id} className="shrink-0">
-              <button
-                type="button"
-                aria-pressed={section === item.id}
-                onClick={() => setSection(item.id)}
-                className={`w-full whitespace-nowrap border-b-2 px-4 py-3 text-left font-sans text-caption lg:border-b-0 lg:border-l-2 lg:px-5 ${section === item.id ? 'border-cedar bg-parchment text-primary' : 'border-transparent text-inverse'}`}
-              >
-                {item.label}
-              </button>
-            </li>
-          ))}
-        </ul>
-      </nav>
-
+    <section aria-label={`${brandName} dashboard`} className="flex flex-col gap-4">
+      <DashboardTabs section={section} onSelect={selectSection} />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_14rem]">
       <div className="flex min-w-0 flex-col gap-4">
         <details className="bg-ink p-4 text-inverse lg:hidden">
           <summary className="cursor-pointer font-mono text-specimen uppercase tracking-specimen">Filters{filtered ? ' (on)' : ''}</summary>
@@ -198,42 +187,36 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
           </div>
         </div>
 
-        <DigestPanel brand={brand} canSend={canEditCapacity} />
         {panel === 'add' ? <QuickAdd brand={brand} onSaved={refresh} /> : null}
         {panel === 'upload' ? <SpreadsheetUpload brand={brand} onSaved={refresh} /> : null}
 
-        {forecast?.shorts?.length ? (
-          <div className="flex flex-col gap-2 border border-fail bg-clinical px-4 py-3" role="status">
-            {forecast.shorts.map((line) => <p key={line} className="text-body-m text-primary">{line}</p>)}
-          </div>
-        ) : null}
-
-        <dl className="grid grid-cols-2 gap-4 md:grid-cols-5">
-          <Kpi label="Deals" value={String(data.kpis.deals)} />
-          <Kpi label="Total deal value" value={money(data.kpis.totalValueCents)} note="Forecast" detail={data.distributor.nabisOrderCount > 0 ? `Invoiced (Nabis): ${money(data.distributor.invoicedNabisCents)}` : undefined} />
-          <Kpi label="Win rate" value={percent(data.kpis.winRate)} />
-          <Kpi label="Avg response time" value={hours(data.kpis.avgResponseHours)} note={data.kpis.responseSample ? `${data.kpis.responseSample} accounts` : 'First note after a new account'} muted={data.kpis.avgResponseHours === null} />
-          <Kpi label="Avg deal value" value={money(data.kpis.avgDealCents)} note="Forecast" />
-        </dl>
-
-        {empty ? (
-          <div className="flex flex-col gap-3 border border-hairline bg-clinical p-4 md:flex-row md:items-center md:justify-between">
-            <p className="text-body-m text-secondary">
-              {filtered ? 'Nothing matches these filters.' : `No ${brandName} records yet. Add one with Quick add, or upload a spreadsheet of accounts and deals. The charts update live.`}
-            </p>
-            {!filtered && panel === 'none' ? (
-              <div className="flex shrink-0 gap-3">
-                <button type="button" onClick={() => setPanel('add')} className="border border-ink bg-ink px-4 py-2 font-mono text-specimen uppercase text-inverse">Quick add</button>
-                <button type="button" onClick={() => setPanel('upload')} className="border border-ink px-4 py-2 font-mono text-specimen uppercase text-primary">Upload spreadsheet</button>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
-        <TerritoryMap brand={brand} canAssign={canEditCapacity} territory={filters.territory} onSelect={(region) => setFilters((current) => ({ ...current, territory: current.territory === region ? '' : region }))} onOpenAccount={onOpenAccount} />
-
-        {section === 'overview' ? (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <DashboardSectionHost
+          section={section}
+          panels={{
+            overview: (
+              <>
+                <DigestPanel brand={brand} canSend={canEditCapacity} />
+                {forecast?.shorts?.length ? (
+                  <div className="flex flex-col gap-2 border border-fail bg-clinical px-4 py-3" role="status">
+                    {forecast.shorts.map((line) => <p key={line} className="text-body-m text-primary">{line}</p>)}
+                  </div>
+                ) : null}
+                <dl className="grid grid-cols-2 gap-4 md:grid-cols-5">
+                  <Kpi label="Deals" value={String(data.kpis.deals)} />
+                  <Kpi label="Total deal value" value={money(data.kpis.totalValueCents)} note="Forecast" detail={data.distributor.nabisOrderCount > 0 ? `Invoiced (Nabis): ${money(data.distributor.invoicedNabisCents)}` : undefined} />
+                  <Kpi label="Win rate" value={percent(data.kpis.winRate)} />
+                  <Kpi label="Avg response time" value={hours(data.kpis.avgResponseHours)} note={data.kpis.responseSample ? `${data.kpis.responseSample} accounts` : 'First note after a new account'} muted={data.kpis.avgResponseHours === null} />
+                  <Kpi label="Avg deal value" value={money(data.kpis.avgDealCents)} note="Forecast" />
+                </dl>
+                {empty ? (
+                  <div className="flex flex-col gap-3 border border-hairline bg-clinical p-4 md:flex-row md:items-center md:justify-between">
+                    <p className="text-body-m text-secondary">
+                      {filtered ? 'Nothing matches these filters.' : `No ${brandName} records yet. Add one with Quick add, or upload a spreadsheet of accounts and deals. The charts update live.`}
+                    </p>
+                  </div>
+                ) : null}
+                <TerritoryMap brand={brand} canAssign={canEditCapacity} territory={filters.territory} onSelect={(region) => setFilters((current) => ({ ...current, territory: current.territory === region ? '' : region }))} onOpenAccount={onOpenAccount} />
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             <Card title="Deals by account type">
               <Donut rows={topWithOther(data.byAccountType)} colorFor={(_, index) => SERIES[index]} measure="count" empty="Set an account type on each account to see this." />
             </Card>
@@ -247,9 +230,9 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
               <Scatter rows={data.byLeadSource} />
             </Card>
           </div>
-        ) : null}
-
-        {section === 'reps' ? (
+              </>
+            ),
+            reps: (
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <Card title="Deals by sales rep" className="xl:col-span-2"><RepTable rows={data.byRep} /></Card>
             <Card title="Next best action" className="xl:col-span-2"><NextActions brand={brand} /></Card>
@@ -272,9 +255,8 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
               <Bars rows={data.byRep.filter((row) => row.winRate !== null).map((row) => ({ ...row, count: Math.round((row.winRate ?? 0) * 1000) / 10 }))} suffix="%" empty="No closed deals yet." />
             </Card>
           </div>
-        ) : null}
-
-        {section === 'accounts' ? (
+            ),
+            accounts: (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             <Card title="Deal value by account type">
               <Bars rows={data.byAccountType} measure="cents" empty="Set an account type on each account to see this." />
@@ -286,9 +268,8 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
               <Bars rows={data.byRegion} empty="Add a city to each account to see regions." />
             </Card>
           </div>
-        ) : null}
-
-        {section === 'sources' ? (
+            ),
+            sources: (
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <Card title="Deals by lead source">
               <Bars rows={data.byLeadSource} empty="Set a lead source on each account to see this." />
@@ -301,12 +282,10 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
               <Scatter rows={data.byLeadSource} />
             </Card>
           </div>
-        ) : null}
-
-        {section === 'distributor' ? <DistributorSection brand={brand} data={data} onChanged={refresh} /> : null}
-        {section === 'production' ? <ProductionSection brand={brand} forecast={forecast} canEdit={canEditCapacity} onChanged={refresh} /> : null}
-
-        {section === 'timeline' ? (
+            ),
+            distributor: <DistributorSection brand={brand} data={data} onChanged={refresh} />,
+            production: <ProductionSection brand={brand} forecast={forecast} canEdit={canEditCapacity} onChanged={refresh} />,
+            timeline: (
           <div className="grid grid-cols-1 gap-4">
             <Card title={`Deals by expected close, ${data.monthsLabel}`} note={data.overdueOpen ? `${data.overdueOpen} open deals are past their close date` : undefined}>
               <Columns rows={data.byMonth} measure="count" />
@@ -315,10 +294,13 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
               <Columns rows={data.byMonth} measure="cents" />
             </Card>
           </div>
-        ) : null}
+            ),
+          }}
+        />
       </div>
 
       <aside aria-label="Filters" className="hidden bg-ink p-5 text-inverse lg:block">{filterPanel}</aside>
+      </div>
     </section>
   );
 }
