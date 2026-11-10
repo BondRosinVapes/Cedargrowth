@@ -5,6 +5,7 @@ import {
   FORECAST_UNREADABLE,
   NO_CAPACITY,
   WEEKLY_PENDING,
+  asOfLine,
   buildMonthlyBoard,
   buildWeeklyBoard,
   coversYearWindow,
@@ -17,6 +18,7 @@ import {
   roundCapacityUnits,
   selectSpan,
   shiftMonth,
+  todayInNewYork,
   yearWindowCaption,
   type MonthlyForecastCell,
 } from '../src/lib/crm/forecastClient.ts';
@@ -78,7 +80,11 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     && weekOverview.includes('period=week'),
     'forecast queries send period, and year paging sends from',
   );
-  assert(shiftMonth('2026-11-01', -3) === '2026-08-01' && shiftMonth('2026-11-01', 3) === '2027-02-01' && yearWindowCaption('2026-08-01') === 'Aug 26 to Jul 27' && coversYearWindow(['2026-11-01'], '2026-08-01') === false, 'the year window steps three months and names its range');
+  assert(shiftMonth('2026-11-01', -3) === '2026-08-01' && shiftMonth('2026-11-01', 3) === '2027-02-01' && yearWindowCaption('2026-08-01') === 'Aug 2026 to Jul 2027' && coversYearWindow(['2026-11-01'], '2026-08-01') === false, 'the year window steps three months and names its range');
+  const thisWeek = buildWeeklyBoard([{ isoWeek: '2026-W46', weekStart: '2026-11-09', productLine: 'vape', demand: 4, capacityUnits: 8, gap: 4, status: 'ok' }], 'vape', '2026-11-10');
+  const thisMonth = buildMonthlyBoard([{ month: '2026-11-01', productLine: 'vape', demand: 4, capacityUnits: 8, gap: 4, status: 'ok' }], 'vape', '2026-11-10');
+  assert(todayInNewYork(new Date('2026-11-11T04:00:00Z')) === '2026-11-10' && asOfLine('2026-11-10') === 'As of Tuesday, Nov 10, 2026', 'today is the New York calendar date');
+  assert(thisWeek.columns[0].label === 'This week' && thisWeek.columns[0].dates === 'Nov 9 to 15' && thisWeek.columns[0].caption === 'Nov 9 to Nov 15, 2026' && thisMonth.columns[0].label === 'This month' && thisMonth.columns[0].dates === 'Nov 2026', 'the current week and month are labeled from today');
 
   assert(parseWeeklyForecast(monthlyBody) === null, 'a monthly payload is not a weekly forecast');
   assert(parseWeeklyForecast({ ...weeklyBody, period: 'month' }) === null, 'a week request that comes back without period week stays pending');
@@ -123,7 +129,7 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     && blankHtml.includes('name="capacityUnits"')
     && blankHtml.includes('Save capacity')
     && blankHtml.includes('href="/admin/crm?section=production&amp;brand=cedargrowth&amp;line=vape"')
-    && blankHtml.includes('960 / 560')
+    && blankHtml.includes('h-[240px]')
     && blankHtml.includes('md:hidden')
     && blankHtml.includes('md:grid'),
     'a blank capacity renders No capacity entered, and the capacity form still saves',
@@ -208,8 +214,8 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     onBack: () => {},
   }));
   assert(extended.columns[1].capacityUnits === 40 && extended.columns[1].capacitySource === 'extended' && extended.columns[1].carriedFrom === '2020-01-01' && extended.columns[2].capacityUnits === null, 'extended capacity keeps its number and a blank with no earlier entry stays null');
-  assert(extendedHtml.includes('ext.') && extendedHtml.includes('Carried forward from Jan 20') && extendedHtml.includes(NO_CAPACITY) && extendedHtml.includes('stroke-dasharray="2 7"'), 'extended capacity shows ext. and a dotted segment, and a true blank stays No capacity entered');
+  assert(extendedHtml.includes('ext.') && extendedHtml.includes('Carried forward from Jan 2020') && extendedHtml.includes(NO_CAPACITY) && extendedHtml.includes('stroke-dasharray="2 7"'), 'extended capacity shows ext. and a dotted segment, and a true blank stays No capacity entered');
 
   const older = renderToStaticMarkup(createElement(YearWindow, { from: '2026-08-01', canPrev: false, canNext: true, onShift: () => {} }));
-  assert(older.includes('← 3 months') && older.includes('3 months →') && older.includes('Aug 26 to Jul 27') && (older.match(/disabled=""/g) || []).length === 1, 'year paging uses square mono controls and can disable one direction');
+  assert(older.includes('← 3 months') && older.includes('3 months →') && older.includes('Aug 2026 to Jul 2027') && (older.match(/disabled=""/g) || []).length === 1, 'year paging uses square mono controls and can disable one direction');
 }
