@@ -137,3 +137,51 @@
     animation-delay: 0ms !important;
   }
 }
+
+/*
+  Production forecast. Rise 16px, a rule draw, and a line draw, each once.
+  Reduced motion keeps opacity only, at 120ms.
+*/
+@keyframes prodRise {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes prodRule {
+  from { opacity: 0; transform: scaleX(0); }
+  to { opacity: 1; transform: scaleX(1); }
+}
+@keyframes prodLineDraw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes prodFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.prod-rise.prod-in {
+  animation: prodRise 500ms var(--ease-cedar) both;
+}
+.prod-rule {
+  transform-origin: left center;
+}
+.prod-rule.prod-in {
+  animation: prodRule 700ms var(--ease-cedar) both;
+}
+.prod-line {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+}
+.prod-line.prod-in {
+  animation: prodLineDraw 700ms var(--ease-cedar) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .prod-rise.prod-in,
+  .prod-rule.prod-in,
+  .prod-line.prod-in {
+    animation-name: prodFade !important;
+    animation-duration: 120ms !important;
+    animation-delay: 0ms !important;
+    transform: none !important;
+    stroke-dashoffset: 0 !important;
+  }
+}
