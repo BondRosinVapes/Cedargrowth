@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSupabaseServerClient } from '@/lib/supabase';
 import {
-  isMissingSchema,
+  crmStorageDetail,
   isolateBrand,
   type AccountStatus,
   type AlertRecord,
@@ -305,7 +305,7 @@ type DbError = { code?: string; message?: string } | null;
 
 function classify(error: DbError): 'absent' | 'unavailable' | null {
   if (!error) return null;
-  return isMissingSchema(error) ? 'absent' : 'unavailable';
+  return crmStorageDetail(error) === 'schema_absent' ? 'absent' : 'unavailable';
 }
 
 function asBrand(value: unknown): CrmBrand | null {

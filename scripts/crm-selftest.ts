@@ -49,6 +49,8 @@ import {
   hasForbiddenSignal,
   HOODIE_NOT_CONNECTED,
   isolateBrand,
+  crmStorageDetail,
+  isMissingSchema,
   nextAlertState,
   parseBrand,
   parseOpportunityWrite,
@@ -1010,6 +1012,13 @@ const grid = productionForecast({
 const vapeCell = grid.cells.find((cell) => cell.productLine === 'vape');
 const gummyCell = grid.cells.find((cell) => cell.productLine === 'gummy');
 assert(vapeCell?.demand === 60 && vapeCell.status === 'short' && vapeCell.gap === -20 && gummyCell?.status === 'no_capacity' && gummyCell.capacityUnits === null && gummyCell.gap === null && grid.notForecastable === 1, 'demand math for open and won, and missing capacity is not zero');
+const operatorError = { code: '42883', message: 'operator does not exist: date ~~ unknown' };
+assert(crmStorageDetail(operatorError) === 'read_failed' && isMissingSchema(operatorError) === false, '42883 is a failed read, not a missing schema');
+for (const code of ['42P01', '42703', 'PGRST205']) {
+  const schemaError = { code, message: 'relation does not exist' };
+  assert(crmStorageDetail(schemaError) === 'schema_absent' && isMissingSchema(schemaError) === true, `${code} stays schema absent`);
+}
+assert(crmStorageDetail({ message: 'column does not exist' }) === 'read_failed', 'schema absence is decided by the error code, not the message');
 await assertForecastPeriods(assert);
 const salesCap = await handleCapacity({ actorId: 'sales-1', grants: salesGrant, request: crmReq('PUT', '/api/admin/crm/capacity', { brand: 'cedargrowth', month: '2026-12', productLine: 'vape', capacityUnits: 10 }), store: memory });
 assert(salesCap.status === 403, 'a salesperson cannot edit capacity');
