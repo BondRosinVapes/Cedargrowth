@@ -4,15 +4,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { NY_REGIONS, type NyRegion } from '@/lib/crm/nyRegions';
 import {
   cityChoices,
-  clusterPins,
   COUNTY_DRAWS,
   countyChoices,
   countyFrame,
+  declutterPins,
   framePoints,
   CITY_MENU_LABEL,
   COUNTY_MENU_LABEL,
-  MAP_HEIGHT,
-  MAP_WIDTH,
   nycFrame,
   pinCard,
   placePins,
@@ -31,38 +29,47 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   const [litIds, setLitIds] = useState<ReadonlySet<string>>(() => new Set());
   const [outline, setOutline] = useState<string | null>(null);
   const drag = useRef<{ x: number; y: number; viewX: number; viewY: number; pointer: number } | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
   const placed = useMemo(() => placePins(pins).placed, [pins]);
-  const cell = view.w / 28;
-  const grouped = useMemo(() => clusterPins(placed, cell), [placed, cell]);
-  const active = placed.find((pin) => pin.id === activeId) ?? null;
   const mark = Math.max(view.w / 90, 4);
+  const grouped = useMemo(() => declutterPins(placed, mark * 2.8), [placed, mark]);
+  const active = placed.find((pin) => pin.id === activeId) ?? null;
+  const zoomed = view.w < WHOLE.w - 0.5;
 
-  function zoomAt(factor: number, anchorX: number, anchorY: number) {
+  useEffect(() => {
+    const node = svgRef.current;
+    if (!node) return;
+    const blockPinch = (event: Event) => event.preventDefault();
+    const blockCtrlWheel = (event: WheelEvent) => {
+      if (event.ctrlKey) event.preventDefault();
+    };
+    node.addEventListener('gesturestart', blockPinch);
+    node.addEventListener('gesturechange', blockPinch);
+    node.addEventListener('wheel', blockCtrlWheel, { passive: false });
+    return () => {
+      node.removeEventListener('gesturestart', blockPinch);
+      node.removeEventListener('gesturechange', blockPinch);
+      node.removeEventListener('wheel', blockCtrlWheel);
+    };
+  }, []);
+
+  function zoomAt(factor: number) {
     setView((current) => {
       const nextW = Math.min(WHOLE.w, Math.max(WHOLE.w / 14, current.w / factor));
-      const nextH = nextW * (current.h / current.w);
-      const rx = (anchorX - current.x) / current.w;
-      const ry = (anchorY - current.y) / current.h;
-      return { x: anchorX - rx * nextW, y: anchorY - ry * nextH, w: nextW, h: nextH };
+      if (nextW >= WHOLE.w - 0.5) return WHOLE;
+      const nextH = nextW * (WHOLE.h / WHOLE.w);
+      const cx = current.x + current.w / 2;
+      const cy = current.y + current.h / 2;
+      return { x: cx - nextW / 2, y: cy - nextH / 2, w: nextW, h: nextH };
     });
-  }
-
-  function frameCluster(pinsInCluster: PlacedPin[]) {
-    const left = Math.min(...pinsInCluster.map((pin) => pin.x));
-    const right = Math.max(...pinsInCluster.map((pin) => pin.x));
-    const top = Math.min(...pinsInCluster.map((pin) => pin.y));
-    const bottom = Math.max(...pinsInCluster.map((pin) => pin.y));
-    const w = Math.max((right - left) * 1.8, WHOLE.w / 14);
-    const h = w * (WHOLE.h / WHOLE.w);
-    setView({ x: (left + right) / 2 - w / 2, y: (top + bottom) / 2 - h / 2, w, h });
   }
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
-      <div className="border border-hairline bg-parchment">
+      <div className="min-w-0 border border-hairline bg-parchment">
         <div className="flex flex-wrap gap-2 p-2">
-          <button type="button" onClick={() => zoomAt(1.4, view.x + view.w / 2, view.y + view.h / 2)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">+</button>
-          <button type="button" onClick={() => zoomAt(1 / 1.4, view.x + view.w / 2, view.y + view.h / 2)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">-</button>
+          <button type="button" onClick={() => zoomAt(1.4)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">+</button>
+          <button type="button" onClick={() => zoomAt(1 / 1.4)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">-</button>
           <MapMenu
             id="city-menu"
             label={CITY_MENU_LABEL}
@@ -100,19 +107,16 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
           />
         </div>
         <svg
+          ref={svgRef}
           viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
+          preserveAspectRatio="xMidYMid meet"
           role="img"
           aria-label="New York dispensary map"
-          className="h-[28rem] w-full touch-none bg-parchment md:h-[36rem]"
-          onWheel={(event) => {
-            event.preventDefault();
-            const rect = event.currentTarget.getBoundingClientRect();
-            const anchorX = view.x + ((event.clientX - rect.left) / rect.width) * view.w;
-            const anchorY = view.y + ((event.clientY - rect.top) / rect.height) * view.h;
-            zoomAt(event.deltaY < 0 ? 1.2 : 1 / 1.2, anchorX, anchorY);
-          }}
+          className="block w-full min-w-0 bg-parchment"
+          style={{ aspectRatio: `${WHOLE.w} / ${WHOLE.h}`, touchAction: 'pan-y' }}
+          onDoubleClick={(event) => event.preventDefault()}
           onPointerDown={(event) => {
-            if ((event.target as Element).closest('[data-pin]')) return;
+            if (!zoomed || (event.target as Element).closest('[data-pin]')) return;
             drag.current = { x: event.clientX, y: event.clientY, viewX: view.x, viewY: view.y, pointer: event.pointerId };
             event.currentTarget.setPointerCapture(event.pointerId);
           }}
@@ -133,24 +137,18 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
             const marked = outline === county.name;
             return <path key={county.name} d={county.d} fill={`rgb(var(--surface-ink) / ${tone})`} stroke={marked ? 'rgb(var(--surface-ink))' : 'rgb(var(--line-hairline))'} strokeWidth={marked ? view.w / 280 : view.w / 900} />;
           })}
-          {grouped.clusters.map((cluster) => (
-            <g key={`${cluster.x}-${cluster.y}`} data-pin="cluster">
-              <rect
-                x={cluster.x - mark}
-                y={cluster.y - mark}
-                width={mark * 2}
-                height={mark * 2}
-                fill="rgb(var(--surface-ink))"
-                className="cursor-pointer"
-                tabIndex={0}
-                role="button"
-                aria-label={`${cluster.count} dispensaries. Zoom in to separate them.`}
-                onClick={() => frameCluster(cluster.pins)}
-                onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); frameCluster(cluster.pins); } }}
-              />
-              <text x={cluster.x} y={cluster.y} textAnchor="middle" dominantBaseline="central" fill="rgb(var(--text-inverse))" fontSize={mark} className="pointer-events-none font-mono">{cluster.count}</text>
-            </g>
-          ))}
+          {grouped.clusters.map((cluster) => {
+            const label = String(cluster.count);
+            const textSize = mark * 0.7;
+            const chipW = Math.max(mark * 1.8, label.length * textSize * 0.65 + textSize * 0.5);
+            const chipH = textSize * 1.8;
+            return (
+              <g key={`${cluster.x}-${cluster.y}`} aria-label={`${cluster.count} dispensaries`}>
+                <rect x={cluster.x - chipW / 2} y={cluster.y - chipH / 2} width={chipW} height={chipH} fill="rgb(var(--surface-ink))" />
+                <text x={cluster.x} y={cluster.y} textAnchor="middle" dominantBaseline="central" fill="rgb(var(--text-inverse))" fontSize={textSize} className="pointer-events-none font-mono">{label}</text>
+              </g>
+            );
+          })}
           {grouped.singles.map((pin) => {
             const selected = pin.id === activeId;
             const lit = litIds.has(pin.id);

@@ -120,6 +120,39 @@ export function placePins(pins: readonly MapPin[]): { placed: PlacedPin[]; rejec
   return { placed, rejected };
 }
 
+// Chips that would draw on top of each other share one count at their centroid.
+// The pins keep the coordinates placePins stored.
+export function declutterPins(pins: readonly PlacedPin[], gap: number): { singles: PlacedPin[]; clusters: PinCluster[] } {
+  const span = Math.max(gap, 0.001);
+  const spanSq = span * span;
+  type Group = { pins: PlacedPin[]; x: number; y: number };
+  let groups: Group[] = pins.map((pin) => ({ pins: [pin], x: pin.x, y: pin.y }));
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (let i = 0; i < groups.length && !merged; i += 1) {
+      for (let j = i + 1; j < groups.length; j += 1) {
+        const dx = groups[i].x - groups[j].x;
+        const dy = groups[i].y - groups[j].y;
+        if (dx * dx + dy * dy >= spanSq) continue;
+        const members = groups[i].pins.concat(groups[j].pins);
+        const x = members.reduce((sum, pin) => sum + pin.x, 0) / members.length;
+        const y = members.reduce((sum, pin) => sum + pin.y, 0) / members.length;
+        groups = [...groups.slice(0, i), ...groups.slice(i + 1, j), ...groups.slice(j + 1), { pins: members, x, y }];
+        merged = true;
+        break;
+      }
+    }
+  }
+  const singles: PlacedPin[] = [];
+  const clusters: PinCluster[] = [];
+  for (const group of groups) {
+    if (group.pins.length === 1) singles.push(group.pins[0]);
+    else clusters.push({ x: group.x, y: group.y, count: group.pins.length, pins: group.pins });
+  }
+  return { singles, clusters };
+}
+
 export function clusterPins(pins: readonly PlacedPin[], cell: number): { singles: PlacedPin[]; clusters: PinCluster[] } {
   const size = Math.max(cell, 0.001);
   const groups = new Map<string, PlacedPin[]>();
