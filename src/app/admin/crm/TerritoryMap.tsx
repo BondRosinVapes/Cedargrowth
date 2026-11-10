@@ -2,8 +2,10 @@
 
 import { useEffect, useState } from 'react';
 import type { CrmBrand } from '@/lib/crm/engine';
-import { NY_REGIONS, TILES } from '@/lib/crm/nyRegions';
+import { NY_REGIONS } from '@/lib/crm/nyRegions';
 import { NEEDS_HOODIE } from '@/lib/crm/nyRegions';
+import type { MapPin } from '@/lib/crm/nyMap';
+import { NyDispensaryMap } from './NyDispensaryMap';
 
 type Tile = { region: string; value: number | null; text: string; unassigned: boolean; rep: string | null };
 type Body = {
@@ -16,6 +18,8 @@ type Body = {
   coverageSource?: string;
   marketShare?: string;
   territories?: { region: string; repActor: string }[];
+  pins?: MapPin[];
+  unmapped?: number;
 };
 
 const METRICS = [
@@ -35,7 +39,7 @@ async function crmFetch(path: string, init?: RequestInit) {
   return { status: res.status, body: body as Body & Record<string, unknown> };
 }
 
-export function TerritoryMap({ brand, canAssign, territory, onSelect }: { brand: CrmBrand; canAssign: boolean; territory: string; onSelect: (region: string) => void }) {
+export function TerritoryMap({ brand, canAssign, territory, onSelect, onOpenAccount }: { brand: CrmBrand; canAssign: boolean; territory: string; onSelect: (region: string) => void; onOpenAccount: (id: string) => void }) {
   const [metric, setMetric] = useState<(typeof METRICS)[number]['id']>('accounts');
   const [data, setData] = useState<Body | null>(null);
   const [notice, setNotice] = useState('');
@@ -53,7 +57,6 @@ export function TerritoryMap({ brand, canAssign, territory, onSelect }: { brand:
     return () => { cancel = true; };
   }, [brand, metric, tick]);
 
-  const max = Math.max(1, ...(data?.tiles || []).map((tile) => tile.value || 0));
   async function assign(event: React.FormEvent) {
     event.preventDefault();
     const res = await crmFetch('/api/admin/crm/territory', { method: 'PUT', body: JSON.stringify({ brand, region, repActor: rep }) });
@@ -70,22 +73,18 @@ export function TerritoryMap({ brand, canAssign, territory, onSelect }: { brand:
       </div>
       <p className="text-caption text-tertiary">{metric === 'invoiced' ? (data?.invoicedLabel || 'No Nabis data imported.') : metric === 'pipeline' ? 'Amounts are forecast.' : 'Region comes from the account county.'}</p>
       {notice ? <p role="status" className="text-body-m text-primary">{notice}</p> : null}
-      <svg viewBox="0 0 620 490" role="img" aria-label="New York territory map" className="w-full max-w-editorial bg-parchment">
-        {(data?.tiles || TILES.map((tile) => ({ region: tile.region, value: null, text: 'no data yet', unassigned: false, rep: null }))).map((tile) => {
-          const spot = TILES.find((item) => item.region === tile.region);
-          if (!spot) return null;
-          const depth = tile.value === null ? 0.05 : 0.12 + (0.55 * (tile.value / max));
-          const selected = territory === tile.region;
-          return (
-            <g key={tile.region} onClick={() => onSelect(tile.region)} className="cursor-pointer">
-              <rect x={spot.x} y={spot.y} width="110" height="110" fill={`rgb(var(--surface-ink) / ${depth})`} stroke={selected ? 'rgb(var(--surface-ink))' : 'rgb(var(--line-hairline))'} strokeWidth={selected ? 2 : 1} />
-              <text x={spot.x + 8} y={spot.y + 22} fill="rgb(var(--text-primary))" className="font-sans" fontSize="11">{tile.region}</text>
-              <text x={spot.x + 8} y={spot.y + 64} fill="rgb(var(--text-primary))" className="font-mono" fontSize="16">{tile.text}</text>
-              {tile.unassigned ? <text x={spot.x + 8} y={spot.y + 96} fill="rgb(var(--text-primary))" fontSize="11">No rep</text> : null}
-            </g>
-          );
-        })}
-      </svg>
+      <NyDispensaryMap pins={data?.pins || []} unmapped={data?.unmapped ?? 0} onOpenAccount={onOpenAccount} />
+      <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {(data?.tiles || NY_REGIONS.map((region) => ({ region, value: null, text: 'no data yet', unassigned: true, rep: null }))).map((tile) => (
+          <li key={tile.region}>
+            <button type="button" onClick={() => onSelect(tile.region)} className={`flex min-h-[44px] w-full items-center justify-between border px-3 py-2 text-left ${territory === tile.region ? 'border-ink bg-bone' : 'border-hairline bg-clinical'}`}>
+              <span className="text-caption text-primary">{tile.region}</span>
+              <span className="font-mono text-specimen tabular-nums text-primary">{tile.text}</span>
+              <span className="text-caption text-tertiary">{tile.rep || (tile.unassigned ? 'No rep' : 'None')}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
       <div className="overflow-x-auto">
         <table className="w-full border-collapse text-left">
           <thead>

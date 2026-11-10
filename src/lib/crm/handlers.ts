@@ -38,6 +38,7 @@ import { monthStarts, parseCapacityWrite, productionForecast, stageWinRates } fr
 import { buildDigest, digestConfigured, digestFromAddress, digestRecipients, digestSummary, nyWeek, renderDigestHtml, renderDigestText, secretMatches } from './digest';
 import { COVERAGE_UPLOAD, NEEDS_HOODIE, NY_REGIONS } from './nyRegions';
 import { coverageLabel, territoryTiles, TERRITORY_METRICS, type TerritoryMetric } from './territory';
+import { coordinatesInRange, unmappedAccountCount, type MapPin } from './nyMap';
 import { nextBestActions, snoozeUntil } from './nextAction';
 import { INTAKE_MAX_BYTES, intakeSecrets, parseIntake, signIntake, signaturesMatch, takeIntakeRate, timestampFresh } from './intake';
 import { AGENT_ACTOR, AGENT_MAX_BYTES, AGENT_ROW_LIMIT, agentReady, agentSecret, agentSignatureOk, agentTimestampFresh, parseAgentEnvelope, parseAgentRow, type AgentOp } from './agentIntake';
@@ -1430,6 +1431,7 @@ async function territoryBundle(store: CrmStore, brand: CrmBrand) {
   if (all.state !== 'ok') return storageBody(brand, all.state === 'rejected' || all.state === 'missing' ? 'unavailable' : all.state);
   return {
     accounts: all.value.accounts,
+    contacts: all.value.contacts,
     deals: all.value.opportunities,
     tasks: all.value.tasks,
     notes: notes.state === 'ok' ? notes.value : null,
@@ -1475,8 +1477,38 @@ export async function handleTerritory(ctx: CrmContext): Promise<CrmResult> {
       coverageSource: latest ? `From state list uploaded ${latest.slice(0, 10)}` : COVERAGE_UPLOAD,
       marketShare: NEEDS_HOODIE,
       territories: loaded.territories,
+      pins: territoryPins(loaded.accounts, loaded.contacts, auth.brand),
+      unmapped: unmappedAccountCount(loaded.accounts.filter((row) => row.brand === auth.brand)),
     },
   };
+}
+
+function territoryPins(accounts: { brand: string; id: string; displayName: string; licenseRef: string | null; licenseExpiry: string | null; ocmStatus?: 'unverified' | 'verified' | null; city: string | null; county: string | null; assignedRep: string | null; distributor: MapPin['distributor']; latitude?: number | null; longitude?: number | null; recordMarker?: 'test' | null }[], contacts: { brand: string; accountId: string }[], brand: string): MapPin[] {
+  const counts = new Map<string, number>();
+  for (const contact of contacts) {
+    if (contact.brand !== brand) continue;
+    counts.set(contact.accountId, (counts.get(contact.accountId) ?? 0) + 1);
+  }
+  const pins: MapPin[] = [];
+  for (const account of accounts) {
+    if (account.brand !== brand || account.recordMarker === 'test') continue;
+    if (account.latitude == null || account.longitude == null || !coordinatesInRange(account.latitude, account.longitude)) continue;
+    pins.push({
+      id: account.id,
+      displayName: account.displayName,
+      licenseRef: account.licenseRef,
+      licenseExpiry: account.licenseExpiry,
+      ocmStatus: account.ocmStatus ?? null,
+      city: account.city,
+      county: account.county,
+      assignedRep: account.assignedRep,
+      distributor: account.distributor,
+      contactCount: counts.get(account.id) ?? 0,
+      latitude: account.latitude,
+      longitude: account.longitude,
+    });
+  }
+  return pins;
 }
 
 export async function handleTerritoryAssign(ctx: CrmContext): Promise<CrmResult> {
