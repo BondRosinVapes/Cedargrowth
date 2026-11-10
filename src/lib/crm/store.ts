@@ -20,13 +20,14 @@ import {
   type LeadSource,
 } from './engine';
 import { forecastCapacityRequests } from './capacityQuery';
-import { forecastCapacityRows } from './forecast';
+import { forecastCapacityRows, type ForecastOpportunity } from './forecast';
 import { DISTRIBUTORS, ORDER_SOURCES, ORDER_STATUSES, PAYOUT_STATUSES, RETAILER_PAYMENT_STATUSES, type Distributor, type DistributorOrderDraft, type OrderSource, type OrderStatus, type PayoutStatus, type RetailerPaymentStatus } from './distributor';
 import { sampleTaskTitle, type MediaKind, type VisitOutcome } from './field';
 import { confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, reorderDeal, type ReleasedBatch, type ReorderLine } from './reorder';
 import { knownEmailEvent, type EmailEvent } from './emailStatus';
 import { intakeTestMarker, type IntakeLead } from './intake';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
+import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
 
 export type StoreResult<T> =
   | { state: 'ok'; value: T }
@@ -338,6 +339,7 @@ export interface CrmStore {
   linkDistributorOrder(brand: CrmBrand, orderId: string, accountId: string): Promise<StoreResult<DistributorOrder>>;
   markDealWonFromOrder(brand: CrmBrand, actor: string, orderId: string, opportunityId: string): Promise<StoreResult<{ order: DistributorOrder; stage: OpportunityStage }>>;
   listStageEvents(brand: CrmBrand): Promise<StoreResult<StageEvent[]>>;
+  listForecastInputs(brand: CrmBrand, window: ForecastWindow): Promise<StoreResult<{ opportunities: ForecastOpportunity[]; events: StageEvent[] }>>;
   listCapacity(brand: CrmBrand, window: { start: string; end: string }): Promise<StoreResult<Capacity[]>>;
   upsertCapacity(brand: CrmBrand, actor: string, input: { month: string; productLine: ProductLine; capacityUnits: number; notes: string }): Promise<StoreResult<Capacity>>;
   listVisits(brand: CrmBrand): Promise<StoreResult<Visit[]>>;
@@ -898,6 +900,8 @@ class SupabaseCrmStore implements CrmStore {
     return this.one(brand, data as Record<string, unknown> | null, error, mapContact);
   }
 
+  // Pipeline list and the reports funnel. The 100 most recently updated rows
+  // are the display window. Forecast math does not use this list.
   listOpportunities(brand: CrmBrand) {
     return this.rows(
       brand,
@@ -1146,12 +1150,40 @@ class SupabaseCrmStore implements CrmStore {
     return { state: 'ok', value: { order: saved.value, stage: 'won' } };
   }
 
+  // Digest week counts and territory quiet-deal checks. Oldest 5000 only, so
+  // a newer event past that cap is absent here. Forecast win rates use
+  // listForecastInputs, which reads events for closed deals by id.
   listStageEvents(brand: CrmBrand) {
     return this.rows(
       brand,
       this.db.from('crm_stage_events').select('id,brand,opportunity_id,from_stage,to_stage,at').eq('brand', brand).order('at', { ascending: true }).limit(5000),
       mapStageEvent,
     );
+  }
+
+  async listForecastInputs(brand: CrmBrand, window: ForecastWindow) {
+    const filter = forecastDealFilter(window);
+    if (!filter) return { state: 'unavailable' as const };
+    const dealColumns = 'id,brand,stage,expected_close_on,product_line,quantity_units';
+    const eventColumns = 'id,brand,opportunity_id,from_stage,to_stage,at';
+    return readForecastInputs(brand, window, {
+      opportunityPage: async (afterId, limit) => {
+        let query = this.db.from('crm_opportunities').select(dealColumns).eq('brand', brand).or(filter).order('id', { ascending: true }).limit(limit);
+        if (afterId) query = query.gt('id', afterId);
+        const { data, error } = await query;
+        return { data: (data as Record<string, unknown>[] | null) ?? null, error };
+      },
+      stageEventProbe: async () => {
+        const { data, error } = await this.db.from('crm_stage_events').select('id').eq('brand', brand).limit(1);
+        return { data: (data as Record<string, unknown>[] | null) ?? null, error };
+      },
+      stageEventPage: async (opportunityIds, afterId, limit) => {
+        let query = this.db.from('crm_stage_events').select(eventColumns).eq('brand', brand).in('opportunity_id', [...opportunityIds]).order('id', { ascending: true }).limit(limit);
+        if (afterId) query = query.gt('id', afterId);
+        const { data, error } = await query;
+        return { data: (data as Record<string, unknown>[] | null) ?? null, error };
+      },
+    });
   }
 
   // Capacity for one forecast window, plus the latest earlier row for each

@@ -9,6 +9,8 @@ import { assertProductionForecast } from './crm-production-forecast-selftest.ts'
 import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, parseDate, parseMoney, skipRepeatedImportRows } from '../src/lib/crm/importer.ts';
 import { matchDistributorAccount } from '../src/lib/crm/distributor.ts';
 import { isCapacityMonth, productionForecast, readForecastCapacity, stageWinRates } from '../src/lib/crm/forecast.ts';
+import { forecastDealNeeded } from '../src/lib/crm/forecastRead.ts';
+import { assertForecastReads } from './crm-forecast-read-selftest.ts';
 import { assertForecastPeriods } from './crm-forecast-selftest.ts';
 import { roundLocation, sampleTaskTitle, validateMediaUpload } from '../src/lib/crm/field.ts';
 import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, rateLimited, reorderDeal } from '../src/lib/crm/reorder.ts';
@@ -529,6 +531,11 @@ class MemoryCrm implements CrmStore {
     return { state: 'ok' as const, value: { order, stage: 'won' as const } };
   }
   async listStageEvents(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.stageEvents.filter((row) => row.brand === brand) }; }
+  async listForecastInputs(brand: 'cedargrowth' | 'bond', window: { start: string; end: string }) {
+    const opportunities = this.opportunities.filter((row) => row.brand === brand && forecastDealNeeded(row, window));
+    const closed = new Set(opportunities.filter((row) => row.stage === 'won' || row.stage === 'lost').map((row) => row.id));
+    return { state: 'ok' as const, value: { opportunities, events: this.stageEvents.filter((row) => row.brand === brand && closed.has(row.opportunityId)) } };
+  }
   async listCapacity(brand: 'cedargrowth' | 'bond', window: { start: string; end: string }) { return { state: 'ok' as const, value: readForecastCapacity(this.capacity.filter((row) => row.brand === brand), window) }; }
   async upsertCapacity(brand: 'cedargrowth' | 'bond', _actor: string, input: { month: string; productLine: import('../src/lib/crm/engine.ts').ProductLine; capacityUnits: number; notes: string }) {
     if (!isCapacityMonth(input.month)) return { state: 'rejected' as const };
@@ -1020,6 +1027,7 @@ for (const code of ['42P01', '42703', 'PGRST205']) {
 }
 assert(crmStorageDetail({ message: 'column does not exist' }) === 'read_failed', 'schema absence is decided by the error code, not the message');
 await assertForecastPeriods(assert);
+await assertForecastReads(assert);
 const salesCap = await handleCapacity({ actorId: 'sales-1', grants: salesGrant, request: crmReq('PUT', '/api/admin/crm/capacity', { brand: 'cedargrowth', month: '2026-12', productLine: 'vape', capacityUnits: 10 }), store: memory });
 assert(salesCap.status === 403, 'a salesperson cannot edit capacity');
 const midMonth = await memory.upsertCapacity('cedargrowth', 'gary@cedargrowthco.com', { month: '2026-01-15', productLine: 'vape', capacityUnits: 999, notes: '' });
