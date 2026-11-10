@@ -8,7 +8,7 @@ import { assertDashboardTabs } from './crm-dashboard-tabs-selftest.ts';
 import { assertProductionForecast } from './crm-production-forecast-selftest.ts';
 import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, parseDate, parseMoney, skipRepeatedImportRows } from '../src/lib/crm/importer.ts';
 import { matchDistributorAccount } from '../src/lib/crm/distributor.ts';
-import { productionForecast, readForecastCapacity, stageWinRates } from '../src/lib/crm/forecast.ts';
+import { isCapacityMonth, productionForecast, readForecastCapacity, stageWinRates } from '../src/lib/crm/forecast.ts';
 import { forecastDealNeeded } from '../src/lib/crm/forecastRead.ts';
 import { assertForecastReads } from './crm-forecast-read-selftest.ts';
 import { assertForecastPeriods } from './crm-forecast-selftest.ts';
@@ -51,6 +51,8 @@ import {
   hasForbiddenSignal,
   HOODIE_NOT_CONNECTED,
   isolateBrand,
+  crmStorageDetail,
+  isMissingSchema,
   nextAlertState,
   parseBrand,
   parseOpportunityWrite,
@@ -536,6 +538,7 @@ class MemoryCrm implements CrmStore {
   }
   async listCapacity(brand: 'cedargrowth' | 'bond', window: { start: string; end: string }) { return { state: 'ok' as const, value: readForecastCapacity(this.capacity.filter((row) => row.brand === brand), window) }; }
   async upsertCapacity(brand: 'cedargrowth' | 'bond', _actor: string, input: { month: string; productLine: import('../src/lib/crm/engine.ts').ProductLine; capacityUnits: number; notes: string }) {
+    if (!isCapacityMonth(input.month)) return { state: 'rejected' as const };
     const found = this.capacity.find((row) => row.brand === brand && row.month === input.month && row.productLine === input.productLine);
     if (found) { found.capacityUnits = input.capacityUnits; found.notes = input.notes; return { state: 'ok' as const, value: found }; }
     const row = { id: this.id(), brand, month: input.month, productLine: input.productLine, capacityUnits: input.capacityUnits, notes: input.notes };
@@ -1016,10 +1019,19 @@ const grid = productionForecast({
 const vapeCell = grid.cells.find((cell) => cell.productLine === 'vape');
 const gummyCell = grid.cells.find((cell) => cell.productLine === 'gummy');
 assert(vapeCell?.demand === 60 && vapeCell.status === 'short' && vapeCell.gap === -20 && gummyCell?.status === 'no_capacity' && gummyCell.capacityUnits === null && gummyCell.gap === null && grid.notForecastable === 1, 'demand math for open and won, and missing capacity is not zero');
-assertForecastPeriods(assert);
+const operatorError = { code: '42883', message: 'operator does not exist: date ~~ unknown' };
+assert(crmStorageDetail(operatorError) === 'read_failed' && isMissingSchema(operatorError) === false, '42883 is a failed read, not a missing schema');
+for (const code of ['42P01', '42703', 'PGRST205']) {
+  const schemaError = { code, message: 'relation does not exist' };
+  assert(crmStorageDetail(schemaError) === 'schema_absent' && isMissingSchema(schemaError) === true, `${code} stays schema absent`);
+}
+assert(crmStorageDetail({ message: 'column does not exist' }) === 'read_failed', 'schema absence is decided by the error code, not the message');
+await assertForecastPeriods(assert);
 await assertForecastReads(assert);
 const salesCap = await handleCapacity({ actorId: 'sales-1', grants: salesGrant, request: crmReq('PUT', '/api/admin/crm/capacity', { brand: 'cedargrowth', month: '2026-12', productLine: 'vape', capacityUnits: 10 }), store: memory });
 assert(salesCap.status === 403, 'a salesperson cannot edit capacity');
+const midMonth = await memory.upsertCapacity('cedargrowth', 'gary@cedargrowthco.com', { month: '2026-01-15', productLine: 'vape', capacityUnits: 999, notes: '' });
+assert(midMonth.state === 'rejected' && memory.capacity.every((row) => row.month !== '2026-01-15'), 'capacity storage rejects a mid-month date');
 const bondCap = await handleCapacity({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('PUT', '/api/admin/crm/capacity', { brand: 'bond', month: '2026-12', productLine: 'gummy', capacityUnits: 80 }), store: memory });
 const cedarForecast = await handleForecast({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', '/api/admin/crm/forecast?brand=cedargrowth&months=2'), store: memory });
 const cedarCells = (cedarForecast.body.cells as { productLine: string; capacityUnits: number | null }[]) || [];

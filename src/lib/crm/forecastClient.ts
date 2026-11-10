@@ -1,10 +1,8 @@
 // Client adapter for the production forecast screens.
-// Month and Year call the live monthly API:
-//   GET /api/admin/crm/forecast?brand=&months=
-// Week is a separate contract. The current API does not serve it.
+// Month and Year call GET /api/admin/crm/forecast?period=month.
+// Week calls GET /api/admin/crm/forecast?period=week.
 
 import { PRODUCT_LINES, PRODUCT_LINE_LABELS, type CrmBrand, type ProductLine } from './engine';
-import { monthCaption } from './forecast';
 
 export const FORECAST_STATUSES = ['short', 'tight', 'ok', 'no_capacity'] as const;
 export type ForecastStatus = (typeof FORECAST_STATUSES)[number];
@@ -18,12 +16,10 @@ export type MonthlyForecastCell = {
   capacityUnits: number | null;
   gap: number | null;
   status: ForecastStatus;
-  // Optional until the forecast API carries the last entered capacity forward.
   capacitySource?: CapacitySource | null;
   capacityFrom?: string | null;
 };
 
-// Weekly contract a separate engineer is adding. Do not invent these rows.
 export type WeeklyForecastCell = {
   isoWeek: string;
   weekStart: string;
@@ -48,6 +44,8 @@ export type ForecastPoint = {
 export type ForecastColumn = {
   id: string;
   label: string;
+  dates: string;
+  kicker: string;
   caption: string;
   start: string;
   end: string;
@@ -117,7 +115,7 @@ function monthKey(value: string): string | null {
 }
 
 function readCapacitySource(cell: Record<string, unknown>): CapacitySource | null {
-  // Optional until the carry-forward API lands. null means no earlier entry.
+  // null means no earlier entry.
   if (cell.capacitySource === null || cell.capacitySource === undefined) return null;
   return cell.capacitySource === 'entered' || cell.capacitySource === 'extended' ? cell.capacitySource : null;
 }
@@ -154,8 +152,7 @@ export function roundCapacityUnits(value: number | null): number | null {
 export function parseWeeklyForecast(body: unknown): ParsedWeeklyForecast | null {
   if (!body || typeof body !== 'object') return null;
   const record = body as Record<string, unknown>;
-  // On main, until the weekly API lands, period is absent and cells are monthly.
-  // That response is not this contract. An empty list has no isoWeek cells either.
+  // A body that is not period week, or has no isoWeek cells, is not this contract.
   if (record.period !== 'week' || !Array.isArray(record.cells)) return null;
   const hasIsoWeek = record.cells.some((item) => !!item && typeof item === 'object' && typeof (item as { isoWeek?: unknown }).isoWeek === 'string');
   if (!hasIsoWeek) return null;
@@ -276,16 +273,65 @@ export function formatDay(iso: string): string {
   return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
-export function weekLabel(isoWeek: string): string {
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+export function todayInNewYork(now = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const pick = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? '';
+  return `${pick('year')}-${pick('month')}-${pick('day')}`;
+}
+
+export function asOfLine(today = todayInNewYork()): string {
+  const [year, month, day] = today.split('-').map(Number);
+  const formatted = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: 'UTC',
+  }).format(new Date(Date.UTC(year, month - 1, day, 12)));
+  return `As of ${formatted}`;
+}
+
+export function weekNumber(isoWeek: string): string {
   const match = /-W(\d{2})$/.exec(isoWeek);
-  return match ? `W${Number(match[1])}` : isoWeek;
+  return match ? String(Number(match[1])) : isoWeek;
 }
 
-export function weekCaption(weekStart: string): string {
-  return `${formatDay(weekStart)} to ${formatDay(addDays(weekStart, 6))}`;
+export function weekLabel(isoWeek: string): string {
+  return `Wk ${weekNumber(isoWeek)}`;
 }
 
-export function currentMonthStart(today = new Date().toISOString().slice(0, 10)): string {
+export function shortDateSpan(start: string, end: string): string {
+  if (start.slice(0, 7) === end.slice(0, 7)) return `${formatDay(start)} to ${Number(end.slice(8))}`;
+  return `${formatDay(start)} to ${formatDay(end)}`;
+}
+
+export function exactDateSpan(start: string, end: string): string {
+  if (start.slice(0, 4) !== end.slice(0, 4)) return `${formatDay(start)}, ${start.slice(0, 4)} to ${formatDay(end)}, ${end.slice(0, 4)}`;
+  return `${formatDay(start)} to ${formatDay(end)}, ${end.slice(0, 4)}`;
+}
+
+export function monthYearLabel(month: string): string {
+  const [year, mon] = month.split('-').map(Number);
+  return `${MONTH_NAMES[mon - 1]} ${year}`;
+}
+
+function monthCaption(month: string): string {
+  const [year, mon] = month.split('-').map(Number);
+  return `${MONTH_NAMES[mon - 1]} ${String(year).slice(2)}`;
+}
+
+export function containsDay(start: string, end: string, today: string): boolean {
+  return start <= today && today <= end;
+}
+
+export function currentMonthStart(today = todayInNewYork()): string {
   return `${today.slice(0, 7)}-01`;
 }
 
@@ -296,7 +342,7 @@ export function shiftMonth(month: string, delta: number): string {
 }
 
 export function yearWindowCaption(from: string): string {
-  return `${monthCaption(from)} to ${monthCaption(shiftMonth(from, 11))}`;
+  return `${monthYearLabel(from)} to ${monthYearLabel(shiftMonth(from, 11))}`;
 }
 
 export function coversYearWindow(months: readonly string[], from: string): boolean {
@@ -312,7 +358,7 @@ export function sliceYearCells<T extends { month: string }>(cells: readonly T[],
 }
 
 export function carriedForwardLabel(from: string | null): string {
-  return from ? `Carried forward from ${monthCaption(from)}` : 'Carried forward';
+  return from ? `Carried forward from ${monthYearLabel(from)}` : 'Carried forward from the last entered month';
 }
 
 export function monthFromSearch(value: string | null): string | null {
@@ -363,7 +409,7 @@ function stampCarry(points: ForecastPoint[], months: readonly string[]) {
   });
 }
 
-export function buildWeeklyBoard(cells: readonly WeeklyForecastCell[], only?: ProductLine | null): ForecastBoard {
+export function buildWeeklyBoard(cells: readonly WeeklyForecastCell[], only?: ProductLine | null, today = todayInNewYork()): ForecastBoard {
   const lines = only ? [only] : [...PRODUCT_LINES];
   const weeks = new Map<string, { start: string }>();
   for (const cell of cells) {
@@ -371,18 +417,25 @@ export function buildWeeklyBoard(cells: readonly WeeklyForecastCell[], only?: Pr
     if (!current || cell.weekStart < current.start) weeks.set(cell.isoWeek, { start: cell.weekStart });
   }
   const ordered = [...weeks.entries()].sort((a, b) => a[1].start.localeCompare(b[1].start) || a[0].localeCompare(b[0]));
-  const columns: ForecastColumn[] = ordered.map(([id, week]) => ({
+  const columns: ForecastColumn[] = ordered.map(([id, week]) => {
+    const end = addDays(week.start, 6);
+    const head = weekLabel(id).toUpperCase();
+    const day = formatDay(week.start).toUpperCase();
+    return {
     id,
-    label: weekLabel(id),
-    caption: weekCaption(week.start),
+    label: head,
+    dates: day,
+    kicker: `${head} · ${day}`,
+    caption: exactDateSpan(week.start, end),
     start: week.start,
-    end: addDays(week.start, 6),
+    end,
     demand: null,
     capacityUnits: null,
     gap: null,
     capacitySource: null,
     carriedFrom: null,
-  }));
+    };
+  });
   const series: ForecastLine[] = lines.map((productLine) => ({
     productLine,
     label: PRODUCT_LINE_LABELS[productLine],
@@ -415,22 +468,28 @@ export function buildWeeklyBoard(cells: readonly WeeklyForecastCell[], only?: Pr
   return { columns, lines: series };
 }
 
-export function buildMonthlyBoard(cells: readonly MonthlyForecastCell[], only?: ProductLine | null): ForecastBoard {
+export function buildMonthlyBoard(cells: readonly MonthlyForecastCell[], only?: ProductLine | null, today = todayInNewYork()): ForecastBoard {
   const lines = only ? [only] : [...PRODUCT_LINES];
   const scoped = only ? cells.filter((cell) => cell.productLine === only) : cells;
   const months = [...new Set(scoped.map((cell) => cell.month))].sort();
-  const columns: ForecastColumn[] = months.map((month) => ({
+  const columns: ForecastColumn[] = months.map((month) => {
+    const end = monthEnd(month);
+    const head = monthCaption(month).toUpperCase();
+    return {
     id: month,
-    label: monthCaption(month),
-    caption: monthCaption(month),
+    label: head,
+    dates: '',
+    kicker: head,
+    caption: exactDateSpan(month, end),
     start: month,
-    end: monthEnd(month),
+    end,
     demand: null,
     capacityUnits: null,
     gap: null,
     capacitySource: null,
     carriedFrom: null,
-  }));
+    };
+  });
   const series: ForecastLine[] = lines.map((productLine) => ({
     productLine,
     label: PRODUCT_LINE_LABELS[productLine],
@@ -456,7 +515,57 @@ export function buildMonthlyBoard(cells: readonly MonthlyForecastCell[], only?: 
   return { columns, lines: series };
 }
 
-export function heldIndex(columns: readonly ForecastColumn[], today = new Date().toISOString().slice(0, 10)): number {
+export type ChartPoint = {
+  demand: number;
+  capacityUnits: number | null;
+  extended: boolean;
+  partial: boolean;
+  partialUnits: number | null;
+  known: number;
+  expected: number;
+  missing: string[];
+  carriedCount: number;
+};
+
+// A complete column sums every line. A partial column keeps the known sum
+// aside, so the chart does not draw it as a full capacity line.
+export function chartSeries(board: ForecastBoard): ChartPoint[] {
+  return board.columns.map((_, index) => {
+    const rows = board.lines.map((line) => ({ label: line.label, point: line.points[index] }));
+    const demand = rows.reduce((sum, row) => sum + (typeof row.point?.demand === 'number' ? row.point.demand : 0), 0);
+    const known = rows.filter((row) => typeof row.point?.capacityUnits === 'number');
+    const missing = rows.filter((row) => row.point?.capacityUnits == null).map((row) => row.label);
+    const expected = rows.length;
+    const sum = known.reduce((total, row) => total + (row.point.capacityUnits as number), 0);
+    const partial = known.length > 0 && known.length < expected;
+    const allExtended = known.length > 0 && known.every((row) => row.point.capacitySource === 'extended');
+    return {
+      demand,
+      capacityUnits: !partial && known.length === expected && expected > 0 ? sum : null,
+      extended: !partial && allExtended,
+      partial,
+      partialUnits: partial ? sum : null,
+      known: known.length,
+      expected,
+      missing,
+      carriedCount: known.filter((row) => row.point.capacitySource === 'extended').length,
+    };
+  });
+}
+
+export function partialCapacitySentence(point: Pick<ChartPoint, 'partialUnits' | 'known' | 'expected' | 'missing' | 'carriedCount'>): string {
+  const amount = formatCapacity(point.partialUnits);
+  const carried = point.carriedCount <= 0 ? '' : point.carriedCount === 1 ? ', 1 carried forward' : `, ${point.carriedCount} carried forward`;
+  const names = point.missing.length <= 1
+    ? (point.missing[0] ?? '')
+    : point.missing.length === 2
+      ? `${point.missing[0]} and ${point.missing[1]}`
+      : `${point.missing.slice(0, -1).join(', ')} and ${point.missing[point.missing.length - 1]}`;
+  const has = point.missing.length === 1 ? 'has' : 'have';
+  return `Capacity ${amount} for ${point.known} of ${point.expected} lines${carried}. ${names} ${has} no capacity entered.`;
+}
+
+export function heldIndex(columns: readonly ForecastColumn[], today = todayInNewYork()): number {
   const index = columns.findIndex((column) => column.start <= today && today <= column.end);
   return index >= 0 ? index : 0;
 }
@@ -547,7 +656,7 @@ export async function loadMonthlyForecast(
   from?: string | null,
 ): Promise<{ state: 'ready'; cells: MonthlyForecastCell[]; notForecastable: number; honoredFrom: boolean | null } | { state: 'error'; reason: string }> {
   // Month is ?period=month&months=6&productLine=. Year is ?period=month&months=12&from=&productLine=.
-  // from is optional until the paging API lands. honoredFrom is true only when the response echoes it.
+  // honoredFrom is true only when the response echoes from.
   const span: ForecastSpan = months === 12 ? 'year' : 'month';
   try {
     const res = await fetchImpl(forecastPath(brand, span, productLine, from), {

@@ -7,22 +7,28 @@ import {
   NO_CAPACITY,
   WEEKLY_PENDING,
   forecastStats,
+  asOfLine,
   carriedForwardLabel,
+  chartSeries,
   currentMonthStart,
+  exactDateSpan,
   formatCapacity,
-  formatGap,
   formatUnits,
   heldIndex,
+  monthYearLabel,
   lineFromSearch,
   loadForecastView,
   monthFromSearch,
   moveHeld,
   niceMax,
+  partialCapacitySentence,
   productionHref,
   selectSpan,
   shiftMonth,
   yearWindowCaption,
   spanFromSearch,
+  todayInNewYork,
+  type ChartPoint,
   type ForecastBoard,
   type ForecastColumn,
   type ForecastLine,
@@ -40,10 +46,18 @@ const STATUS_LABEL: Record<ForecastStatus, string> = {
 };
 
 const CHIP: Record<ForecastStatus, string> = {
-  ok: 'border-pass text-secondary',
-  tight: 'border-attention text-secondary',
-  short: 'border-fail text-fail',
+  ok: 'border-hairline text-tertiary',
+  tight: 'border-attention/30 text-tertiary',
+  short: 'border-fail/40 text-secondary',
   no_capacity: 'border-hairline text-tertiary',
+};
+
+const OVERVIEW_NOTE = 'Weighted demand uses the expected close date, grouped by ISO week. Weekly capacity is pro-rated from the month. A week that crosses two months takes a share from each. A blank capacity is not zero.';
+
+const SPAN_NOTE: Record<ForecastSpan, string> = {
+  week: 'Demand is grouped by the expected close date, in ISO weeks. Capacity is pro-rated from the month. A week that crosses two months takes a share from each. A blank capacity is not zero.',
+  month: 'Demand uses the expected close date, grouped by calendar month. Capacity is the monthly figure, not a weekly pro-rate. A blank capacity is not zero.',
+  year: 'No fiscal year is defined in the CRM, so this view is a twelve month horizon. Demand is grouped by calendar month. Capacity is the monthly figure. A blank capacity is not zero.',
 };
 
 const SQUARE: Record<ForecastStatus, string> = {
@@ -104,9 +118,21 @@ function plainClick(event: MouseEvent<HTMLAnchorElement>): boolean {
   return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
 }
 
+const SQUARE_NAME: Record<ForecastStatus, string> = {
+  ok: 'OK',
+  tight: 'Tight',
+  short: 'Short',
+  no_capacity: 'No capacity',
+};
+
 function StatusSquare({ status }: { status: ForecastStatus | null }) {
-  if (!status) return <span className="inline-block h-1.5 w-1.5 border border-hairline" aria-hidden="true" />;
-  return <span className={`inline-block h-1.5 w-1.5 ${SQUARE[status]}`} title={STATUS_LABEL[status]} aria-hidden="true" />;
+  const label = status ? SQUARE_NAME[status] : 'Not returned';
+  return (
+    <span role="img" aria-label={label} className="inline-flex">
+      <span className={`inline-block h-1.5 w-1.5 ${status ? SQUARE[status] : 'border border-hairline'}`} aria-hidden="true" />
+      <span className="sr-only">{label}</span>
+    </span>
+  );
 }
 
 function StatusChip({ status }: { status: ForecastStatus }) {
@@ -150,71 +176,150 @@ function onArrow(event: KeyboardEvent, held: number, count: number, onHold: (ind
   onHold(next);
 }
 
-function Readout({ column, kicker, unit }: { column: ForecastColumn; kicker: string; unit: string }) {
+function monthLong(iso: string): string {
+  const [year, month, day] = iso.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day, 12)).toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' });
+}
+
+function readoutColumn(board: ForecastBoard, index: number): ForecastColumn {
+  const column = board.columns[index];
+  const point = chartSeries(board)[index];
+  if (!column || !point) return column;
+  if (point.partial) {
+    return { ...column, capacityUnits: point.partialUnits, gap: null, capacitySource: null, carriedFrom: null };
+  }
+  if (point.capacityUnits === null) return column;
+  const froms = [...new Set(board.lines.flatMap((line) => {
+    const cell = line.points[index];
+    return cell?.capacitySource === 'extended' && cell.carriedFrom ? [cell.carriedFrom] : [];
+  }))];
+  const demand = column.demand ?? 0;
+  return {
+    ...column,
+    capacityUnits: point.capacityUnits,
+    gap: Math.round((point.capacityUnits - demand) * 10) / 10,
+    capacitySource: point.extended ? 'extended' : 'entered',
+    carriedFrom: point.extended && froms.length === 1 ? froms[0] : null,
+  };
+}
+
+function carriedClause(from: string | null): string {
+  return from ? `Carried forward from ${monthLong(from)}.` : 'Carried forward from the last entered month.';
+}
+
+function capacitySentence(column: ForecastColumn, weekly: boolean, partial?: ChartPoint): string {
+  if (partial?.partial) return partialCapacitySentence(partial);
+  if (column.capacityUnits === null) return 'No capacity entered.';
+  const amount = formatCapacity(column.capacityUnits);
+  const lead = weekly ? `Capacity ${amount}, pro-rated from ${monthLong(column.start)}.` : `Capacity ${amount}.`;
+  const carried = column.capacitySource === 'extended' ? ` ${carriedClause(column.carriedFrom)}` : '';
+  if (column.gap !== null && column.gap < 0) return `${lead}${carried} Short by ${formatUnits(Math.abs(column.gap))} units.`;
+  if (column.gap !== null && column.gap > 0 && column.demand !== null && column.demand >= column.capacityUnits * 0.9) return `${lead}${carried} Tight.`;
+  if (column.gap !== null && column.gap > 0) return `${lead}${carried} Spare room ${formatUnits(column.gap)} units.`;
+  return `${lead}${carried}`;
+}
+
+function dashboardTitle(span: ForecastSpan, view: ForecastView, yearFrom: string): string {
+  const columns = view.state === 'ready' ? view.board.columns : [];
+  const first = columns[0];
+  const last = columns[columns.length - 1];
+  const month = currentMonthStart();
+  if (!first || !last) {
+    if (span === 'year' && yearFrom !== month) return yearWindowCaption(yearFrom);
+    if (span === 'week') return 'Week by week';
+    return span === 'year' ? 'The next twelve months' : 'The next six months';
+  }
+  if (span === 'week') {
+    const today = todayInNewYork();
+    const holdsToday = columns.some((column) => column.start <= today && today <= column.end);
+    if (columns.length === 13 && holdsToday) return 'Week by week';
+    return exactDateSpan(first.start, last.end);
+  }
+  const range = `${monthYearLabel(first.start)} to ${monthYearLabel(last.start)}`;
+  if (span === 'month' && columns.length === 6 && first.start === month) return 'The next six months';
+  if (span === 'year' && columns.length === 12 && first.start === month) return 'The next twelve months';
+  return range;
+}
+
+function Readout({ column, point, label, weekly }: { column: ForecastColumn; point?: ChartPoint; label: string; weekly: boolean }) {
   const { ref, revealed } = useReveal<HTMLDivElement>();
   return (
-    <div ref={ref} className={revealed ? 'prod-rise prod-in' : undefined}>
-      <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{kicker}</p>
-      <p className="mt-2 font-display text-display-l-m tabular-nums text-primary md:text-display-l" aria-live="polite">
-        {column.demand === null ? 'Not returned' : <CountFigure value={column.demand} />}
+    <div ref={ref} className={`flex items-end gap-5 ${revealed ? 'prod-rise prod-in' : ''}`}>
+      <p className="font-display text-[64px] font-normal leading-none tabular-nums text-primary md:text-[96px]" aria-live="polite">
+        {column.demand === null ? 'None' : <CountFigure value={column.demand} />}
       </p>
-      <p className="text-caption text-secondary">{unit}</p>
-      <p className="mt-1 font-mono text-specimen text-tertiary">{column.label}. {column.caption}</p>
-      <div className={`mt-4 h-px w-24 origin-left bg-ink ${revealed ? 'prod-rule prod-in' : ''}`} />
-      <dl className="mt-4 grid grid-cols-2 gap-4 md:grid-cols-3">
-        <div>
-          <dt className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Demand</dt>
-          <dd className="font-mono text-data tabular-nums text-primary">{demandText(column.demand)}</dd>
-        </div>
-        <div>
-          <dt className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Capacity</dt>
-          <dd className="font-mono text-data tabular-nums text-primary"><CapacityValue value={column.capacityUnits} source={column.capacitySource} from={column.carriedFrom} /></dd>
-        </div>
-        <div>
-          <dt className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Gap</dt>
-          <dd className="font-mono text-data tabular-nums text-primary" data-gap={column.gap === null ? 'none' : String(column.gap)}>{formatGap(column.gap)}</dd>
-        </div>
-      </dl>
+      <div className="min-w-0 pb-2">
+        <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{column.kicker}</p>
+        <p className="font-display text-[22px] font-medium leading-none text-primary">{label}</p>
+        <p className="mt-1 max-w-md text-caption text-secondary">{capacitySentence(column, weekly, point)}</p>
+      </div>
     </div>
   );
 }
 
-function ForecastChart({ columns, held, onHold, label }: { columns: ForecastColumn[]; held: number; onHold: (index: number) => void; label: string }) {
-  const { ref, revealed } = useReveal<HTMLDivElement>();
+function ForecastChart({ board, held, onHold, label, height }: { board: ForecastBoard; held: number; onHold: (index: number) => void; label: string; height: 120 | 200 }) {
+  const series = chartSeries(board);
+  const columns = board.columns.map((column, index) => ({
+    ...column,
+    demand: series[index]?.demand ?? 0,
+    capacityUnits: series[index]?.partial ? null : series[index]?.capacityUnits ?? null,
+    partialUnits: series[index]?.partial ? series[index]?.partialUnits ?? null : null,
+    capacitySource: series[index]?.extended ? 'extended' as const : series[index]?.capacityUnits === null ? null : 'entered' as const,
+  }));
+  const { ref } = useReveal<HTMLDivElement>();
   const width = 960;
-  const height = 560;
-  const pad = { left: 84, right: 28, top: 28, bottom: 64 };
+  const pad = { left: 4, right: 4, top: 8, bottom: 22 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
-  const numbers = columns.flatMap((column) => [column.demand, column.capacityUnits].filter((value): value is number => typeof value === 'number'));
+  const live = columns.some((column) => (column.demand ?? 0) > 0 || (column.capacityUnits ?? 0) > 0);
+  const numbers = columns.flatMap((column) => [column.demand, column.capacityUnits].filter((value): value is number => typeof value === 'number' && value > 0));
   const yMax = niceMax(Math.max(1, ...numbers));
   const xAt = (index: number) => (columns.length <= 1 ? pad.left + plotW / 2 : pad.left + (index / (columns.length - 1)) * plotW);
   const yAt = (value: number) => pad.top + plotH - (value / yMax) * plotH;
   const colW = plotW / Math.max(columns.length, 1);
-  const pathFor = (kind: 'demand' | 'entered' | 'extended') => {
-    let d = '';
-    let open = false;
+  const base = pad.top + plotH;
+  function segments(kind: 'demand' | 'capacity') {
+    const solid: string[] = [];
+    const dotted: string[] = [];
+    let prev: { x: number; y: number; extended: boolean } | null = null;
     columns.forEach((column, index) => {
       const value = kind === 'demand' ? column.demand : column.capacityUnits;
-      const extended = column.capacitySource === 'extended';
-      if (typeof value !== 'number' || (kind === 'entered' && extended) || (kind === 'extended' && !extended)) {
-        open = false;
+      if (typeof value !== 'number') {
+        prev = null;
         return;
       }
-      d += `${open ? 'L' : 'M'}${xAt(index).toFixed(1)},${yAt(value).toFixed(1)}`;
-      open = true;
+      const point = { x: xAt(index), y: yAt(value), extended: kind === 'capacity' && column.capacitySource === 'extended' };
+      if (prev) {
+        const piece = `M${prev.x.toFixed(1)},${prev.y.toFixed(1)}L${point.x.toFixed(1)},${point.y.toFixed(1)}`;
+        if (kind === 'capacity' && (point.extended || prev.extended)) dotted.push(piece);
+        else solid.push(piece);
+      }
+      prev = point;
     });
-    return d;
-  };
-  const demand = pathFor('demand');
-  const capacity = pathFor('entered');
-  const extended = pathFor('extended');
-  const ticks = [0, yMax / 2, yMax];
-  const summary = columns.map((column) => {
+    return { solid: solid.join(''), dotted: dotted.join('') };
+  }
+  const demand = segments('demand');
+  const capacity = segments('capacity');
+  const partialPieces: string[] = [];
+  {
+    let prev: { x: number; y: number } | null = null;
+    columns.forEach((column, index) => {
+      if (typeof column.partialUnits !== 'number') {
+        prev = null;
+        return;
+      }
+      const point = { x: xAt(index), y: yAt(column.partialUnits) };
+      if (prev) partialPieces.push(`M${prev.x.toFixed(1)},${prev.y.toFixed(1)}L${point.x.toFixed(1)},${point.y.toFixed(1)}`);
+      prev = point;
+    });
+  }
+  const middle = Math.round((columns.length - 1) / 2);
+  const summary = columns.map((column, index) => {
+    const point = series[index];
+    if (point?.partial) return `${column.label}. ${partialCapacitySentence(point)}`;
     const carried = column.capacitySource === 'extended' ? ` ${carriedForwardLabel(column.carriedFrom)}` : '';
     return `${column.label} demand ${demandText(column.demand)}, capacity ${formatCapacity(column.capacityUnits)}${carried}`;
   }).join('. ');
-  const draw = revealed ? 'prod-line prod-in' : 'prod-line';
   return (
     <div
       ref={ref}
@@ -224,42 +329,60 @@ function ForecastChart({ columns, held, onHold, label }: { columns: ForecastColu
       onKeyDown={(event) => onArrow(event, held, columns.length, onHold)}
       className="min-w-0 outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cedar"
     >
-      <svg viewBox={`0 0 ${width} ${height}`} className="block h-auto w-full" style={{ aspectRatio: '960 / 560' }} role="img" aria-label={summary}>
-        {ticks.map((tick) => (
-          <g key={tick}>
-            <line x1={pad.left} x2={width - pad.right} y1={yAt(tick)} y2={yAt(tick)} stroke="rgb(var(--line-hairline))" strokeWidth="1" />
-            <text x={pad.left - 12} y={yAt(tick) + 5} textAnchor="end" fill="rgb(var(--text-tertiary))" fontFamily="var(--font-mono)" fontSize="16">{formatUnits(tick)}</text>
-          </g>
-        ))}
-        {columns.length ? (
-          <rect x={Math.max(pad.left, xAt(held) - colW / 2)} y={pad.top} width={Math.min(colW, plotW)} height={plotH} fill="rgb(var(--surface-bone))" />
-        ) : null}
-        <line x1={pad.left} x2={width - pad.right} y1={pad.top + plotH} y2={pad.top + plotH} stroke="rgb(var(--text-tertiary))" strokeWidth="1.5" />
-        {demand ? <path d={demand} pathLength={1} className={draw} fill="none" stroke="rgb(var(--text-primary))" strokeWidth="4" strokeLinejoin="miter" /> : null}
-        {capacity ? <path d={capacity} pathLength={1} className={draw} fill="none" stroke="rgb(var(--accent-cedar))" strokeWidth="2.5" strokeLinejoin="miter" /> : null}
-        {extended ? <path d={extended} fill="none" stroke="rgb(var(--accent-cedar))" strokeWidth="2.5" strokeDasharray="2 7" strokeLinejoin="miter" /> : null}
+      {live ? null : <p className="mb-2 font-display text-body-m text-secondary">No weighted demand in this window</p>}
+      <svg viewBox={`0 0 ${width} ${height}`} className={`block w-full ${height === 120 ? 'h-[120px]' : 'h-[200px]'}`} role="img" aria-label={summary}>
+        <line x1={pad.left} x2={width - pad.right} y1={base} y2={base} stroke="rgb(var(--line-hairline))" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+        {demand.solid ? <path d={demand.solid} fill="none" stroke="rgb(var(--accent-verdant))" strokeWidth="1.5" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
+        {capacity.solid ? <path d={capacity.solid} fill="none" stroke="rgb(var(--surface-ink))" strokeWidth="1" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
+        {capacity.dotted ? <path d={capacity.dotted} fill="none" stroke="rgb(var(--surface-ink))" strokeWidth="1" strokeDasharray="2 7" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
+        {partialPieces.length ? <path data-capacity-partial="true" d={partialPieces.join('')} fill="none" stroke="rgb(var(--text-tertiary))" strokeWidth="1" strokeDasharray="3 4" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
         {columns.map((column, index) => (
           <g key={column.id}>
-            {typeof column.demand === 'number' ? <rect x={xAt(index) - 5} y={yAt(column.demand) - 5} width="10" height="10" fill="rgb(var(--text-primary))" /> : null}
-            {typeof column.capacityUnits === 'number' ? (
-              <rect x={xAt(index) - 4} y={yAt(column.capacityUnits) - 4} width="8" height="8" fill="rgb(var(--accent-cedar))">
+            {index === held && typeof column.demand === 'number' ? <rect x={xAt(index) - 3} y={yAt(column.demand) - 3} width="6" height="6" fill="rgb(var(--accent-verdant))" /> : null}
+            {index === held && typeof column.capacityUnits === 'number' ? (
+              <rect x={xAt(index) - 3} y={yAt(column.capacityUnits) - 3} width="6" height="6" fill="rgb(var(--surface-ink))">
                 {column.capacitySource === 'extended' ? <title>{carriedForwardLabel(column.carriedFrom)}</title> : null}
               </rect>
             ) : null}
-            <text x={xAt(index)} y={height - 24} textAnchor="middle" fill={index === held ? 'rgb(var(--text-primary))' : 'rgb(var(--text-tertiary))'} fontFamily="var(--font-mono)" fontSize="16">{column.label}</text>
-            <rect x={xAt(index) - colW / 2} y={pad.top} width={colW} height={plotH + 36} fill="transparent" onMouseEnter={() => onHold(index)} />
+            {index === 0 || index === middle || index === columns.length - 1 ? (
+              <text x={index === 0 ? pad.left : index === columns.length - 1 ? width - pad.right : xAt(index)} y={height - 4} textAnchor={index === 0 ? 'start' : index === columns.length - 1 ? 'end' : 'middle'} fill="rgb(var(--text-tertiary))" fontFamily="var(--font-mono)" fontSize="10">{column.label}</text>
+            ) : null}
+            <rect x={xAt(index) - colW / 2} y={pad.top} width={colW} height={plotH + 20} fill="transparent" onMouseEnter={() => onHold(index)} />
           </g>
         ))}
       </svg>
-      <ul className="mt-3 flex flex-wrap gap-6" aria-label="Chart legend">
-        <li className="flex items-center gap-2 font-mono text-specimen uppercase tracking-specimen text-tertiary"><span className="inline-block h-0.5 w-8 bg-ink" aria-hidden="true" />Demand</li>
-        <li className="flex items-center gap-2 font-mono text-specimen uppercase tracking-specimen text-tertiary"><span className="inline-block h-0.5 w-8 bg-cedar" aria-hidden="true" />Capacity</li>
-        {columns.some((column) => column.capacitySource === 'extended') ? (
-          <li className="flex items-center gap-2 font-mono text-specimen uppercase tracking-specimen text-tertiary"><span className="inline-block w-8 border-t-2 border-dotted border-cedar" aria-hidden="true" />Extended</li>
-        ) : null}
-      </ul>
+      {live ? (
+        <ul className="mt-2 flex flex-wrap gap-6" aria-label="Chart legend">
+          <li className="flex items-center gap-2 font-mono text-specimen uppercase tracking-specimen text-tertiary"><span className="inline-block h-px w-8 bg-verdant" aria-hidden="true" />Demand</li>
+          <li className="flex items-center gap-2 font-mono text-specimen uppercase tracking-specimen text-tertiary"><span className="inline-block h-px w-8 bg-ink" aria-hidden="true" />Capacity</li>
+          {columns.some((column) => column.capacitySource === 'extended') ? (
+            <li className="flex items-center gap-2 font-mono text-specimen uppercase tracking-specimen text-tertiary"><span className="inline-block w-8 border-t border-dotted border-ink" aria-hidden="true" />Extended</li>
+          ) : null}
+          {columns.some((column) => column.partialUnits !== null) ? (
+            <li className="flex items-center gap-2 font-mono text-specimen uppercase tracking-specimen text-tertiary"><span className="inline-block w-8 border-t border-dashed border-tertiary" aria-hidden="true" />Partial</li>
+          ) : null}
+        </ul>
+      ) : null}
     </div>
   );
+}
+
+function lineIsBlank(points: readonly ForecastPoint[]): boolean {
+  return points.length > 0 && points.every((point) => point.capacityUnits === null);
+}
+
+function isolatedBlank(points: readonly ForecastPoint[], index: number): boolean {
+  const point = points[index];
+  if (!point || point.capacityUnits !== null || lineIsBlank(points) || points.length < 2) return false;
+  const prev = index > 0 ? points[index - 1] : null;
+  const next = index < points.length - 1 ? points[index + 1] : null;
+  const prevHas = !prev || typeof prev.capacityUnits === 'number';
+  const nextHas = !next || typeof next.capacityUnits === 'number';
+  return prevHas && nextHas && (!!prev || !!next);
+}
+
+function NoCapacityChip() {
+  return <span className="mt-1 inline-flex max-w-full rounded-chip border border-hairline px-1.5 py-0.5 font-mono text-[10px] uppercase leading-tight tracking-specimen text-tertiary">{NO_CAPACITY}</span>;
 }
 
 function pointLabel(line: ForecastLine, column: ForecastColumn, point: ForecastPoint): string {
@@ -286,7 +409,7 @@ function LineMatrix({
   return (
     <div
       className="hidden min-w-0 md:grid"
-      style={{ gridTemplateColumns: `minmax(5.5rem, 7.5rem) repeat(${board.columns.length}, minmax(0, 1fr))` }}
+      style={{ gridTemplateColumns: `minmax(7.5rem, 9.5rem) repeat(${board.columns.length}, minmax(0, 1fr))` }}
       role="grid"
       aria-label="Product lines by period"
       onKeyDown={(event) => {
@@ -297,7 +420,7 @@ function LineMatrix({
         document.getElementById(`forecast-period-${board.columns[next]?.id}`)?.focus();
       }}
     >
-      <div className="border-b border-hairline" />
+      <div />
       {board.columns.map((column, index) => (
         <button
           key={column.id}
@@ -307,25 +430,32 @@ function LineMatrix({
           onMouseEnter={() => onHold(index)}
           onFocus={() => onHold(index)}
           onClick={() => onHold(index)}
-          className={`min-h-[44px] border-b border-hairline px-0.5 text-center font-mono text-[11px] uppercase tracking-specimen ${index === held ? 'bg-bone text-primary' : 'text-tertiary'}`}
+          className={`min-h-[44px] appearance-none rounded-none border-0 px-0.5 py-2 text-center font-mono text-[11px] leading-tight shadow-none ${index === held ? 'bg-bone text-primary' : 'bg-transparent text-tertiary'}`}
         >
-          {column.label}
+          <span className="block uppercase tracking-specimen">{column.label}</span>
+          {column.dates ? <span className="mt-1 block tabular-nums">{column.dates}</span> : null}
         </button>
       ))}
-      {board.lines.map((line) => (
+      {board.lines.map((line, lineIndex) => {
+        const blank = lineIsBlank(line.points);
+        const nameClass = `flex flex-col items-start justify-center border-0 border-t border-solid border-hairline py-3 pr-3 font-display text-[22px] leading-none text-primary ${lineIndex === board.lines.length - 1 ? 'border-b' : ''}`;
+        return (
         <div key={line.productLine} className="contents">
           {linkLines ? (
             <a
               href={productionHref({ brand, line: line.productLine })}
               onClick={(event) => onOpenLine?.(event, line.productLine)}
-              className="flex min-h-[44px] items-center border-t border-hairline pr-2 font-sans text-body-m text-primary cedar-underline"
+              className={nameClass}
             >
               {line.label}
+              {blank ? <NoCapacityChip /> : null}
             </a>
           ) : (
-            <div className="flex min-h-[44px] items-center border-t border-hairline pr-2 font-sans text-body-m text-primary">{line.label}</div>
+            <div className={nameClass}>{line.label}{blank ? <NoCapacityChip /> : null}</div>
           )}
-          {line.points.map((point, index) => (
+          {line.points.map((point, index) => {
+            const hole = isolatedBlank(line.points, index);
+            return (
             <button
               key={`${line.productLine}-${board.columns[index].id}`}
               type="button"
@@ -334,16 +464,20 @@ function LineMatrix({
               onMouseEnter={() => onHold(index)}
               onFocus={() => onHold(index)}
               onClick={() => onHold(index)}
-              className={`flex min-h-[44px] items-center justify-center border-t border-hairline ${index === held ? 'bg-bone' : ''}`}
+              className={`flex min-h-[52px] appearance-none flex-col items-start justify-center gap-0.5 rounded-none border-0 border-t border-solid border-hairline px-1 py-3 text-left shadow-none ${lineIndex === board.lines.length - 1 ? 'border-b' : ''} ${index === held ? 'bg-bone' : 'bg-transparent'}`}
             >
-              <span className="flex flex-col items-center gap-1">
-                <StatusSquare status={point.status} />
-                {point.capacitySource === 'extended' ? <ExtMark from={point.carriedFrom} /> : null}
-              </span>
+              <span className={`font-mono text-[13px] tabular-nums leading-none ${blank ? 'text-tertiary' : 'text-primary'}`}>{demandText(point.demand)}</span>
+              {blank ? null : (
+                <span className="font-mono text-[12px] tabular-nums leading-none text-secondary">{point.capacityUnits === null ? (hole ? NO_CAPACITY : '') : `/ ${formatCapacity(point.capacityUnits)}`}</span>
+              )}
+              {blank ? null : <span className="mt-1"><StatusSquare status={point.status} /></span>}
+              {!blank && point.capacitySource === 'extended' ? <ExtMark from={point.carriedFrom} /> : null}
             </button>
-          ))}
+            );
+          })}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -366,7 +500,7 @@ function PhoneLines({
   const column = board.columns[held];
   if (!column) return null;
   return (
-    <div className="flex flex-col md:hidden">
+    <div className="flex flex-col md:hidden" data-layout="phone">
       <div className="mb-3 flex gap-2">
         <button type="button" disabled={held === 0} onClick={() => onHold(held - 1)} className="min-h-[44px] flex-1 border border-hairline bg-clinical font-mono text-specimen uppercase tracking-specimen text-primary disabled:opacity-40">Previous</button>
         <button type="button" disabled={held >= board.columns.length - 1} onClick={() => onHold(held + 1)} className="min-h-[44px] flex-1 border border-hairline bg-clinical font-mono text-specimen uppercase tracking-specimen text-primary disabled:opacity-40">Next</button>
@@ -374,14 +508,22 @@ function PhoneLines({
       <ul>
         {board.lines.map((line) => {
           const point = line.points[held];
-          const body = (
+          const blank = lineIsBlank(line.points);
+          const hole = point ? isolatedBlank(line.points, held) : false;
+          const body = blank ? (
+            <>
+              <span className="font-display text-[22px] leading-none text-primary">{line.label}</span>
+              <NoCapacityChip />
+              <span className="font-mono text-data tabular-nums text-tertiary">{demandText(point?.demand ?? null)}</span>
+            </>
+          ) : (
             <>
               <span className="flex items-center justify-between gap-3">
-                <span className="font-sans text-body-m text-primary">{line.label}</span>
+                <span className="font-display text-[22px] leading-none text-primary">{line.label}</span>
                 <StatusSquare status={point?.status ?? null} />
               </span>
               <span className="font-mono text-data tabular-nums text-primary">Demand {demandText(point?.demand ?? null)}</span>
-              <span className="font-mono text-data tabular-nums text-primary">Capacity <CapacityValue value={point?.capacityUnits ?? null} source={point?.capacitySource ?? null} from={point?.carriedFrom ?? null} /></span>
+              <span className="font-mono text-data tabular-nums text-primary">Capacity {point?.capacityUnits === null ? (hole ? NO_CAPACITY : '') : <CapacityValue value={point?.capacityUnits ?? null} source={point?.capacitySource ?? null} from={point?.carriedFrom ?? null} />}</span>
             </>
           );
           return (
@@ -405,15 +547,19 @@ function BoardView({
   brand,
   board,
   kicker,
-  unit,
+  demandLabel,
+  weekly,
   linkLines,
+  chartHeight,
   onOpenLine,
 }: {
   brand: CrmBrand;
   board: ForecastBoard;
   kicker: string;
-  unit: string;
+  demandLabel: string;
+  weekly: boolean;
   linkLines: boolean;
+  chartHeight: 120 | 200;
   onOpenLine?: (event: MouseEvent<HTMLAnchorElement>, line: ProductLine) => void;
 }) {
   if (!board.columns.length) {
@@ -422,13 +568,14 @@ function BoardView({
   return (
     <HeldFrame board={board}>
       {(held, onHold) => {
-        const column = board.columns[held];
         return (
           <div className="flex min-w-0 flex-col gap-6">
-            <Readout column={column} kicker={kicker} unit={unit} />
+            <div className="flex flex-col gap-6 md:grid md:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)] md:items-end">
+            <Readout column={readoutColumn(board, held)} point={chartSeries(board)[held]} label={demandLabel} weekly={weekly} />
             <div className="hidden min-w-0 md:block">
-              <ForecastChart columns={board.columns} held={held} onHold={onHold} label={kicker} />
+              <ForecastChart board={board} held={held} onHold={onHold} label={kicker} height={chartHeight} />
             </div>
+          </div>
             <LineMatrix brand={brand} board={board} held={held} onHold={onHold} onOpenLine={onOpenLine} linkLines={linkLines} />
             <PhoneLines brand={brand} board={board} held={held} onHold={onHold} onOpenLine={onOpenLine} linkLines={linkLines} />
           </div>
@@ -440,7 +587,7 @@ function BoardView({
 
 export function SpanControl({ span, onSpan }: { span: ForecastSpan; onSpan: (span: ForecastSpan) => void }) {
   return (
-    <div role="radiogroup" aria-label="Forecast range" className="flex w-full max-w-md border border-hairline">
+    <div role="radiogroup" aria-label="Forecast range" className="inline-flex border border-hairline">
       {(['week', 'month', 'year'] as const).map((item, index) => (
         <button
           key={item}
@@ -454,7 +601,7 @@ export function SpanControl({ span, onSpan }: { span: ForecastSpan; onSpan: (spa
             event.preventDefault();
             onSpan(next);
           }}
-          className={`min-h-[44px] flex-1 font-mono text-specimen uppercase tracking-specimen ${index ? 'border-l border-hairline' : ''} ${span === item ? 'bg-ink text-inverse' : 'bg-clinical text-primary'}`}
+          className={`min-h-[36px] px-3 font-mono text-specimen uppercase tracking-specimen ${index ? 'border-l border-hairline' : ''} ${span === item ? 'bg-ink text-inverse' : 'bg-transparent text-primary'}`}
         >
           {SPAN_LABEL[item]}
         </button>
@@ -472,11 +619,11 @@ function StatsRow({ board }: { board: ForecastBoard }) {
     ['Periods without capacity', String(stats.noCapacity)],
   ];
   return (
-    <dl className="grid grid-cols-2 gap-px bg-hairline md:grid-cols-4">
+    <dl className="grid grid-cols-2 gap-x-8 gap-y-6 md:grid-cols-4">
       {items.map(([label, value]) => (
-        <div key={label} className="flex flex-col gap-1 bg-clinical px-4 py-5">
+        <div key={label} className="flex flex-col gap-1">
+          <dd className="font-display text-[40px] leading-none tabular-nums text-primary">{value}</dd>
           <dt className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{label}</dt>
-          <dd className="font-display text-heading-m-m tabular-nums text-primary md:text-heading-m">{value}</dd>
         </div>
       ))}
     </dl>
@@ -487,42 +634,37 @@ function PeriodBreakdown({ board }: { board: ForecastBoard }) {
   const line = board.lines[0];
   if (!line) return null;
   return (
-    <div className="min-w-0 border border-hairline bg-clinical">
-      <h3 className="border-b border-hairline px-4 py-3 font-display text-body-l text-primary">Period breakdown</h3>
-      <ul className="md:hidden">
-        {board.columns.map((column, index) => {
-          const point = line.points[index];
-          return (
-            <li key={column.id} className="flex flex-col gap-1 border-t border-hairline px-4 py-3">
-              <span className="flex items-center justify-between gap-3">
-                <span className="font-sans text-body-m text-primary">{column.label}</span>
-                {point?.status ? <StatusChip status={point.status} /> : <span className="font-mono text-specimen text-tertiary">Not returned</span>}
-              </span>
-              <span className="font-mono text-data tabular-nums text-primary">Demand {demandText(point?.demand ?? null)}</span>
-              <span className="font-mono text-data tabular-nums text-primary">Capacity <CapacityValue value={point?.capacityUnits ?? null} source={point?.capacitySource ?? null} from={point?.carriedFrom ?? null} /></span>
-            </li>
-          );
-        })}
-      </ul>
-      <div className="hidden md:block">
-        <table className="w-full text-left">
+    <div className="min-w-0">
+      <h3 className="mb-2 font-display text-heading-s text-primary">Period breakdown</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse bg-transparent text-left">
+          <colgroup>
+            <col />
+            <col style={{ width: '1%' }} />
+            <col style={{ width: '1%' }} />
+            <col style={{ width: '1%' }} />
+          </colgroup>
           <thead>
-            <tr className="font-mono text-specimen uppercase tracking-specimen text-tertiary">
-              <th className="px-4 py-2 font-normal">Period</th>
-              <th className="px-4 py-2 text-right font-normal">Demand</th>
-              <th className="px-4 py-2 text-right font-normal">Capacity</th>
-              <th className="px-4 py-2 font-normal">Status</th>
+            <tr className="border-b border-hairline font-mono text-specimen uppercase tracking-specimen text-tertiary">
+              <th className="py-2 pr-8 text-left font-normal">Period</th>
+              <th className="whitespace-nowrap py-2 pl-4 text-right font-normal">Demand</th>
+              <th className="whitespace-nowrap py-2 pl-6 text-right font-normal">Capacity</th>
+              <th className="whitespace-nowrap py-2 pl-6 text-right font-normal">Status</th>
             </tr>
           </thead>
           <tbody>
             {board.columns.map((column, index) => {
               const point = line.points[index];
+              const capacity = point?.capacityUnits === null || point?.capacityUnits === undefined ? 'No capacity entered' : formatCapacity(point.capacityUnits);
               return (
-                <tr key={column.id} className="border-t border-hairline">
-                  <th className="px-4 py-3 text-left font-sans text-body-m font-normal text-primary">{column.label}</th>
-                  <td className="px-4 py-3 text-right font-mono text-data tabular-nums text-primary">{demandText(point?.demand ?? null)}</td>
-                  <td className="px-4 py-3 text-right font-mono text-data tabular-nums text-primary"><CapacityValue value={point?.capacityUnits ?? null} source={point?.capacitySource ?? null} from={point?.carriedFrom ?? null} /></td>
-                  <td className="px-4 py-3">{point?.status ? <StatusChip status={point.status} /> : <span className="font-mono text-specimen text-tertiary">Not returned</span>}</td>
+                <tr key={column.id} className="border-b border-hairline">
+                  <th className="whitespace-nowrap py-2 pr-8 text-left font-mono text-specimen font-normal uppercase text-tertiary">{column.label}</th>
+                  <td className="whitespace-nowrap py-2 pl-4 text-right font-mono text-data tabular-nums text-primary">{demandText(point?.demand ?? null)}</td>
+                  <td className="whitespace-nowrap py-2 pl-6 text-right font-mono text-data tabular-nums text-primary">
+                    {capacity}
+                    {point?.capacitySource === 'extended' ? <span className="ml-2"><ExtMark from={point.carriedFrom} /></span> : null}
+                  </td>
+                  <td className="whitespace-nowrap py-2 pl-6 text-right">{point?.status ? <StatusChip status={point.status} /> : null}</td>
                 </tr>
               );
             })}
@@ -560,21 +702,21 @@ function CapacityForm({ brand, canEdit, onChanged }: { brand: CrmBrand; canEdit:
     <div className="flex flex-col gap-3">
       {message ? <p role="status" className="border border-hairline bg-bone px-3 py-2 text-body-m text-primary">{message}</p> : null}
       {canEdit ? (
-        <form onSubmit={(event) => { event.preventDefault(); save(event.currentTarget); }} className="grid grid-cols-1 gap-3 border border-hairline bg-clinical p-4 md:grid-cols-2">
-          <h3 className="font-display text-body-l text-primary md:col-span-2">Capacity</h3>
+        <form onSubmit={(event) => { event.preventDefault(); save(event.currentTarget); }} className="grid grid-cols-1 gap-4 border-t border-hairline pt-6 md:grid-cols-2">
+          <h3 className="font-display text-heading-s text-primary md:col-span-2">Enter capacity</h3>
           <label className="flex flex-col gap-1 text-caption text-tertiary">Month
-            <input name="month" type="month" required className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
+            <input name="month" type="month" required className="appearance-none rounded-none border border-hairline bg-parchment px-3 py-2 text-body-m text-primary shadow-none" />
           </label>
           <label className="flex flex-col gap-1 text-caption text-tertiary">Product line
-            <select name="productLine" required defaultValue="vape" className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary">
+            <select name="productLine" required defaultValue="vape" className="appearance-none rounded-none border border-hairline bg-parchment px-3 py-2 text-body-m text-primary shadow-none">
               {PRODUCT_LINES.map((line) => <option key={line} value={line}>{PRODUCT_LINE_LABELS[line]}</option>)}
             </select>
           </label>
           <label className="flex flex-col gap-1 text-caption text-tertiary">Units
-            <input name="capacityUnits" required inputMode="numeric" className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
+            <input name="capacityUnits" required inputMode="numeric" className="appearance-none rounded-none border border-hairline bg-parchment px-3 py-2 text-body-m text-primary shadow-none" />
           </label>
           <label className="flex flex-col gap-1 text-caption text-tertiary">Notes
-            <input name="notes" className="border border-hairline bg-clinical px-3 py-2 text-body-m text-primary" />
+            <input name="notes" className="appearance-none rounded-none border border-hairline bg-parchment px-3 py-2 text-body-m text-primary shadow-none" />
           </label>
           <button type="submit" className="w-fit border border-ink bg-ink px-4 py-2 font-mono text-specimen uppercase text-inverse">Save capacity</button>
         </form>
@@ -605,19 +747,21 @@ export function WeeklyOverview({
   onOpenLine?: (event: MouseEvent<HTMLAnchorElement>, line: ProductLine) => void;
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-6">
-      <div>
-        <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">
-          {view.state === 'ready' ? `${view.board.columns.length} ISO weeks` : 'Weekly forecast'}
-        </p>
-        <p className="mt-2 max-w-editorial text-caption text-tertiary">Weighted demand uses the win rate for the current stage. Won deals count in full. A blank capacity is not zero.</p>
+    <div className="flex min-w-0 flex-col gap-8">
+      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <div>
+          <p className="font-sans text-eyebrow uppercase text-cedar">Production</p>
+          <h2 className="font-display text-[40px] leading-none text-primary md:text-[48px]">The next thirteen weeks</h2>
+          <p className="mt-2 font-display text-body-m text-secondary">{asOfLine()}</p>
+        </div>
+        <p className="max-w-sm text-caption text-tertiary md:text-right">{OVERVIEW_NOTE}</p>
       </div>
       <MissedDeals count={view.state === 'ready' ? view.notForecastable : notForecastable} />
       {view.state === 'loading' ? <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Loading forecast</p> : null}
       {view.state === 'pending' ? <p className="border border-hairline bg-clinical px-4 py-8 text-center text-body-m text-secondary">{WEEKLY_PENDING}</p> : null}
       {view.state === 'error' ? <p className="border border-hairline bg-clinical px-4 py-3 text-body-m text-secondary">{view.reason}</p> : null}
       {view.state === 'ready' ? (
-        <BoardView brand={brand} board={view.board} kicker="Held week" unit="Units of demand" linkLines onOpenLine={onOpenLine} />
+        <BoardView brand={brand} board={view.board} kicker="Held week" demandLabel="Demand this week" weekly linkLines chartHeight={120} onOpenLine={onOpenLine} />
       ) : null}
       {view.state === 'pending' ? (
         <ul className="border-t border-hairline">
@@ -676,6 +820,7 @@ export function LineDashboard({
   canPrev = true,
   canNext = true,
   onYearShift,
+  onBackToToday,
 }: {
   brand: CrmBrand;
   line: ProductLine;
@@ -687,25 +832,36 @@ export function LineDashboard({
   canPrev?: boolean;
   canNext?: boolean;
   onYearShift?: (delta: -3 | 3) => void;
+  onBackToToday?: () => void;
 }) {
   const kicker = span === 'week' ? 'Held week' : 'Held month';
-  const range = span === 'week' ? '13 ISO weeks' : span === 'year' ? '12 months' : '6 months from this month';
   const windowFrom = yearFrom ?? (view.state === 'ready' ? view.board.columns[0]?.start : null) ?? currentMonthStart();
+  const todayWindow = currentMonthStart();
+  const title = dashboardTitle(span, view, windowFrom);
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <div className="flex flex-col gap-4">
         <a href={productionHref({ brand })} onClick={onBack} className="w-fit font-mono text-specimen uppercase tracking-specimen text-primary cedar-underline">
           Production forecast
         </a>
-        <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="flex flex-col gap-3">
             <div>
-              <h2 className="font-display text-heading-m-m text-primary md:text-heading-m">{PRODUCT_LINE_LABELS[line]}</h2>
-              <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{range}</p>
+              <p className="font-sans text-eyebrow uppercase text-cedar">{PRODUCT_LINE_LABELS[line]}</p>
+              <h2 className="font-display text-[40px] leading-none text-primary md:text-[48px]">{title}</h2>
+              <p className="mt-2 font-display text-body-m text-secondary">{asOfLine()}</p>
             </div>
-            {span === 'year' ? <YearWindow from={windowFrom} canPrev={canPrev} canNext={canNext} onShift={onYearShift ?? (() => {})} /> : null}
+            <SpanControl span={span} onSpan={onSpan} />
+            {span === 'year' ? (
+              <div className="flex flex-wrap items-center gap-4">
+                <YearWindow from={windowFrom} canPrev={canPrev} canNext={canNext} onShift={onYearShift ?? (() => {})} />
+                {windowFrom !== todayWindow ? (
+                  <button type="button" onClick={onBackToToday} className="font-mono text-specimen uppercase tracking-specimen text-primary cedar-underline">Back to today</button>
+                ) : null}
+              </div>
+            ) : null}
           </div>
-          <SpanControl span={span} onSpan={onSpan} />
+          <p className="max-w-sm text-caption text-tertiary md:max-w-xs md:pt-8 md:text-right">{SPAN_NOTE[span]}</p>
         </div>
       </div>
       {view.state === 'loading' ? <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Loading forecast</p> : null}
@@ -713,7 +869,7 @@ export function LineDashboard({
       {view.state === 'error' ? <p className="border border-hairline bg-clinical px-4 py-3 text-body-m text-secondary">{view.reason}</p> : null}
       {view.state === 'ready' ? (
         <>
-          <BoardView brand={brand} board={view.board} kicker={kicker} unit="Units of demand" linkLines={false} />
+          <BoardView brand={brand} board={view.board} kicker={kicker} demandLabel={`${PRODUCT_LINE_LABELS[line]} demand`} weekly={span === 'week'} linkLines={false} chartHeight={200} />
           <StatsRow board={view.board} />
           <PeriodBreakdown board={view.board} />
         </>
@@ -809,6 +965,14 @@ export function ProductionSection({
     window.history.replaceState(null, '', writeProductionUrl(brand, line, next, yearFrom));
   }
 
+  function backToToday() {
+    const today = currentMonthStart();
+    appliedYear.current = null;
+    setYearMoves({ prev: false, next: false });
+    setYearFrom(today);
+    window.history.replaceState(null, '', writeProductionUrl(brand, line, 'year', today));
+  }
+
   function shiftYear(delta: -3 | 3) {
     const key = delta < 0 ? 'prev' : 'next';
     if (yearBusy || !yearMoves[key] || !line) return;
@@ -842,6 +1006,7 @@ export function ProductionSection({
         canPrev={yearMoves.prev && !yearBusy}
         canNext={yearMoves.next && !yearBusy}
         onYearShift={shiftYear}
+        onBackToToday={backToToday}
       />
     );
   }
