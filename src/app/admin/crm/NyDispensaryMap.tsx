@@ -1,15 +1,20 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { NY_REGIONS, type NyRegion } from '@/lib/crm/nyRegions';
 import {
+  cityChoices,
   clusterPins,
   COUNTY_DRAWS,
+  countyChoices,
+  countyFrame,
+  framePoints,
   MAP_HEIGHT,
   MAP_WIDTH,
   nycFrame,
   pinCard,
   placePins,
+  type MapChoice,
   type MapPin,
   type PlacedPin,
 } from '@/lib/crm/nyMap';
@@ -20,6 +25,8 @@ const WHOLE = { x: -24, y: -24, w: MAP_WIDTH + 48, h: MAP_HEIGHT + 48 };
 export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPin[]; unmapped: number; onOpenAccount: (id: string) => void }) {
   const [view, setView] = useState(WHOLE);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [litIds, setLitIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [outline, setOutline] = useState<string | null>(null);
   const drag = useRef<{ x: number; y: number; viewX: number; viewY: number; pointer: number } | null>(null);
   const placed = useMemo(() => placePins(pins).placed, [pins]);
   const cell = view.w / 28;
@@ -53,8 +60,41 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
         <div className="flex flex-wrap gap-2 p-2">
           <button type="button" onClick={() => zoomAt(1.4, view.x + view.w / 2, view.y + view.h / 2)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">+</button>
           <button type="button" onClick={() => zoomAt(1 / 1.4, view.x + view.w / 2, view.y + view.h / 2)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">-</button>
-          <button type="button" onClick={() => setView(nycFrame())} className="min-h-[44px] border border-ink bg-clinical px-3 font-mono text-specimen uppercase text-primary">New York City</button>
-          <button type="button" onClick={() => setView(WHOLE)} className="min-h-[44px] border border-ink bg-clinical px-3 font-mono text-specimen uppercase text-primary">Whole state</button>
+          <MapMenu
+            id="city-menu"
+            label="New York City"
+            placeholder="Search cities"
+            options={(query) => cityChoices(placed, query)}
+            onPick={(choice) => {
+              if (choice.id === 'nyc') {
+                setView(nycFrame());
+                setLitIds(new Set(placed.filter((pin) => ['Bronx', 'Kings', 'New York', 'Queens', 'Richmond'].includes(pin.county || '')).map((pin) => pin.id)));
+              } else {
+                const matches = placed.filter((pin) => pin.city?.trim().toLowerCase() === choice.label.toLowerCase());
+                const frame = framePoints(matches);
+                if (frame) setView(frame);
+                setLitIds(new Set(matches.map((pin) => pin.id)));
+              }
+              setOutline(null);
+            }}
+          />
+          <MapMenu
+            id="county-menu"
+            label="Whole state"
+            placeholder="Search counties"
+            options={(query) => countyChoices(placed, query)}
+            onPick={(choice) => {
+              setLitIds(new Set());
+              if (choice.id === 'state') {
+                setView(WHOLE);
+                setOutline(null);
+                return;
+              }
+              const frame = countyFrame(choice.label);
+              if (frame) setView(frame);
+              setOutline(choice.label);
+            }}
+          />
         </div>
         <svg
           viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
@@ -87,7 +127,8 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
         >
           {COUNTY_DRAWS.map((county) => {
             const tone = county.region === 'Region unknown' ? 0.04 : REGION_TONE[NY_REGIONS.indexOf(county.region as NyRegion)] ?? 0.08;
-            return <path key={county.name} d={county.d} fill={`rgb(var(--surface-ink) / ${tone})`} stroke="rgb(var(--line-hairline))" strokeWidth={view.w / 900} />;
+            const marked = outline === county.name;
+            return <path key={county.name} d={county.d} fill={`rgb(var(--surface-ink) / ${tone})`} stroke={marked ? 'rgb(var(--surface-ink))' : 'rgb(var(--line-hairline))'} strokeWidth={marked ? view.w / 280 : view.w / 900} />;
           })}
           {grouped.clusters.map((cluster) => (
             <g key={`${cluster.x}-${cluster.y}`} data-pin="cluster">
@@ -109,7 +150,8 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
           ))}
           {grouped.singles.map((pin) => {
             const selected = pin.id === activeId;
-            const size = selected ? mark * 1.35 : mark;
+            const lit = litIds.has(pin.id);
+            const size = selected || lit ? mark * 1.35 : mark;
             return (
               <rect
                 key={pin.id}
@@ -118,7 +160,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
                 y={pin.y - size / 2}
                 width={size}
                 height={size}
-                fill={selected ? 'rgb(var(--accent-cedar))' : 'rgb(var(--surface-clinical))'}
+                fill={selected ? 'rgb(var(--accent-cedar))' : lit ? 'rgb(var(--surface-ink))' : 'rgb(var(--surface-clinical))'}
                 stroke="rgb(var(--surface-ink))"
                 strokeWidth={selected ? view.w / 280 : view.w / 500}
                 className="cursor-pointer"
@@ -138,6 +180,99 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
         {active ? <PinCard pin={active} onOpen={() => onOpenAccount(active.id)} /> : <p className="text-body-m text-secondary">Hover or focus a dispensary to see its record. Select it to open the account.</p>}
         <p className="text-caption text-tertiary">{unmapped} accounts not yet on the map.</p>
       </aside>
+    </div>
+  );
+}
+
+function MapMenu({ id, label, placeholder, options, onPick }: { id: string; label: string; placeholder: string; options: (query: string) => MapChoice[]; onPick: (choice: MapChoice) => void }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [active, setActive] = useState(0);
+  const [chosen, setChosen] = useState(label);
+  const root = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const list = options(query);
+  const current = list.length ? Math.min(active, list.length - 1) : 0;
+
+  useEffect(() => {
+    if (!open) return;
+    function close(event: MouseEvent) {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    document.getElementById(`${id}-opt-${current}`)?.scrollIntoView({ block: 'nearest' });
+  }, [open, current, id]);
+
+  function show() {
+    setQuery('');
+    setActive(0);
+    setOpen(true);
+    setTimeout(() => input.current?.focus(), 0);
+  }
+
+  function hide() {
+    setOpen(false);
+    button.current?.focus();
+  }
+
+  function pick(choice: MapChoice) {
+    setChosen(choice.label);
+    onPick(choice);
+    hide();
+  }
+
+  function onKey(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setActive((index) => list.length ? (Math.min(index, list.length - 1) + 1) % list.length : 0);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setActive((index) => list.length ? (Math.min(index, list.length - 1) - 1 + list.length) % list.length : 0);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      if (list[current]) pick(list[current]);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      hide();
+    }
+  }
+
+  return (
+    <div ref={root} className="relative">
+      <button ref={button} type="button" aria-haspopup="listbox" aria-expanded={open} aria-controls={`${id}-list`} onClick={() => (open ? hide() : show())} className="min-h-[44px] border border-ink bg-clinical px-3 font-mono text-specimen uppercase text-primary">{chosen}</button>
+      {open ? (
+        <div className="absolute left-0 z-10 mt-1 w-[min(18rem,calc(100vw-2rem))] border border-ink bg-clinical">
+          <input
+            ref={input}
+            role="combobox"
+            aria-expanded={open}
+            aria-controls={`${id}-list`}
+            aria-autocomplete="list"
+            aria-activedescendant={list[current] ? `${id}-opt-${current}` : undefined}
+            value={query}
+            placeholder={placeholder}
+            onChange={(event) => { setQuery(event.target.value); setActive(0); }}
+            onKeyDown={onKey}
+            className="min-h-[44px] w-full border-b border-hairline bg-clinical px-3 text-body-m text-primary"
+          />
+          <ul id={`${id}-list`} role="listbox" aria-label={label} className="max-h-64 overflow-y-auto">
+            {list.length ? list.map((choice, index) => (
+              <li key={choice.id} id={`${id}-opt-${index}`} role="option" aria-selected={index === current}>
+                <button type="button" onMouseEnter={() => setActive(index)} onClick={() => pick(choice)} className={`flex min-h-[44px] w-full items-center justify-between px-3 text-left text-body-m text-primary ${index === current ? 'bg-bone' : 'bg-clinical'}`}>
+                  <span>{choice.label}</span>
+                  <span className="font-mono text-specimen tabular-nums">{choice.count}</span>
+                </button>
+              </li>
+            )) : <li className="px-3 py-2 text-caption text-tertiary">No matches.</li>}
+          </ul>
+        </div>
+      ) : null}
     </div>
   );
 }
