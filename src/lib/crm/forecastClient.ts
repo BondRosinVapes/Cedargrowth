@@ -362,7 +362,7 @@ export function sliceYearCells<T extends { month: string }>(cells: readonly T[],
 }
 
 export function carriedForwardLabel(from: string | null): string {
-  return from ? `Carried forward from ${monthYearLabel(from)}` : 'Carried forward';
+  return from ? `Carried forward from ${monthYearLabel(from)}` : 'Carried forward from the last entered month';
 }
 
 export function monthFromSearch(value: string | null): string | null {

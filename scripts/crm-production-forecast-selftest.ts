@@ -326,14 +326,34 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     && janBoard.lines[0]?.points[0]?.capacitySource === 'extended'
     && janHtml.includes('JAN 27')
     && janHtml.includes('data-capacity="310"')
-    && janHtml.includes('ext.'),
+    && janHtml.includes('ext.')
+    && janHtml.includes('Jan 2027 to Mar 2027')
+    && janHtml.includes('The next six months') === false
+    && janHtml.includes('Carried forward from the last entered month')
+    && janHtml.includes('Carried forward from January') === false
+    && janHtml.includes('>Demand<')
+    && janHtml.includes('>Capacity<')
+    && janHtml.includes('not a weekly pro-rate')
+    && janHtml.includes('border-0'),
     'from=2027-01-01 months=3 keeps the extended January cell and its value',
   );
   assert(
     weekCell('WK 53') === String(Math.round(raw53?.capacityUnits as number))
     && weekCell('WK 1') === String(Math.round(raw01?.capacityUnits as number))
     && weekHtml.includes('WK 53')
-    && weekHtml.includes('WK 1'),
+    && weekHtml.includes('WK 1')
+    && weekHtml.includes('Week by week')
+    && weekHtml.includes('in ISO weeks'),
     'the week view keeps 2026-W53 and 2027-W01 capacity in the cells',
   );
+  const pagedYear = janBoard ? renderToStaticMarkup(createElement(LineDashboard, {
+    brand: 'cedargrowth',
+    line: 'vape',
+    span: 'year',
+    yearFrom: '2027-01-01',
+    view: { state: 'ready', board: janBoard, notForecastable: 0 },
+    onSpan: () => {},
+    onBack: () => {},
+  })) : '';
+  assert(pagedYear.includes('Jan 2027 to Mar 2027') && pagedYear.includes('The next twelve months') === false, 'a paged window titles itself with its date range');
 }

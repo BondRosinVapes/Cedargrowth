@@ -11,9 +11,11 @@ import {
   carriedForwardLabel,
   chartSeries,
   currentMonthStart,
+  exactDateSpan,
   formatCapacity,
   formatUnits,
   heldIndex,
+  monthYearLabel,
   lineFromSearch,
   loadForecastView,
   monthFromSearch,
@@ -24,6 +26,7 @@ import {
   shiftMonth,
   yearWindowCaption,
   spanFromSearch,
+  todayInNewYork,
   type ForecastBoard,
   type ForecastColumn,
   type ForecastLine,
@@ -42,9 +45,17 @@ const STATUS_LABEL: Record<ForecastStatus, string> = {
 
 const CHIP: Record<ForecastStatus, string> = {
   ok: 'border-hairline text-tertiary',
-  tight: 'border-attention/50 text-attention',
-  short: 'border-fail/50 text-fail',
+  tight: 'border-attention/30 text-tertiary',
+  short: 'border-fail/40 text-secondary',
   no_capacity: 'border-hairline text-tertiary',
+};
+
+const OVERVIEW_NOTE = 'Weighted demand uses the expected close date, grouped by ISO week. Weekly capacity is pro-rated from the month. A week that crosses two months takes a share from each. A blank capacity is not zero.';
+
+const SPAN_NOTE: Record<ForecastSpan, string> = {
+  week: 'Demand is grouped by the expected close date, in ISO weeks. Capacity is pro-rated from the month. A week that crosses two months takes a share from each. A blank capacity is not zero.',
+  month: 'Demand uses the expected close date, grouped by calendar month. Capacity is the monthly figure, not a weekly pro-rate. A blank capacity is not zero.',
+  year: 'No fiscal year is defined in the CRM, so this view is a twelve month horizon. Demand is grouped by calendar month. Capacity is the monthly figure. A blank capacity is not zero.',
 };
 
 const SQUARE: Record<ForecastStatus, string> = {
@@ -174,16 +185,42 @@ function readoutColumn(board: ForecastBoard, index: number): ForecastColumn {
   };
 }
 
+function carriedClause(from: string | null): string {
+  return from ? `Carried forward from ${monthLong(from)}.` : 'Carried forward from the last entered month.';
+}
+
 function capacitySentence(column: ForecastColumn, weekly: boolean): string {
   if (column.capacityUnits === null) return 'No capacity entered.';
   const amount = formatCapacity(column.capacityUnits);
-  const from = column.carriedFrom ? monthLong(column.carriedFrom) : monthLong(column.start);
-  const lead = weekly ? `Capacity ${amount}, pro-rated from ${from}.` : `Capacity ${amount}.`;
-  if (column.gap !== null && column.gap < 0) return `${lead} Short by ${formatUnits(Math.abs(column.gap))} units.`;
-  if (column.capacitySource === 'extended') return `${lead} Carried forward from ${from}.`;
+  const lead = weekly ? `Capacity ${amount}, pro-rated from ${monthLong(column.start)}.` : `Capacity ${amount}.`;
+  const carried = column.capacitySource === 'extended' ? ` ${carriedClause(column.carriedFrom)}` : '';
+  if (column.gap !== null && column.gap < 0) return `${lead} Short by ${formatUnits(Math.abs(column.gap))} units.${carried}`;
+  if (column.capacitySource === 'extended') return `${lead}${carried}`;
   if (column.gap !== null && column.gap > 0 && column.demand !== null && column.demand >= column.capacityUnits * 0.9) return `${lead} Tight.`;
   if (column.gap !== null && column.gap > 0) return `${lead} Spare room ${formatUnits(column.gap)} units.`;
   return lead;
+}
+
+function dashboardTitle(span: ForecastSpan, view: ForecastView, yearFrom: string): string {
+  const columns = view.state === 'ready' ? view.board.columns : [];
+  const first = columns[0];
+  const last = columns[columns.length - 1];
+  const month = currentMonthStart();
+  if (!first || !last) {
+    if (span === 'year' && yearFrom !== month) return yearWindowCaption(yearFrom);
+    if (span === 'week') return 'Week by week';
+    return span === 'year' ? 'The next twelve months' : 'The next six months';
+  }
+  if (span === 'week') {
+    const today = todayInNewYork();
+    const holdsToday = columns.some((column) => column.start <= today && today <= column.end);
+    if (columns.length === 13 && holdsToday) return 'Week by week';
+    return exactDateSpan(first.start, last.end);
+  }
+  const range = `${monthYearLabel(first.start)} to ${monthYearLabel(last.start)}`;
+  if (span === 'month' && columns.length === 6 && first.start === month) return 'The next six months';
+  if (span === 'year' && columns.length === 12 && first.start === month) return 'The next twelve months';
+  return range;
 }
 
 function Readout({ column, label, weekly }: { column: ForecastColumn; label: string; weekly: boolean }) {
@@ -250,7 +287,6 @@ function ForecastChart({ board, held, onHold, label }: { board: ForecastBoard; h
     const carried = column.capacitySource === 'extended' ? ` ${carriedForwardLabel(column.carriedFrom)}` : '';
     return `${column.label} demand ${demandText(column.demand)}, capacity ${formatCapacity(column.capacityUnits)}${carried}`;
   }).join('. ');
-  const heldColumn = columns[held];
   return (
     <div
       ref={ref}
@@ -297,7 +333,6 @@ function ForecastChart({ board, held, onHold, label }: { board: ForecastBoard; h
           ) : null}
         </ul>
       ) : null}
-      {heldColumn?.capacitySource === 'extended' ? <p className="mt-1 font-mono text-specimen text-tertiary">{carriedForwardLabel(heldColumn.carriedFrom)}</p> : null}
     </div>
   );
 }
@@ -347,7 +382,7 @@ function LineMatrix({
           onMouseEnter={() => onHold(index)}
           onFocus={() => onHold(index)}
           onClick={() => onHold(index)}
-          className={`min-h-[44px] px-0.5 py-2 text-center font-mono text-[11px] leading-tight ${index === held ? 'bg-bone text-primary' : 'text-tertiary'}`}
+          className={`min-h-[44px] appearance-none rounded-none border-0 px-0.5 py-2 text-center font-mono text-[11px] leading-tight shadow-none ${index === held ? 'bg-bone text-primary' : 'bg-transparent text-tertiary'}`}
         >
           <span className="block uppercase tracking-specimen">{column.label}</span>
           {column.dates ? <span className="mt-1 block tabular-nums">{column.dates}</span> : null}
@@ -359,12 +394,12 @@ function LineMatrix({
             <a
               href={productionHref({ brand, line: line.productLine })}
               onClick={(event) => onOpenLine?.(event, line.productLine)}
-              className={`flex items-center border-t border-hairline py-3 pr-3 font-display text-[22px] leading-none text-primary ${lineIndex === board.lines.length - 1 ? 'border-b' : ''}`}
+              className={`flex items-center border-0 border-t border-solid border-hairline py-3 pr-3 font-display text-[22px] leading-none text-primary ${lineIndex === board.lines.length - 1 ? 'border-b' : ''}`}
             >
               {line.label}
             </a>
           ) : (
-            <div className={`flex items-center border-t border-hairline py-3 pr-3 font-display text-[22px] leading-none text-primary ${lineIndex === board.lines.length - 1 ? 'border-b' : ''}`}>{line.label}</div>
+            <div className={`flex items-center border-0 border-t border-solid border-hairline py-3 pr-3 font-display text-[22px] leading-none text-primary ${lineIndex === board.lines.length - 1 ? 'border-b' : ''}`}>{line.label}</div>
           )}
           {line.points.map((point, index) => (
             <button
@@ -375,7 +410,7 @@ function LineMatrix({
               onMouseEnter={() => onHold(index)}
               onFocus={() => onHold(index)}
               onClick={() => onHold(index)}
-              className={`flex min-h-[52px] flex-col items-start justify-center gap-0.5 border-t border-hairline px-1 py-3 text-left ${lineIndex === board.lines.length - 1 ? 'border-b' : ''} ${index === held ? 'bg-bone' : ''}`}
+              className={`flex min-h-[52px] appearance-none flex-col items-start justify-center gap-0.5 rounded-none border-0 border-t border-solid border-hairline px-1 py-3 text-left shadow-none ${lineIndex === board.lines.length - 1 ? 'border-b' : ''} ${index === held ? 'bg-bone' : 'bg-transparent'}`}
             >
               <span className="font-mono text-[13px] tabular-nums leading-none text-primary">{demandText(point.demand)}</span>
               <span className="font-mono text-[12px] tabular-nums leading-none text-secondary">{point.capacityUnits === null ? 'No capacity entered' : `/ ${formatCapacity(point.capacityUnits)}`}</span>
@@ -532,39 +567,36 @@ function PeriodBreakdown({ board }: { board: ForecastBoard }) {
   if (!line) return null;
   return (
     <div className="min-w-0">
-      <h3 className="font-display text-heading-s text-primary">Period breakdown</h3>
-      <ul className="md:hidden">
-        {board.columns.map((column, index) => {
-          const point = line.points[index];
-          return (
-            <li key={column.id} className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-hairline py-2">
-              <span className="w-24 font-mono text-specimen uppercase text-tertiary">{column.label}</span>
-              <span className="font-mono text-data tabular-nums text-primary">{demandText(point?.demand ?? null)} / {point?.capacityUnits === null ? 'No capacity entered' : formatCapacity(point?.capacityUnits ?? null)}</span>
-              {point?.capacitySource === 'extended' ? <ExtMark from={point.carriedFrom} /> : null}
-              {point?.status ? <StatusChip status={point.status} /> : null}
-            </li>
-          );
-        })}
-      </ul>
-      <div className="hidden md:block">
-        <table className="w-full text-left">
+      <h3 className="mb-2 font-display text-heading-s text-primary">Period breakdown</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse bg-transparent text-left">
+          <colgroup>
+            <col />
+            <col style={{ width: '1%' }} />
+            <col style={{ width: '1%' }} />
+            <col style={{ width: '1%' }} />
+          </colgroup>
           <thead>
-            <tr className="font-mono text-specimen uppercase tracking-specimen text-tertiary">
-              <th className="px-4 py-2 font-normal">Period</th>
-              <th className="px-4 py-2 text-right font-normal">Demand</th>
-              <th className="px-4 py-2 text-right font-normal">Capacity</th>
-              <th className="px-4 py-2 font-normal">Status</th>
+            <tr className="border-b border-hairline font-mono text-specimen uppercase tracking-specimen text-tertiary">
+              <th className="py-2 pr-8 text-left font-normal">Period</th>
+              <th className="whitespace-nowrap py-2 pl-4 text-right font-normal">Demand</th>
+              <th className="whitespace-nowrap py-2 pl-6 text-right font-normal">Capacity</th>
+              <th className="whitespace-nowrap py-2 pl-6 text-right font-normal">Status</th>
             </tr>
           </thead>
           <tbody>
             {board.columns.map((column, index) => {
               const point = line.points[index];
+              const capacity = point?.capacityUnits === null || point?.capacityUnits === undefined ? 'No capacity entered' : formatCapacity(point.capacityUnits);
               return (
-                <tr key={column.id} className="border-t border-hairline">
-                  <th className="py-2 pr-4 text-left font-mono text-specimen font-normal uppercase text-tertiary">{column.label}</th>
-                  <td className="py-2 font-mono text-data tabular-nums text-primary">{demandText(point?.demand ?? null)} / {point?.capacityUnits === null ? 'No capacity entered' : formatCapacity(point?.capacityUnits ?? null)}{point?.capacitySource === 'extended' ? ' ' : ''}</td>
-                  <td className="py-2 pl-3">{point?.capacitySource === 'extended' ? <ExtMark from={point.carriedFrom} /> : null}</td>
-                  <td className="py-2 pl-3">{point?.status ? <StatusChip status={point.status} /> : null}</td>
+                <tr key={column.id} className="border-b border-hairline">
+                  <th className="whitespace-nowrap py-2 pr-8 text-left font-mono text-specimen font-normal uppercase text-tertiary">{column.label}</th>
+                  <td className="whitespace-nowrap py-2 pl-4 text-right font-mono text-data tabular-nums text-primary">{demandText(point?.demand ?? null)}</td>
+                  <td className="whitespace-nowrap py-2 pl-6 text-right font-mono text-data tabular-nums text-primary">
+                    {capacity}
+                    {point?.capacitySource === 'extended' ? <span className="ml-2"><ExtMark from={point.carriedFrom} /></span> : null}
+                  </td>
+                  <td className="whitespace-nowrap py-2 pl-6 text-right">{point?.status ? <StatusChip status={point.status} /> : null}</td>
                 </tr>
               );
             })}
@@ -654,7 +686,7 @@ export function WeeklyOverview({
           <h2 className="font-display text-[40px] leading-none text-primary md:text-[48px]">The next thirteen weeks</h2>
           <p className="mt-2 font-display text-body-m text-secondary">{asOfLine()}</p>
         </div>
-        <p className="max-w-sm text-caption text-tertiary md:text-right">Weighted demand uses the win rate for the current stage. Won deals count in full. A blank capacity is not zero.</p>
+        <p className="max-w-sm text-caption text-tertiary md:text-right">{OVERVIEW_NOTE}</p>
       </div>
       <MissedDeals count={view.state === 'ready' ? view.notForecastable : notForecastable} />
       {view.state === 'loading' ? <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Loading forecast</p> : null}
@@ -735,22 +767,23 @@ export function LineDashboard({
   onBackToToday?: () => void;
 }) {
   const kicker = span === 'week' ? 'Held week' : 'Held month';
-  const title = span === 'week' ? 'The next thirteen weeks' : span === 'year' ? 'The next twelve months' : 'The next six months';
   const windowFrom = yearFrom ?? (view.state === 'ready' ? view.board.columns[0]?.start : null) ?? currentMonthStart();
   const todayWindow = currentMonthStart();
+  const title = dashboardTitle(span, view, windowFrom);
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <div className="flex flex-col gap-4">
         <a href={productionHref({ brand })} onClick={onBack} className="w-fit font-mono text-specimen uppercase tracking-specimen text-primary cedar-underline">
           Production forecast
         </a>
-        <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="flex flex-col gap-3">
             <div>
               <p className="font-sans text-eyebrow uppercase text-cedar">{PRODUCT_LINE_LABELS[line]}</p>
               <h2 className="font-display text-[40px] leading-none text-primary md:text-[48px]">{title}</h2>
               <p className="mt-2 font-display text-body-m text-secondary">{asOfLine()}</p>
             </div>
+            <SpanControl span={span} onSpan={onSpan} />
             {span === 'year' ? (
               <div className="flex flex-wrap items-center gap-4">
                 <YearWindow from={windowFrom} canPrev={canPrev} canNext={canNext} onShift={onYearShift ?? (() => {})} />
@@ -760,7 +793,7 @@ export function LineDashboard({
               </div>
             ) : null}
           </div>
-          <SpanControl span={span} onSpan={onSpan} />
+          <p className="max-w-sm text-caption text-tertiary md:max-w-xs md:pt-8 md:text-right">{SPAN_NOTE[span]}</p>
         </div>
       </div>
       {view.state === 'loading' ? <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Loading forecast</p> : null}
