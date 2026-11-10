@@ -707,14 +707,17 @@ export function parseTaskWrite(
   return { ok: true, value };
 }
 
+const MISSING_SCHEMA_CODES = new Set(['42P01', '42703', 'PGRST205']);
+
+// Match the Postgres or PostgREST code only. Message text such as
+// "does not exist" also appears on operator errors (42883) and must stay a failed read.
 export function isMissingSchema(error: { code?: string; message?: string } | null | undefined): boolean {
-  if (!error) return false;
-  const code = error.code ?? '';
-  const msg = (error.message ?? '').toLowerCase();
-  return code === '42P01' || code === 'PGRST205' || code === 'PGRST204'
-    || msg.includes('could not find the table')
-    || msg.includes('schema cache')
-    || msg.includes('does not exist');
+  return !!error?.code && MISSING_SCHEMA_CODES.has(error.code);
+}
+
+export function crmStorageDetail(error: { code?: string; message?: string } | null | undefined): 'schema_absent' | 'read_failed' | null {
+  if (!error) return null;
+  return isMissingSchema(error) ? 'schema_absent' : 'read_failed';
 }
 
 export type DisabledRead = {
