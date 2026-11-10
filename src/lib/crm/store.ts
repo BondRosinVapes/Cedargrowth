@@ -1154,17 +1154,18 @@ class SupabaseCrmStore implements CrmStore {
     );
   }
 
-  // Capacity for one forecast window, plus the latest earlier row for each
-  // product line. crm_capacity is unique on (brand, month, product_line) and
-  // month is the first day, so the window itself is a few dozen rows. The
-  // prior lookup is one row per line, newest first, not a full-table read.
+  // Capacity for one forecast window, plus the latest earlier first-of-month
+  // row for each product line. month::text like '%-01' is applied before
+  // limit 1. A date column has no LIKE operator, so the cast is required.
+  // A mid-month value such as 2026-01-15 cannot be the row that limit returns.
   async listCapacity(brand: CrmBrand, window: { start: string; end: string }) {
     const cols = 'id,brand,month,product_line,capacity_units,notes';
+    const scoped = () => this.db.from('crm_capacity').select(cols).eq('brand', brand).like('month::text', '%-01');
     const [inWindow, ...priors] = await Promise.all([
-      this.rows(brand, this.db.from('crm_capacity').select(cols).eq('brand', brand).gte('month', window.start).lte('month', window.end), mapCapacity),
+      this.rows(brand, scoped().gte('month', window.start).lte('month', window.end), mapCapacity),
       ...PRODUCT_LINES.map((line) => this.rows(
         brand,
-        this.db.from('crm_capacity').select(cols).eq('brand', brand).eq('product_line', line).lt('month', window.start).order('month', { ascending: false }).limit(1),
+        scoped().eq('product_line', line).lt('month', window.start).order('month', { ascending: false }).limit(1),
         mapCapacity,
       )),
     ]);

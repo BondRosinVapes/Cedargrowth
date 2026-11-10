@@ -200,22 +200,40 @@ export function weekCapacityRange(weeks: readonly IsoWeek[]): { start: string; e
   return { start, end };
 }
 
-// Rows the forecast needs: every capacity row inside the window, plus the
-// latest first-of-month row before the window for each product line. Older
-// history is not required for an exact match or for carry-forward.
+// Rows the forecast needs: every first-of-month capacity row inside the
+// window, plus the latest first-of-month row before the window for each
+// product line. A mid-month date is not a capacity month.
 export function forecastCapacityRows<T extends CapacityRow>(rows: readonly T[], start: string, end: string): T[] {
   const inWindow: T[] = [];
   const prior = new Map<ProductLine, T>();
   for (const row of rows) {
+    if (!isFirstOfMonth(row.month)) continue;
     if (row.month >= start && row.month <= end) {
       inWindow.push(row);
       continue;
     }
-    if (row.month >= start || !isFirstOfMonth(row.month)) continue;
+    if (row.month >= start) continue;
     const current = prior.get(row.productLine);
     if (!current || row.month > current.month) prior.set(row.productLine, row);
   }
   return [...inWindow, ...prior.values()];
+}
+
+// Same selection as the database read. First-of-month rows are chosen before
+// the prior lookup takes its newest row, so a mid-month date cannot hide the
+// real earlier month. The database expresses that predicate as
+// month::text like '%-01'.
+export function readForecastCapacity<T extends CapacityRow>(rows: readonly T[], window: { start: string; end: string }): T[] {
+  const eligible = rows.filter((row) => isFirstOfMonth(row.month));
+  const inWindow = eligible.filter((row) => row.month >= window.start && row.month <= window.end);
+  const priors: T[] = [];
+  for (const line of new Set(eligible.map((row) => row.productLine))) {
+    const newest = eligible
+      .filter((row) => row.productLine === line && row.month < window.start)
+      .sort((left, right) => (left.month < right.month ? 1 : left.month > right.month ? -1 : 0))[0];
+    if (newest) priors.push(newest);
+  }
+  return forecastCapacityRows([...inWindow, ...priors], window.start, window.end);
 }
 
 export function monthStarts(today: string, count: number): string[] {
