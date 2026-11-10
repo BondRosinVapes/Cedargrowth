@@ -1,7 +1,6 @@
 // Client adapter for the production forecast screens.
-// Month and Year call the live monthly API:
-//   GET /api/admin/crm/forecast?brand=&months=
-// Week is a separate contract. The current API does not serve it.
+// Month and Year call GET /api/admin/crm/forecast?period=month.
+// Week calls GET /api/admin/crm/forecast?period=week.
 
 import { PRODUCT_LINES, PRODUCT_LINE_LABELS, type CrmBrand, type ProductLine } from './engine';
 
@@ -17,12 +16,10 @@ export type MonthlyForecastCell = {
   capacityUnits: number | null;
   gap: number | null;
   status: ForecastStatus;
-  // Optional until the forecast API carries the last entered capacity forward.
   capacitySource?: CapacitySource | null;
   capacityFrom?: string | null;
 };
 
-// Weekly contract a separate engineer is adding. Do not invent these rows.
 export type WeeklyForecastCell = {
   isoWeek: string;
   weekStart: string;
@@ -118,7 +115,7 @@ function monthKey(value: string): string | null {
 }
 
 function readCapacitySource(cell: Record<string, unknown>): CapacitySource | null {
-  // Optional until the carry-forward API lands. null means no earlier entry.
+  // null means no earlier entry.
   if (cell.capacitySource === null || cell.capacitySource === undefined) return null;
   return cell.capacitySource === 'entered' || cell.capacitySource === 'extended' ? cell.capacitySource : null;
 }
@@ -155,8 +152,7 @@ export function roundCapacityUnits(value: number | null): number | null {
 export function parseWeeklyForecast(body: unknown): ParsedWeeklyForecast | null {
   if (!body || typeof body !== 'object') return null;
   const record = body as Record<string, unknown>;
-  // On main, until the weekly API lands, period is absent and cells are monthly.
-  // That response is not this contract. An empty list has no isoWeek cells either.
+  // A body that is not period week, or has no isoWeek cells, is not this contract.
   if (record.period !== 'week' || !Array.isArray(record.cells)) return null;
   const hasIsoWeek = record.cells.some((item) => !!item && typeof item === 'object' && typeof (item as { isoWeek?: unknown }).isoWeek === 'string');
   if (!hasIsoWeek) return null;
@@ -519,19 +515,54 @@ export function buildMonthlyBoard(cells: readonly MonthlyForecastCell[], only?: 
   return { columns, lines: series };
 }
 
-// The chart follows real capacity. A blank product line does not erase the
-// others. The line breaks only when every line in that period is null.
-export function chartSeries(board: ForecastBoard): Array<{ demand: number; capacityUnits: number | null; extended: boolean }> {
+export type ChartPoint = {
+  demand: number;
+  capacityUnits: number | null;
+  extended: boolean;
+  partial: boolean;
+  partialUnits: number | null;
+  known: number;
+  expected: number;
+  missing: string[];
+  carried: boolean;
+};
+
+// A complete column sums every line. A partial column keeps the known sum
+// aside, so the chart does not draw it as a full capacity line.
+export function chartSeries(board: ForecastBoard): ChartPoint[] {
   return board.columns.map((_, index) => {
-    const points = board.lines.map((line) => line.points[index]);
-    const demand = points.reduce((sum, point) => sum + (typeof point.demand === 'number' ? point.demand : 0), 0);
-    const known = points.filter((point) => typeof point.capacityUnits === 'number');
+    const rows = board.lines.map((line) => ({ label: line.label, point: line.points[index] }));
+    const demand = rows.reduce((sum, row) => sum + (typeof row.point?.demand === 'number' ? row.point.demand : 0), 0);
+    const known = rows.filter((row) => typeof row.point?.capacityUnits === 'number');
+    const missing = rows.filter((row) => row.point?.capacityUnits == null).map((row) => row.label);
+    const expected = rows.length;
+    const sum = known.reduce((total, row) => total + (row.point.capacityUnits as number), 0);
+    const partial = known.length > 0 && known.length < expected;
+    const allExtended = known.length > 0 && known.every((row) => row.point.capacitySource === 'extended');
     return {
       demand,
-      capacityUnits: known.length ? known.reduce((sum, point) => sum + (point.capacityUnits as number), 0) : null,
-      extended: known.length > 0 && known.every((point) => point.capacitySource === 'extended'),
+      capacityUnits: !partial && known.length === expected && expected > 0 ? sum : null,
+      extended: !partial && allExtended,
+      partial,
+      partialUnits: partial ? sum : null,
+      known: known.length,
+      expected,
+      missing,
+      carried: known.some((row) => row.point.capacitySource === 'extended'),
     };
   });
+}
+
+export function partialCapacitySentence(point: Pick<ChartPoint, 'partialUnits' | 'known' | 'expected' | 'missing' | 'carried'>): string {
+  const amount = formatCapacity(point.partialUnits);
+  const verb = point.carried ? 'carried forward' : 'entered';
+  const names = point.missing.length <= 1
+    ? (point.missing[0] ?? '')
+    : point.missing.length === 2
+      ? `${point.missing[0]} and ${point.missing[1]}`
+      : `${point.missing.slice(0, -1).join(', ')} and ${point.missing[point.missing.length - 1]}`;
+  const has = point.missing.length === 1 ? 'has' : 'have';
+  return `Capacity ${amount} ${verb} for ${point.known} of ${point.expected} lines. ${names} ${has} no capacity entered.`;
 }
 
 export function heldIndex(columns: readonly ForecastColumn[], today = todayInNewYork()): number {
@@ -625,7 +656,7 @@ export async function loadMonthlyForecast(
   from?: string | null,
 ): Promise<{ state: 'ready'; cells: MonthlyForecastCell[]; notForecastable: number; honoredFrom: boolean | null } | { state: 'error'; reason: string }> {
   // Month is ?period=month&months=6&productLine=. Year is ?period=month&months=12&from=&productLine=.
-  // from is optional until the paging API lands. honoredFrom is true only when the response echoes it.
+  // honoredFrom is true only when the response echoes from.
   const span: ForecastSpan = months === 12 ? 'year' : 'month';
   try {
     const res = await fetchImpl(forecastPath(brand, span, productLine, from), {

@@ -21,12 +21,14 @@ import {
   monthFromSearch,
   moveHeld,
   niceMax,
+  partialCapacitySentence,
   productionHref,
   selectSpan,
   shiftMonth,
   yearWindowCaption,
   spanFromSearch,
   todayInNewYork,
+  type ChartPoint,
   type ForecastBoard,
   type ForecastColumn,
   type ForecastLine,
@@ -116,9 +118,21 @@ function plainClick(event: MouseEvent<HTMLAnchorElement>): boolean {
   return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
 }
 
+const SQUARE_NAME: Record<ForecastStatus, string> = {
+  ok: 'OK',
+  tight: 'Tight',
+  short: 'Short',
+  no_capacity: 'No capacity',
+};
+
 function StatusSquare({ status }: { status: ForecastStatus | null }) {
-  if (!status) return <span className="inline-block h-1.5 w-1.5 border border-hairline" aria-hidden="true" />;
-  return <span className={`inline-block h-1.5 w-1.5 ${SQUARE[status]}`} title={STATUS_LABEL[status]} aria-hidden="true" />;
+  const label = status ? SQUARE_NAME[status] : 'Not returned';
+  return (
+    <span role="img" aria-label={label} className="inline-flex">
+      <span className={`inline-block h-1.5 w-1.5 ${status ? SQUARE[status] : 'border border-hairline'}`} aria-hidden="true" />
+      <span className="sr-only">{label}</span>
+    </span>
+  );
 }
 
 function StatusChip({ status }: { status: ForecastStatus }) {
@@ -170,7 +184,11 @@ function monthLong(iso: string): string {
 function readoutColumn(board: ForecastBoard, index: number): ForecastColumn {
   const column = board.columns[index];
   const point = chartSeries(board)[index];
-  if (!column || !point || point.capacityUnits === null) return column;
+  if (!column || !point) return column;
+  if (point.partial) {
+    return { ...column, capacityUnits: point.partialUnits, gap: null, capacitySource: null, carriedFrom: null };
+  }
+  if (point.capacityUnits === null) return column;
   const froms = [...new Set(board.lines.flatMap((line) => {
     const cell = line.points[index];
     return cell?.capacitySource === 'extended' && cell.carriedFrom ? [cell.carriedFrom] : [];
@@ -189,7 +207,8 @@ function carriedClause(from: string | null): string {
   return from ? `Carried forward from ${monthLong(from)}.` : 'Carried forward from the last entered month.';
 }
 
-function capacitySentence(column: ForecastColumn, weekly: boolean): string {
+function capacitySentence(column: ForecastColumn, weekly: boolean, partial?: ChartPoint): string {
+  if (partial?.partial) return partialCapacitySentence(partial);
   if (column.capacityUnits === null) return 'No capacity entered.';
   const amount = formatCapacity(column.capacityUnits);
   const lead = weekly ? `Capacity ${amount}, pro-rated from ${monthLong(column.start)}.` : `Capacity ${amount}.`;
@@ -223,7 +242,7 @@ function dashboardTitle(span: ForecastSpan, view: ForecastView, yearFrom: string
   return range;
 }
 
-function Readout({ column, label, weekly }: { column: ForecastColumn; label: string; weekly: boolean }) {
+function Readout({ column, point, label, weekly }: { column: ForecastColumn; point?: ChartPoint; label: string; weekly: boolean }) {
   const { ref, revealed } = useReveal<HTMLDivElement>();
   return (
     <div ref={ref} className={`flex items-end gap-5 ${revealed ? 'prod-rise prod-in' : ''}`}>
@@ -233,7 +252,7 @@ function Readout({ column, label, weekly }: { column: ForecastColumn; label: str
       <div className="min-w-0 pb-2">
         <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{column.kicker}</p>
         <p className="font-display text-[22px] font-medium leading-none text-primary">{label}</p>
-        <p className="mt-1 max-w-md text-caption text-secondary">{capacitySentence(column, weekly)}</p>
+        <p className="mt-1 max-w-md text-caption text-secondary">{capacitySentence(column, weekly, point)}</p>
       </div>
     </div>
   );
@@ -244,7 +263,8 @@ function ForecastChart({ board, held, onHold, label, height }: { board: Forecast
   const columns = board.columns.map((column, index) => ({
     ...column,
     demand: series[index]?.demand ?? 0,
-    capacityUnits: series[index]?.capacityUnits ?? null,
+    capacityUnits: series[index]?.partial ? null : series[index]?.capacityUnits ?? null,
+    partialUnits: series[index]?.partial ? series[index]?.partialUnits ?? null : null,
     capacitySource: series[index]?.extended ? 'extended' as const : series[index]?.capacityUnits === null ? null : 'entered' as const,
   }));
   const { ref } = useReveal<HTMLDivElement>();
@@ -281,8 +301,23 @@ function ForecastChart({ board, held, onHold, label, height }: { board: Forecast
   }
   const demand = segments('demand');
   const capacity = segments('capacity');
+  const partialPieces: string[] = [];
+  {
+    let prev: { x: number; y: number } | null = null;
+    columns.forEach((column, index) => {
+      if (typeof column.partialUnits !== 'number') {
+        prev = null;
+        return;
+      }
+      const point = { x: xAt(index), y: yAt(column.partialUnits) };
+      if (prev) partialPieces.push(`M${prev.x.toFixed(1)},${prev.y.toFixed(1)}L${point.x.toFixed(1)},${point.y.toFixed(1)}`);
+      prev = point;
+    });
+  }
   const middle = Math.round((columns.length - 1) / 2);
-  const summary = columns.map((column) => {
+  const summary = columns.map((column, index) => {
+    const point = series[index];
+    if (point?.partial) return `${column.label}. ${partialCapacitySentence(point)}`;
     const carried = column.capacitySource === 'extended' ? ` ${carriedForwardLabel(column.carriedFrom)}` : '';
     return `${column.label} demand ${demandText(column.demand)}, capacity ${formatCapacity(column.capacityUnits)}${carried}`;
   }).join('. ');
@@ -301,6 +336,7 @@ function ForecastChart({ board, held, onHold, label, height }: { board: Forecast
         {demand.solid ? <path d={demand.solid} fill="none" stroke="rgb(var(--accent-verdant))" strokeWidth="1.5" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
         {capacity.solid ? <path d={capacity.solid} fill="none" stroke="rgb(var(--surface-ink))" strokeWidth="1" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
         {capacity.dotted ? <path d={capacity.dotted} fill="none" stroke="rgb(var(--surface-ink))" strokeWidth="1" strokeDasharray="2 7" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
+        {partialPieces.length ? <path data-capacity-partial="true" d={partialPieces.join('')} fill="none" stroke="rgb(var(--text-tertiary))" strokeWidth="1" strokeDasharray="3 4" vectorEffect="non-scaling-stroke" strokeLinejoin="miter" /> : null}
         {columns.map((column, index) => (
           <g key={column.id}>
             {index === held && typeof column.demand === 'number' ? <rect x={xAt(index) - 3} y={yAt(column.demand) - 3} width="6" height="6" fill="rgb(var(--accent-verdant))" /> : null}
@@ -462,7 +498,7 @@ function PhoneLines({
   const column = board.columns[held];
   if (!column) return null;
   return (
-    <div className="flex flex-col md:hidden">
+    <div className="flex flex-col md:hidden" data-layout="phone">
       <div className="mb-3 flex gap-2">
         <button type="button" disabled={held === 0} onClick={() => onHold(held - 1)} className="min-h-[44px] flex-1 border border-hairline bg-clinical font-mono text-specimen uppercase tracking-specimen text-primary disabled:opacity-40">Previous</button>
         <button type="button" disabled={held >= board.columns.length - 1} onClick={() => onHold(held + 1)} className="min-h-[44px] flex-1 border border-hairline bg-clinical font-mono text-specimen uppercase tracking-specimen text-primary disabled:opacity-40">Next</button>
@@ -533,7 +569,7 @@ function BoardView({
         return (
           <div className="flex min-w-0 flex-col gap-6">
             <div className="flex flex-col gap-6 md:grid md:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)] md:items-end">
-            <Readout column={readoutColumn(board, held)} label={demandLabel} weekly={weekly} />
+            <Readout column={readoutColumn(board, held)} point={chartSeries(board)[held]} label={demandLabel} weekly={weekly} />
             <div className="hidden min-w-0 md:block">
               <ForecastChart board={board} held={held} onHold={onHold} label={kicker} height={chartHeight} />
             </div>
