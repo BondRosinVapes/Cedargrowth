@@ -1,7 +1,8 @@
 // Synthetic forecast checks. These rows are not account findings.
 // Run through scripts/crm-selftest.ts.
 
-import { DEFAULT_WIN_RATES, forecastStatus, isoWeekOf, monthStarts, parseForecastQuery, productionForecast, stageWinRates, weekStarts, weeklyCapacityUnits, weeklyProductionForecast, type CapacityRow, type ForecastOpportunity } from '../src/lib/crm/forecast.ts';
+import { OPEN_STAGES, PRODUCT_LINES, type OpportunityStage } from '../src/lib/crm/engine.ts';
+import { CARRY_FORWARD_CAPACITY, DEFAULT_WIN_RATES, forecastStatus, isoWeekOf, monthCaption, monthStart, monthStarts, parseForecastQuery, productionForecast, stageWinRates, weekStarts, weeklyCapacityUnits, weeklyProductionForecast, type CapacityRow, type ForecastOpportunity, type StageRate } from '../src/lib/crm/forecast.ts';
 
 type Assert = (ok: boolean, message: string) => void;
 
@@ -48,24 +49,29 @@ export function assertForecastPeriods(assert: Assert) {
   const boundary = weekStarts('2026-12-31', 2);
   assert(boundary[0]?.isoWeek === '2026-W53' && boundary[0].weekStart === '2026-12-28' && boundary[1]?.isoWeek === '2027-W01' && boundary[1].weekStart === '2027-01-04', 'a year-end date starts on 2026-W53 and then 2027-W01');
 
+  const on = { carryForward: true as const };
   const november = [cap('2026-11-01', 'vape', 300)];
-  assert(weeklyCapacityUnits('2026-11-16', 'vape', november) === 70, 'a full November week takes 7/30 of the monthly capacity');
-  assert(weeklyCapacityUnits('2026-11-16', 'vape', november) !== 300, 'a week does not receive the whole month');
-  assert(weeklyCapacityUnits('2026-02-09', 'vape', [cap('2026-02-01', 'vape', 280)]) === 70, 'a February week uses 28 days');
-  assert(weeklyCapacityUnits('2026-02-23', 'vape', [cap('2026-02-01', 'vape', 280), cap('2026-03-01', 'vape', 310)]) === 70, 'a week crossing February and March sums both shares');
-  assert(weeklyCapacityUnits('2028-02-28', 'vape', [cap('2028-02-01', 'vape', 290), cap('2028-03-01', 'vape', 310)]) === 70, 'a leap-year week counts February 29');
+  assert(weeklyCapacityUnits('2026-11-16', 'vape', november, on)?.units === 70 && weeklyCapacityUnits('2026-11-16', 'vape', november, on)?.source === 'entered', 'a full November week takes 7/30 of the monthly capacity');
+  assert(weeklyCapacityUnits('2026-11-16', 'vape', november, on)?.units !== 300, 'a week does not receive the whole month');
+  assert(weeklyCapacityUnits('2026-02-09', 'vape', [cap('2026-02-01', 'vape', 280)], on)?.units === 70, 'a February week uses 28 days');
+  assert(weeklyCapacityUnits('2026-02-23', 'vape', [cap('2026-02-01', 'vape', 280), cap('2026-03-01', 'vape', 310)], on)?.units === 70, 'a week crossing February and March sums both shares');
+  assert(weeklyCapacityUnits('2028-02-28', 'vape', [cap('2028-02-01', 'vape', 290), cap('2028-03-01', 'vape', 310)], on)?.units === 70, 'a leap-year week counts February 29');
 
   const cross = [cap('2026-11-01', 'vape', 300), cap('2026-12-01', 'vape', 310)];
-  assert(weeklyCapacityUnits('2026-11-30', 'vape', cross) === 70, '2026-W49 takes one November day and six December days');
-  assert(weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-11-01', 'vape', 300)]) === null, 'a cross-month week with only November entered is null');
-  assert(weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-12-01', 'vape', 310)]) === null, 'a cross-month week with only December entered is null');
-  assert(weeklyCapacityUnits('2026-11-30', 'vape', []) === null, 'a week with no parent rows is null');
-  assert(weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-11-01', 'vape', 0), cap('2026-12-01', 'preroll', 310)]) === null, 'a zero in one month does not fill a missing month, and another product line does not count');
-  assert(weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-11-01', 'vape', 0), cap('2026-12-01', 'vape', 310)]) === 60, 'an entered zero is a real share and is summed with the other month');
-  assert(weeklyCapacityUnits('2026-11-16', 'gummy', [cap('2026-11-01', 'gummy', 0)]) === 0, 'an entered zero inside one month stays zero');
-  assert(weeklyCapacityUnits('2026-11-16', 'preroll', november) === null, 'capacity for another product line is not reused');
-  assert(weeklyCapacityUnits('2026-12-28', 'vape', [cap('2026-12-01', 'vape', 310), cap('2027-01-01', 'vape', 310)]) === 70, '2026-W53 splits four December days and three January days');
-  assert(weeklyCapacityUnits('2026-12-28', 'vape', [cap('2026-12-01', 'vape', 310)]) === null, '2026-W53 is null when January has no row');
+  assert(weeklyCapacityUnits('2026-11-30', 'vape', cross, on)?.units === 70 && weeklyCapacityUnits('2026-11-30', 'vape', cross, on)?.source === 'entered', '2026-W49 takes one November day and six December days');
+  const carriedWeek = weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-11-01', 'vape', 930)], on);
+  assert(carriedWeek?.units === 211 && carriedWeek.source === 'extended', 'a missing December carries November forward and marks the week extended');
+  assert(weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-11-01', 'vape', 300)], { carryForward: false }) === null, 'with carry-forward off, a missing month keeps the week null');
+  assert(weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-12-01', 'vape', 310)], on) === null, 'November stays null when nothing earlier exists, so the week is null');
+  assert(weeklyCapacityUnits('2026-11-30', 'vape', [], on) === null, 'a week with no parent rows is null');
+  assert(weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-11-01', 'vape', 0), cap('2026-12-01', 'preroll', 310)], on)?.units === 0 && weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-11-01', 'vape', 0), cap('2026-12-01', 'preroll', 310)], on)?.source === 'extended', 'an entered zero carries forward, and another product line does not count');
+  assert(weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-11-01', 'vape', 0), cap('2026-12-01', 'vape', 310)], on)?.units === 60 && weeklyCapacityUnits('2026-11-30', 'vape', [cap('2026-11-01', 'vape', 0), cap('2026-12-01', 'vape', 310)], on)?.source === 'entered', 'an entered zero is a real share and is summed with the other month');
+  assert(weeklyCapacityUnits('2026-11-16', 'gummy', [cap('2026-11-01', 'gummy', 0)], on)?.units === 0 && weeklyCapacityUnits('2026-11-16', 'gummy', [cap('2026-11-01', 'gummy', 0)], on)?.source === 'entered', 'an entered zero inside one month stays zero');
+  assert(weeklyCapacityUnits('2026-11-16', 'preroll', november, on) === null, 'capacity for another product line is not reused');
+  assert(weeklyCapacityUnits('2026-12-28', 'vape', [cap('2026-12-01', 'vape', 310), cap('2027-01-01', 'vape', 310)], on)?.units === 70 && weeklyCapacityUnits('2026-12-28', 'vape', [cap('2026-12-01', 'vape', 310), cap('2027-01-01', 'vape', 310)], on)?.source === 'entered', '2026-W53 splits four December days and three January days');
+  const yearEdge = weeklyCapacityUnits('2026-12-28', 'vape', [cap('2026-12-01', 'vape', 310)], on);
+  assert(yearEdge?.units === 70 && yearEdge.source === 'extended', '2026-W53 carries December into January');
+  assert(weeklyCapacityUnits('2026-02-09', 'vape', [cap('2026-01-15', 'vape', 280)], on) === null, 'a mid-month capacity row does not match and does not carry forward');
 
   const opportunities = [
     deal('won-nov', 'won', '2026-11-18', 'vape', 50),
@@ -173,29 +179,159 @@ export function assertForecastPeriods(assert: Assert) {
     months: ['2026-11-01', '2026-12-01'],
     productLine: 'vape',
   });
-  assert(vapeOnly.cells.length === 2 && vapeOnly.cells.every((cell) => cell.productLine === 'vape') && vapeOnly.cells[1].capacityUnits === null && vapeOnly.cells[1].gap === null, 'a monthly product line filter does not borrow another line or invent December capacity');
+  assert(vapeOnly.cells.length === 2 && vapeOnly.cells.every((cell) => cell.productLine === 'vape' && !('capacitySource' in cell)) && vapeOnly.cells[1].capacityUnits === null && vapeOnly.cells[1].gap === null, 'the default forecast does not carry November into December');
+
+  const history = [
+    { brand: 'bond', month: '2026-09-01', productLine: 'vape' as const, capacityUnits: 999 },
+    cap('2026-09-01', 'vape', 120),
+    cap('2026-10-01', 'vape', 50),
+    cap('2026-01-15', 'vape', 1),
+    cap('2026-12-01', 'gummy', 8),
+  ];
+  const extended = productionForecast({
+    opportunities: [],
+    capacity: history,
+    rates,
+    months: ['2026-11-01', '2026-12-01'],
+    productLine: 'vape',
+    brand: 'cedargrowth',
+    carryForward: true,
+    includeSource: true,
+  });
+  assert(extended.cells.length === 2 && extended.cells.every((cell) => cell.capacityUnits === 50 && cell.gap === 50 && cell.status === 'ok' && 'capacitySource' in cell && cell.capacitySource === 'extended'), 'capacity before the window carries forward, and a later month wins over an earlier one');
+  const noneEarlier = productionForecast({
+    opportunities: [],
+    capacity: [cap('2026-12-01', 'vape', 10), cap('2026-01-15', 'vape', 40)],
+    rates,
+    months: ['2026-11-01'],
+    productLine: 'vape',
+    brand: 'cedargrowth',
+    carryForward: true,
+    includeSource: true,
+  });
+  assert(noneEarlier.cells[0].capacityUnits === null && noneEarlier.cells[0].gap === null && noneEarlier.cells[0].status === 'no_capacity' && 'capacitySource' in noneEarlier.cells[0] && noneEarlier.cells[0].capacitySource === null, 'no earlier first-of-month row stays null, and a mid-month row is not a source');
+  const zeroCarry = productionForecast({
+    opportunities: [],
+    capacity: [cap('2026-09-01', 'vape', 0)],
+    rates,
+    months: ['2026-11-01'],
+    productLine: 'vape',
+    brand: 'cedargrowth',
+    carryForward: true,
+    includeSource: true,
+  });
+  assert(zeroCarry.cells[0].capacityUnits === 0 && zeroCarry.cells[0].capacitySource === 'extended' && zeroCarry.cells[0].status === 'tight' && zeroCarry.cells[0].gap === 0, 'an entered zero carries forward as zero');
+  const past = productionForecast({
+    opportunities: [
+      deal('past-won', 'won', '2026-08-15', 'vape', 10),
+      deal('past-lost', 'lost', '2026-08-20', 'vape', 99),
+      deal('past-open', 'proposal', '2026-08-10', 'vape', 10),
+    ],
+    capacity: [cap('2026-01-01', 'vape', 200)],
+    rates,
+    months: ['2026-08-01'],
+    productLine: 'vape',
+    brand: 'cedargrowth',
+    carryForward: true,
+    includeSource: true,
+  });
+  assert(past.cells[0].demand === 16 && past.cells[0].capacityUnits === 200 && past.cells[0].capacitySource === 'extended' && past.cells[0].gap === 184 && past.cells[0].status === 'ok', 'a past month counts a won deal in full, drops a lost deal, and still weights an open deal');
+
+  const legacyInput = {
+    opportunities: [
+      deal('o1', 'lead', '2026-11-15', 'vape', 100),
+      deal('o2', 'won', '2026-11-20', 'vape', 50),
+      deal('o3', 'proposal', '2026-11-01', null, null),
+      deal('past-lost', 'lost', '2026-11-02', 'vape', 500),
+    ],
+    capacity: [cap('2026-09-01', 'vape', 5), cap('2026-01-15', 'vape', 999), cap('2026-11-01', 'vape', 40), { brand: 'bond', month: '2026-11-01', productLine: 'gummy' as const, capacityUnits: 80 }],
+    rates,
+    months: ['2026-11-01', '2026-12-01'],
+  };
+  const legacyActual = productionForecast(legacyInput);
+  const legacyBase = baseMonthlyForecast(legacyInput);
+  assert(JSON.stringify(legacyActual) === JSON.stringify(legacyBase), 'the default monthly forecast matches the original cells, including a null December');
+  assert(legacyActual.cells.every((cell) => !('capacitySource' in cell)) && legacyActual.cells.find((cell) => cell.productLine === 'vape' && cell.month === '2026-12-01')?.capacityUnits === null, 'legacy output omits capacitySource and does not carry September forward');
 
   const learned = stageWinRates([], []);
   assert(learned.find((row) => row.stage === 'lead')?.rate === 0.1, 'default rates remain available to both periods');
+  assert(CARRY_FORWARD_CAPACITY === true, 'carry-forward is the confirmed default');
 
   const absent = parseForecastQuery(new URLSearchParams());
   const monthOnly = parseForecastQuery(new URLSearchParams('months=6'));
   const year = parseForecastQuery(new URLSearchParams('months=12&productLine=preroll'));
   const week = parseForecastQuery(new URLSearchParams('period=week&weeks=13&productLine=vape&months=2'));
   const weekDefault = parseForecastQuery(new URLSearchParams('period=week'));
-  const badWeeks = parseForecastQuery(new URLSearchParams('period=week&weeks=54'));
-  const badMonths = parseForecastQuery(new URLSearchParams('months=25'));
+  const explicitMonth = parseForecastQuery(new URLSearchParams('period=month&months=6'));
+  const fromOk = parseForecastQuery(new URLSearchParams('from=2026-08-01&months=12'));
+  const badSpan = ['months=0', 'months=25', 'months=1.5', 'months=abc', 'period=week&weeks=0', 'period=week&weeks=54', 'period=week&weeks=1.5', 'period=week&weeks=abc'].map((query) => parseForecastQuery(new URLSearchParams(query)));
   const badPeriod = parseForecastQuery(new URLSearchParams('period=year'));
   const badLine = parseForecastQuery(new URLSearchParams('productLine=flower'));
+  const badFrom = parseForecastQuery(new URLSearchParams('from=2026-11-15'));
+  const badFromDay = parseForecastQuery(new URLSearchParams('period=month&from=2026-02-31'));
+  const badFromOnWeek = parseForecastQuery(new URLSearchParams('period=week&from=2026-11-01'));
   const blankLine = parseForecastQuery(new URLSearchParams('productLine='));
-  assert(absent.ok && absent.period === 'month' && absent.months === 6 && absent.productLine === null, 'an empty query stays a six month forecast');
-  assert(monthOnly.ok && monthOnly.period === 'month' && monthOnly.months === 6 && monthOnly.productLine === null, 'months without period stays monthly');
-  assert(year.ok && year.period === 'month' && year.months === 12 && year.productLine === 'preroll', 'a year view reuses months=12 for one product line');
-  assert(week.ok && week.period === 'week' && week.weeks === 13 && week.productLine === 'vape', 'week view uses weeks and ignores months');
-  assert(weekDefault.ok && weekDefault.period === 'week' && weekDefault.weeks === 13, 'weeks defaults to 13');
-  assert(badWeeks.ok && badWeeks.period === 'week' && badWeeks.weeks === 13, 'an out-of-range weeks value falls back to 13');
-  assert(badMonths.ok && badMonths.period === 'month' && badMonths.months === 6, 'an out-of-range months value falls back to 6');
+  assert(absent.ok && absent.shape === 'legacy' && absent.months === 6, 'an empty query stays the legacy six month forecast');
+  assert(monthOnly.ok && monthOnly.shape === 'legacy' && monthOnly.months === 6, 'months without a new param stays legacy');
+  assert(year.ok && year.shape === 'month' && year.months === 12 && year.productLine === 'preroll' && year.from === null, 'a product line makes the new month shape, and a year reuses months=12');
+  assert(week.ok && week.shape === 'week' && week.weeks === 13 && week.productLine === 'vape', 'week view uses weeks and ignores months');
+  assert(weekDefault.ok && weekDefault.shape === 'week' && weekDefault.weeks === 13, 'omitted weeks defaults to 13');
+  assert(explicitMonth.ok && explicitMonth.shape === 'month' && explicitMonth.months === 6 && explicitMonth.productLine === null && explicitMonth.from === null, 'an explicit period=month is the new shape');
+  assert(fromOk.ok && fromOk.shape === 'month' && fromOk.from === '2026-08-01' && fromOk.months === 12, 'from sets the first month of a paged year');
+  assert(badSpan.every((parsed) => !parsed.ok), 'out-of-range or non-integer months and weeks are rejected');
   assert(!badPeriod.ok && badPeriod.reason === 'Period must be month or week.', 'year is not its own period');
   assert(!badLine.ok && badLine.reason === 'Product line is not recognized.', 'an unknown product line is rejected');
-  assert(blankLine.ok && blankLine.productLine === null, 'an empty product line means every line');
+  assert(!badFrom.ok && badFrom.reason === 'Month must be the first day of a month.', 'from must be the first day of a month');
+  assert(!badFromDay.ok && !badFromOnWeek.ok && badFromOnWeek.reason === 'from applies to a month forecast.', 'an impossible from date is rejected, and from does not apply to a week');
+  assert(blankLine.ok && blankLine.shape === 'legacy', 'an empty product line means every line and stays legacy');
+}
+
+function baseRate(stage: OpportunityStage, stageRates: readonly StageRate[]): number {
+  return stageRates.find((row) => row.stage === stage)?.rate ?? DEFAULT_WIN_RATES[stage];
+}
+
+// The monthly forecast as it behaved before weekly mode: exact month match,
+// no carry-forward, and no capacitySource key.
+function baseMonthlyForecast(input: {
+  opportunities: readonly ForecastOpportunity[];
+  capacity: readonly CapacityRow[];
+  rates: readonly StageRate[];
+  months: readonly string[];
+}) {
+  const cells = [];
+  for (const line of PRODUCT_LINES) {
+    for (const month of input.months) {
+      let demand = 0;
+      for (const deal of input.opportunities) {
+        if (deal.stage === 'lost') continue;
+        if (!deal.productLine || deal.quantityUnits === null || !deal.expectedCloseOn) continue;
+        if (deal.productLine !== line || monthStart(deal.expectedCloseOn) !== month) continue;
+        demand += deal.quantityUnits * (deal.stage === 'won' ? 1 : baseRate(deal.stage, input.rates));
+      }
+      const capRow = input.capacity.find((row) => row.productLine === line && row.month === month);
+      if (!capRow) {
+        cells.push({ month, productLine: line, demand, capacityUnits: null, gap: null, status: 'no_capacity' as const });
+        continue;
+      }
+      const gap = capRow.capacityUnits - demand;
+      const status = demand > capRow.capacityUnits ? 'short' as const : demand >= capRow.capacityUnits * 0.9 ? 'tight' as const : 'ok' as const;
+      cells.push({ month, productLine: line, demand, capacityUnits: capRow.capacityUnits, gap, status });
+    }
+  }
+  const seen = new Set<string>();
+  let notForecastable = 0;
+  for (const deal of input.opportunities) {
+    if (deal.stage === 'lost' || seen.has(deal.id)) continue;
+    if ((OPEN_STAGES as readonly string[]).indexOf(deal.stage) < 0 && deal.stage !== 'won') continue;
+    if (!deal.productLine || deal.quantityUnits === null) {
+      seen.add(deal.id);
+      notForecastable += 1;
+    }
+  }
+  const shorts = cells.filter((cell) => cell.status === 'short' && cell.capacityUnits !== null && cell.gap !== null).map((cell) => {
+    const label = { vape: 'Vape', preroll: 'Pre-roll', gummy: 'Gummy', other: 'Other' }[cell.productLine];
+    const shortBy = Math.round((cell.demand - (cell.capacityUnits as number)) * 10) / 10;
+    return `${label} is short by ${shortBy.toLocaleString('en-US')} units in ${monthCaption(cell.month)} (demand ${cell.demand.toLocaleString('en-US')}, capacity ${(cell.capacityUnits as number).toLocaleString('en-US')}).`;
+  });
+  return { cells, notForecastable, shorts };
 }

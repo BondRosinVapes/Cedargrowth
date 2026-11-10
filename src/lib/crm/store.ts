@@ -1152,10 +1152,12 @@ class SupabaseCrmStore implements CrmStore {
     );
   }
 
+  // Every capacity row for the brand, including months before a forecast window.
+  // Carry-forward reads this history. The query is not limited to the requested months.
   listCapacity(brand: CrmBrand) {
     return this.rows(
       brand,
-      this.db.from('crm_capacity').select('id,brand,month,product_line,capacity_units,notes').eq('brand', brand).order('month', { ascending: true }),
+      this.db.from('crm_capacity').select('id,brand,month,product_line,capacity_units,notes').eq('brand', brand).order('month', { ascending: true }).limit(5000),
       mapCapacity,
     );
   }

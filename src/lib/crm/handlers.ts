@@ -34,7 +34,7 @@ import {
 import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
-import { monthStarts, parseCapacityWrite, parseForecastQuery, productionForecast, stageWinRates, weekStarts, weeklyProductionForecast } from './forecast';
+import { monthStart, monthStarts, parseCapacityWrite, parseForecastQuery, productionForecast, stageWinRates, weekStarts, weeklyProductionForecast } from './forecast';
 import { buildDigest, digestConfigured, digestFromAddress, digestRecipients, digestSummary, nyWeek, renderDigestHtml, renderDigestText, secretMatches } from './digest';
 import { COVERAGE_UPLOAD, NEEDS_HOODIE, NY_REGIONS } from './nyRegions';
 import { coverageLabel, territoryTiles, TERRITORY_METRICS, type TerritoryMetric } from './territory';
@@ -757,24 +757,41 @@ export async function handleForecast(ctx: CrmContext): Promise<CrmResult> {
   if (opps.state !== 'ok' || events.state !== 'ok' || capacity.state !== 'ok') return storageBody(auth.brand, 'unavailable');
   const today = new Date().toISOString().slice(0, 10);
   const rates = stageWinRates(events.value, opps.value);
-  if (parsed.period === 'week') {
+  // listCapacity is the brand's full history, including months before this window.
+  if (parsed.shape === 'legacy') {
+    const forecast = productionForecast({
+      opportunities: opps.value,
+      capacity: capacity.value,
+      rates,
+      months: monthStarts(today, parsed.months),
+    });
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, months: parsed.months, rates, ...forecast } };
+  }
+  if (parsed.shape === 'week') {
     const forecast = weeklyProductionForecast({
       opportunities: opps.value,
       capacity: capacity.value,
       rates,
       weeks: weekStarts(today, parsed.weeks),
       productLine: parsed.productLine,
+      brand: auth.brand,
+      carryForward: true,
     });
     return { status: 200, body: { ok: true, configured: true, brand: auth.brand, period: 'week', weeks: parsed.weeks, productLine: parsed.productLine, rates, ...forecast } };
   }
+  const from = parsed.from ?? monthStart(today);
+  if (!from) return { status: 400, body: { ok: false, reason: 'Month must be the first day of a month.' } };
   const forecast = productionForecast({
     opportunities: opps.value,
     capacity: capacity.value,
     rates,
-    months: monthStarts(today, parsed.months),
+    months: monthStarts(from, parsed.months),
     productLine: parsed.productLine,
+    brand: auth.brand,
+    carryForward: true,
+    includeSource: true,
   });
-  return { status: 200, body: { ok: true, configured: true, brand: auth.brand, period: 'month', months: parsed.months, productLine: parsed.productLine, rates, ...forecast } };
+  return { status: 200, body: { ok: true, configured: true, brand: auth.brand, period: 'month', months: parsed.months, from, productLine: parsed.productLine, rates, ...forecast } };
 }
 
 export async function handleCapacity(ctx: CrmContext): Promise<CrmResult> {

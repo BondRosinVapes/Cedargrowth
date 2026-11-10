@@ -4,6 +4,12 @@
 // Weekly cells group the same weighted demand by ISO week. Capacity is the
 // only figure that is pro-rated from the monthly crm_capacity row.
 // This module does not write storage.
+//
+// Owner decision, 2026-11-10: a new forecast request carries the latest earlier
+// entered capacity forward. CARRY_FORWARD_CAPACITY is that switch and defaults
+// to on. Set it to false to make a month with no row null again. A legacy
+// request (brand and months only) never carries forward and keeps the original
+// response keys.
 
 import { OPEN_STAGES, PRODUCT_LINES, type OpportunityStage, type ProductLine } from './engine';
 
@@ -65,6 +71,16 @@ export type StageRate = {
 
 export type ForecastStatus = 'short' | 'tight' | 'ok' | 'no_capacity';
 
+// null when the cell has no capacity. 'extended' means the value was carried
+// forward from an earlier first-of-month row. A cross-month week is 'extended'
+// when any of its shares was carried forward.
+export type CapacitySource = 'entered' | 'extended' | null;
+
+// Confirmed on. Set to false to stop carry-forward on new forecast requests.
+// A month with no row then stays null, and a week that needs that month stays
+// null. Legacy brand+months requests never carry forward, either way.
+export const CARRY_FORWARD_CAPACITY = true;
+
 export type ForecastCell = {
   month: string;
   productLine: ProductLine;
@@ -72,6 +88,10 @@ export type ForecastCell = {
   capacityUnits: number | null;
   gap: number | null;
   status: ForecastStatus;
+};
+
+export type SourcedForecastCell = ForecastCell & {
+  capacitySource: CapacitySource;
 };
 
 // ISO week label, for example 2026-W46. weekStart is the Monday, YYYY-MM-DD.
@@ -88,6 +108,19 @@ export type WeeklyForecastCell = {
   capacityUnits: number | null;
   gap: number | null;
   status: ForecastStatus;
+  capacitySource: CapacitySource;
+};
+
+// The original GET shape. No period, productLine, from, or capacitySource.
+export type LegacyForecastResponse = {
+  ok: true;
+  configured: true;
+  brand: string;
+  months: number;
+  rates: StageRate[];
+  cells: ForecastCell[];
+  notForecastable: number;
+  shorts: string[];
 };
 
 export type MonthlyForecastResponse = {
@@ -96,9 +129,10 @@ export type MonthlyForecastResponse = {
   brand: string;
   period: 'month';
   months: number;
+  from: string;
   productLine: ProductLine | null;
   rates: StageRate[];
-  cells: ForecastCell[];
+  cells: SourcedForecastCell[];
   notForecastable: number;
   shorts: string[];
 };
@@ -116,7 +150,13 @@ export type WeeklyForecastResponse = {
   shorts: string[];
 };
 
-export type ForecastResponse = MonthlyForecastResponse | WeeklyForecastResponse;
+export type ForecastResponse = LegacyForecastResponse | MonthlyForecastResponse | WeeklyForecastResponse;
+
+export type ParsedForecastQuery =
+  | { ok: true; shape: 'legacy'; months: number }
+  | { ok: true; shape: 'month'; months: number; from: string | null; productLine: ProductLine | null }
+  | { ok: true; shape: 'week'; weeks: number; productLine: ProductLine | null }
+  | { ok: false; reason: string };
 
 const STAGE_LABEL: Record<OpportunityStage, string> = {
   lead: 'Lead',
@@ -253,23 +293,49 @@ function cellGap(demand: number, capacityUnits: number | null): number | null {
   return capacityUnits === null ? null : capacityUnits - demand;
 }
 
-// crm_capacity is keyed by month start (YYYY-MM-01) and product line.
-// The caller loads one brand. A missing row is null, never zero.
-function enteredCapacity(capacity: readonly CapacityRow[], productLine: ProductLine, month: string): number | null {
-  const row = capacity.find((item) => item.productLine === productLine && monthStart(item.month.slice(0, 10)) === month);
-  return row ? row.capacityUnits : null;
+// A capacity row counts only when month is exactly YYYY-MM-01. A value such as
+// 2026-01-15 does not match January and is not a carry-forward candidate.
+function isFirstOfMonth(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-01$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return false;
+  const date = new Date(Date.UTC(year, month - 1, 1));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1;
 }
 
-// Weekly capacity splits each month's crm_capacity across that month's days.
-// A week receives (days of that week that fall in the month / days in the month)
-// times the monthly capacity for the same product line. A week that crosses two
-// months sums the share from each month. The result is not rounded.
-// If any parent month the week touches has no capacity row for that product line,
-// the week capacity is null. Null means no capacity was entered. It is never
-// reported as 0. A cross-month week where only one month has a row is null for
-// the whole week. A partial share is not reported. An entered capacity of 0
-// stays 0, because that row exists.
-export function weeklyCapacityUnits(weekStart: string, productLine: ProductLine, capacity: readonly CapacityRow[]): number | null {
+function sameScope(row: CapacityRow, productLine: ProductLine, brand: string | undefined): boolean {
+  return row.productLine === productLine && (brand === undefined || row.brand === brand);
+}
+
+export type ResolvedCapacity = { units: number; source: 'entered' | 'extended' };
+
+// Exact row first. Otherwise, when carry-forward is on, the latest earlier
+// first-of-month row for the same brand and product line. An entered 0 is a
+// real value and carries forward as 0. Rows before the forecast window are
+// included; the caller passes the brand's full capacity history.
+export function resolveMonthCapacity(capacity: readonly CapacityRow[], productLine: ProductLine, month: string, options?: { brand?: string; carryForward?: boolean }): ResolvedCapacity | null {
+  const brand = options?.brand;
+  const exact = capacity.find((row) => sameScope(row, productLine, brand) && row.month === month);
+  if (exact) return { units: exact.capacityUnits, source: 'entered' };
+  if (!(options?.carryForward && CARRY_FORWARD_CAPACITY)) return null;
+  let best: CapacityRow | undefined;
+  for (const row of capacity) {
+    if (!sameScope(row, productLine, brand) || !isFirstOfMonth(row.month) || row.month >= month) continue;
+    if (!best || row.month > best.month) best = row;
+  }
+  return best ? { units: best.capacityUnits, source: 'extended' } : null;
+}
+
+// Weekly capacity splits each month's capacity across that month's days.
+// A week receives (days of that week in the month / days in the month) times
+// that month's capacity for the same product line, then sums the shares.
+// The result is not rounded. A month with no row uses the carried value, so a
+// cross-month week is not dropped just because one month is blank. The week
+// is null only when a month still has no entered or carried capacity. A
+// partial share is not reported.
+export function weeklyCapacityUnits(weekStart: string, productLine: ProductLine, capacity: readonly CapacityRow[], options?: { brand?: string; carryForward?: boolean }): { units: number; source: 'entered' | 'extended' } | null {
   const canonical = isoWeekOf(weekStart);
   const start = canonical ? utcDate(canonical.weekStart) : null;
   if (!start) return null;
@@ -285,18 +351,23 @@ export function weeklyCapacityUnits(weekStart: string, productLine: ProductLine,
     shares.set(month, current);
   }
   let total = 0;
+  let extended = false;
   for (const [month, share] of shares) {
-    const units = enteredCapacity(capacity, productLine, month);
-    if (units === null) return null;
-    total += (share.days * units) / share.length;
+    const resolved = resolveMonthCapacity(capacity, productLine, month, options);
+    if (!resolved) return null;
+    if (resolved.source === 'extended') extended = true;
+    total += (share.days * resolved.units) / share.length;
   }
-  return total;
+  return { units: total, source: extended ? 'extended' : 'entered' };
 }
 
 function linesFor(productLine: ProductLine | null | undefined): readonly ProductLine[] {
   return productLine ? [productLine] : PRODUCT_LINES;
 }
 
+// Demand follows expected_close_on, including dates before today. Won deals
+// count in full. Lost deals add nothing. An open deal with a past close date
+// still counts in that month or ISO week at its stage weight.
 function weightedDemand(deals: readonly ForecastOpportunity[], rates: readonly StageRate[], line: ProductLine, matches: (deal: ForecastOpportunity) => boolean): number {
   let demand = 0;
   for (const deal of deals) {
@@ -335,15 +406,21 @@ export function productionForecast(input: {
   rates: readonly StageRate[];
   months: readonly string[];
   productLine?: ProductLine | null;
-}): { cells: ForecastCell[]; notForecastable: number; shorts: string[] } {
-  const cells: ForecastCell[] = [];
+  brand?: string;
+  carryForward?: boolean;
+  includeSource?: boolean;
+}): { cells: Array<ForecastCell | SourcedForecastCell>; notForecastable: number; shorts: string[] } {
+  const carryForward = input.carryForward === true;
+  const cells: Array<ForecastCell | SourcedForecastCell> = [];
   for (const line of linesFor(input.productLine)) {
     for (const month of input.months) {
       const demand = weightedDemand(input.opportunities, input.rates, line, (deal) => monthStart(deal.expectedCloseOn || '') === month);
-      const capacityUnits = enteredCapacity(input.capacity, line, month);
+      const resolved = resolveMonthCapacity(input.capacity, line, month, { brand: input.brand, carryForward });
+      const capacityUnits = resolved ? resolved.units : null;
       const gap = cellGap(demand, capacityUnits);
       const status = forecastStatus(demand, capacityUnits);
-      cells.push({ month, productLine: line, demand, capacityUnits, gap, status });
+      const cell: ForecastCell = { month, productLine: line, demand, capacityUnits, gap, status };
+      cells.push(input.includeSource ? { ...cell, capacitySource: resolved ? resolved.source : null } : cell);
     }
   }
   const shorts = cells.map((cell) => shortLine(cell, monthCaption(cell.month))).filter((line): line is string => line !== null);
@@ -358,13 +435,17 @@ export function weeklyProductionForecast(input: {
   rates: readonly StageRate[];
   weeks: readonly IsoWeek[];
   productLine?: ProductLine | null;
+  brand?: string;
+  carryForward?: boolean;
 }): { cells: WeeklyForecastCell[]; notForecastable: number; shorts: string[] } {
+  const carryForward = input.carryForward !== false;
   const cells: WeeklyForecastCell[] = [];
   for (const line of linesFor(input.productLine)) {
     for (const week of input.weeks) {
       const canonical = isoWeekOf(week.weekStart) ?? week;
       const demand = weightedDemand(input.opportunities, input.rates, line, (deal) => isoWeekOf(deal.expectedCloseOn || '')?.isoWeek === canonical.isoWeek);
-      const capacityUnits = weeklyCapacityUnits(canonical.weekStart, line, input.capacity);
+      const resolved = weeklyCapacityUnits(canonical.weekStart, line, input.capacity, { brand: input.brand, carryForward });
+      const capacityUnits = resolved ? resolved.units : null;
       const gap = cellGap(demand, capacityUnits);
       const status = forecastStatus(demand, capacityUnits);
       cells.push({
@@ -375,6 +456,7 @@ export function weeklyProductionForecast(input: {
         capacityUnits,
         gap,
         status,
+        capacitySource: resolved ? resolved.source : null,
       });
     }
   }
@@ -382,28 +464,54 @@ export function weeklyProductionForecast(input: {
   return { cells, notForecastable: countNotForecastable(input.opportunities), shorts };
 }
 
-// Year view is not a fiscal year. Callers ask for period=month and months=12,
-// which starts at the current month. Week view uses weeks, default 13.
-// An out-of-range months or weeks value falls back to that default.
-// productLine limits the cells to one line. Omitted, it returns every line.
-export function parseForecastQuery(params: URLSearchParams): { ok: true; period: 'month'; months: number; productLine: ProductLine | null } | { ok: true; period: 'week'; weeks: number; productLine: ProductLine | null } | { ok: false; reason: string } {
+function parseSpan(raw: string | null, label: string, fallback: number, max: number): { ok: true; value: number } | { ok: false; reason: string } {
+  if (raw === null || raw === '') return { ok: true, value: fallback };
+  const reason = `${label} must be a whole number from 1 to ${max}.`;
+  if (!/^\d+$/.test(raw)) return { ok: false, reason };
+  const value = Number(raw);
+  if (value < 1 || value > max) return { ok: false, reason };
+  return { ok: true, value };
+}
+
+export function parseMonthParam(value: string): string | null {
+  if (!isFirstOfMonth(value)) return null;
+  return value;
+}
+
+// Year view is not a fiscal year. It is a month window of 12, starting at
+// `from` or the current month. `from` pages that window, including past months.
+// An omitted months or weeks value keeps its default. A present value that is
+// not a whole number in range is rejected. productLine, period, and from are
+// the new params: any one of them leaves the legacy response.
+export function parseForecastQuery(params: URLSearchParams): ParsedForecastQuery {
   const rawPeriod = params.get('period');
-  const period = rawPeriod === null || rawPeriod === '' || rawPeriod === 'month' ? 'month' : rawPeriod === 'week' ? 'week' : null;
-  if (!period) return { ok: false, reason: 'Period must be month or week.' };
   const rawLine = params.get('productLine');
+  const rawFrom = params.get('from');
+  const periodExplicit = rawPeriod !== null && rawPeriod !== '';
+  const lineExplicit = rawLine !== null && rawLine !== '';
+  const fromExplicit = rawFrom !== null && rawFrom !== '';
+  if (periodExplicit && rawPeriod !== 'month' && rawPeriod !== 'week') return { ok: false, reason: 'Period must be month or week.' };
   let productLine: ProductLine | null = null;
-  if (rawLine !== null && rawLine !== '') {
-    if (!(PRODUCT_LINES as readonly string[]).includes(rawLine)) return { ok: false, reason: 'Product line is not recognized.' };
+  if (lineExplicit) {
+    if (!(PRODUCT_LINES as readonly string[]).includes(rawLine as string)) return { ok: false, reason: 'Product line is not recognized.' };
     productLine = rawLine as ProductLine;
   }
-  if (period === 'week') {
-    const requested = Number(params.get('weeks') || '13');
-    const weeks = Number.isInteger(requested) && requested >= 1 && requested <= WEEK_LIMIT ? requested : 13;
-    return { ok: true, period: 'week', weeks, productLine };
+  let from: string | null = null;
+  if (fromExplicit) {
+    from = parseMonthParam(rawFrom as string);
+    if (!from) return { ok: false, reason: 'Month must be the first day of a month.' };
   }
-  const requested = Number(params.get('months') || '6');
-  const months = Number.isInteger(requested) && requested >= 1 && requested <= MONTH_LIMIT ? requested : 6;
-  return { ok: true, period: 'month', months, productLine };
+  const period = rawPeriod === 'week' ? 'week' : 'month';
+  if (period === 'week' && fromExplicit) return { ok: false, reason: 'from applies to a month forecast.' };
+  if (period === 'week') {
+    const weeks = parseSpan(params.get('weeks'), 'Weeks', 13, WEEK_LIMIT);
+    if (!weeks.ok) return weeks;
+    return { ok: true, shape: 'week', weeks: weeks.value, productLine };
+  }
+  const months = parseSpan(params.get('months'), 'Months', 6, MONTH_LIMIT);
+  if (!months.ok) return months;
+  if (!periodExplicit && !lineExplicit && !fromExplicit) return { ok: true, shape: 'legacy', months: months.value };
+  return { ok: true, shape: 'month', months: months.value, from, productLine };
 }
 
 export function rateCaption(rate: StageRate): string {
