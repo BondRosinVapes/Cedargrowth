@@ -184,6 +184,40 @@ export function monthStart(isoDate: string): string | null {
   return `${match[1]}-${match[2]}-01`;
 }
 
+export function monthCapacityRange(months: readonly string[]): { start: string; end: string } | null {
+  if (!months.length) return null;
+  return { start: months[0], end: months[months.length - 1] };
+}
+
+export function weekCapacityRange(weeks: readonly IsoWeek[]): { start: string; end: string } | null {
+  if (!weeks.length) return null;
+  const last = utcDate(weeks[weeks.length - 1].weekStart);
+  if (!last) return null;
+  last.setUTCDate(last.getUTCDate() + 6);
+  const start = monthStart(weeks[0].weekStart);
+  const end = monthStart(formatUtc(last));
+  if (!start || !end) return null;
+  return { start, end };
+}
+
+// Rows the forecast needs: every capacity row inside the window, plus the
+// latest first-of-month row before the window for each product line. Older
+// history is not required for an exact match or for carry-forward.
+export function forecastCapacityRows<T extends CapacityRow>(rows: readonly T[], start: string, end: string): T[] {
+  const inWindow: T[] = [];
+  const prior = new Map<ProductLine, T>();
+  for (const row of rows) {
+    if (row.month >= start && row.month <= end) {
+      inWindow.push(row);
+      continue;
+    }
+    if (row.month >= start || !isFirstOfMonth(row.month)) continue;
+    const current = prior.get(row.productLine);
+    if (!current || row.month > current.month) prior.set(row.productLine, row);
+  }
+  return [...inWindow, ...prior.values()];
+}
+
 export function monthStarts(today: string, count: number): string[] {
   const start = monthStart(today);
   if (!start) return [];
