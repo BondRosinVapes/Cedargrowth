@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ACCOUNT_TYPE_LABELS,
   ACCOUNT_TYPES,
@@ -13,7 +13,7 @@ import {
   type CrmBrand,
 } from '@/lib/crm/engine';
 import { STAGE_LABELS } from '@/lib/crm/dashboard';
-import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, TEMPLATES, type ImportKind, type ImportRow } from '@/lib/crm/importer';
+import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, skipRepeatedImportRows, TEMPLATES, type ImportKind, type ImportRow } from '@/lib/crm/importer';
 
 type Outcome = { line: number; status: 'ready' | 'created' | 'updated' | 'unmatched' | 'skipped' | 'error'; reason?: string; orderId?: string };
 
@@ -149,6 +149,7 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
   const [phase, setPhase] = useState<'idle' | 'checking' | 'checked' | 'importing' | 'done'>('idle');
   const [accounts, setAccounts] = useState<{ id: string; displayName: string }[]>([]);
   const [links, setLinks] = useState<Record<string, string>>({});
+  const runLock = useRef(false);
   useEffect(() => {
     if (kind !== 'orders') return;
     send(`/api/admin/crm/accounts?brand=${brand}`).then((res) => setAccounts((res.body.accounts as { id: string; displayName: string }[]) || []));
@@ -158,8 +159,10 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
 
   async function run(commit: boolean, list: ImportRow[]) {
     const ready = list.filter((row) => row.record);
+    const repeated = skipRepeatedImportRows(kind, ready);
     const results: Outcome[] = list.filter((row) => row.error).map((row) => ({ line: row.line, status: 'error', reason: row.error }));
-    for (const batch of chunkImportRows(ready, IMPORT_BATCH)) {
+    results.push(...repeated.skipped);
+    for (const batch of chunkImportRows(repeated.send, IMPORT_BATCH)) {
       const res = await send('/api/admin/crm/import', { method: 'POST', body: JSON.stringify({ brand, kind, commit, rows: batch }) });
       if (!res.body.ok) {
         results.push(...mergeBatchOutcomes(batch, null, String(res.body.reason || 'The CRM did not accept this batch.')));
@@ -171,30 +174,42 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
   }
 
   async function onFile(file: File | undefined) {
-    reset();
-    if (!file) return;
-    setFileName(file.name);
-    if (!/\.csv$/i.test(file.name)) { setProblems(['Save the sheet as CSV first. In Excel or Google Sheets: File, then Save as or Download, then CSV.']); return; }
-    const text = await file.text();
-    const mapped = mapRows(kind, parseCsv(text));
-    setUnmatched(mapped.unmatched);
-    const found: string[] = [];
-    if (mapped.truncated) found.push(`This file has ${mapped.rowCount} data rows. Import reads at most ${IMPORT_MAX_ROWS} rows. Split the file and upload the rest. Nothing was checked.`);
-    if (mapped.missing.length) found.push(`Missing column: ${mapped.missing.join(', ')}. Download the template to see the expected headers.`);
-    if (found.length) { setProblems(found); return; }
-    if (!mapped.rows.length) { setProblems(['The file has headers but no rows.']); return; }
-    setRows(mapped.rows);
-    setPhase('checking');
-    setOutcomes(await run(false, mapped.rows));
-    setPhase('checked');
+    if (runLock.current) return;
+    runLock.current = true;
+    try {
+      reset();
+      if (!file) return;
+      setFileName(file.name);
+      if (!/\.csv$/i.test(file.name)) { setProblems(['Save the sheet as CSV first. In Excel or Google Sheets: File, then Save as or Download, then CSV.']); return; }
+      const text = await file.text();
+      const mapped = mapRows(kind, parseCsv(text));
+      setUnmatched(mapped.unmatched);
+      const found: string[] = [];
+      if (mapped.truncated) found.push(`This file has ${mapped.rowCount} data rows. Import reads at most ${IMPORT_MAX_ROWS} rows. Split the file and upload the rest. Nothing was checked.`);
+      if (mapped.missing.length) found.push(`Missing column: ${mapped.missing.join(', ')}. Download the template to see the expected headers.`);
+      if (found.length) { setProblems(found); return; }
+      if (!mapped.rows.length) { setProblems(['The file has headers but no rows.']); return; }
+      setRows(mapped.rows);
+      setPhase('checking');
+      setOutcomes(await run(false, mapped.rows));
+      setPhase('checked');
+    } finally {
+      runLock.current = false;
+    }
   }
 
   async function commit() {
+    if (runLock.current) return;
+    runLock.current = true;
     setPhase('importing');
-    const results = await run(true, rows);
-    setOutcomes(results);
-    setPhase('done');
-    onSaved();
+    try {
+      const results = await run(true, rows);
+      setOutcomes(results);
+      setPhase('done');
+      onSaved();
+    } finally {
+      runLock.current = false;
+    }
   }
 
   const count = (status: Outcome['status']) => (outcomes || []).filter((row) => row.status === status).length;
@@ -214,15 +229,15 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
           </select>
         </label>
         <label className={label}>CSV file
-          <input key={`${kind}-${phase === 'idle' ? 'empty' : 'set'}`} type="file" accept=".csv,text/csv" onChange={(event) => onFile(event.target.files?.[0])} className="text-body-m text-primary" />
+          <input key={`${kind}-${phase === 'idle' ? 'empty' : 'set'}`} type="file" accept=".csv,text/csv" disabled={phase === 'checking' || phase === 'importing'} onChange={(event) => onFile(event.target.files?.[0])} className="text-body-m text-primary" />
         </label>
         <a href={template} download={`cedargrowth-${kind}-template.csv`} className="cedar-underline pb-2 font-mono text-specimen uppercase tracking-specimen">Download template</a>
       </div>
       <p className="text-caption text-tertiary">
         {kind === 'accounts'
-          ? 'Needs an Account name column. Optional: Status, Account type, Lead source, Sales rep, City, County, License number, License expiry, Notes, plus Address, ZIP, Region, Phone, Email, Website, License status, and Operating, which are kept in the account notes. County must be a New York county. An account whose license number is already in the CRM is skipped. Without a license number, an existing name is skipped.'
+          ? 'Needs an Account name column. Optional: Status, Account type, Lead source, Sales rep, City, County, License number, License expiry, Notes, plus Address, ZIP, Region, Phone, Email, Website, License status, and Operating, which are kept in the account notes. County must be a New York county. An account whose license number is already in the CRM, or repeated in this file, is skipped. Without a license number, an existing name is skipped.'
           : kind === 'contacts'
-            ? 'Needs Contact name plus Account license or Account name. Optional: Email, Phone, Title. Import accounts first. Each contact is matched by license number, then by a unique account name. More than one match is reported. Saving a contact is not consent to contact them.'
+            ? 'Needs Contact name plus Account license or Account name. Optional: Email, Phone, Title. Import accounts first. Each contact is matched by license number, then by a unique account name. A contact whose email is already on that account is skipped. More than one match is reported. Saving a contact is not consent to contact them.'
             : kind === 'orders'
             ? 'Needs Order ID and Retailer. Optional: License, Order Date, Delivery Date, Status, Invoice Total, Payment Status, Paid Date, Payout, Payout Date. A repeat Order ID updates that order. Unmatched retailers are not created.'
             : kind === 'retailers'
@@ -234,7 +249,7 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
       {unmatched.length ? <p className="text-caption text-tertiary">Columns not used: {unmatched.join(', ')}.</p> : null}
       {phase === 'checking' ? <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Checking {rows.length} rows</p> : null}
       {phase === 'importing' ? <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Importing</p> : null}
-      {outcomes && (phase === 'checked' || phase === 'done') ? (
+      {outcomes && (phase === 'checked' || phase === 'importing' || phase === 'done') ? (
         <div className="flex flex-col gap-3">
           <p className="text-body-m text-primary">
             {fileName}: {phase === 'done' ? `${count('created')} imported` : `${count('ready')} ready to import`}, {count('updated')} updated, {count('unmatched')} unmatched, {count('skipped')} skipped, {count('error')} with problems.
@@ -265,7 +280,7 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
             </div>
           )) : null}
           <div className="flex gap-3">
-            {phase === 'checked' ? <button type="button" disabled={!count('ready') && !count('unmatched')} onClick={commit} className={primaryButton}>Import {count('ready') + count('unmatched')} rows</button> : null}
+            {phase === 'checked' || phase === 'importing' ? <button type="button" disabled={phase !== 'checked' || (!count('ready') && !count('unmatched'))} onClick={commit} className={primaryButton}>Import {count('ready') + count('unmatched')} rows</button> : null}
             <button type="button" onClick={reset} className={secondaryButton}>{phase === 'done' ? 'Upload another file' : 'Cancel'}</button>
           </div>
         </div>

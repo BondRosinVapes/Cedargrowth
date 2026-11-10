@@ -605,6 +605,7 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
     licenseHits.set(key(row.licenseRef), licenses);
   }
   const contactKeys = new Set(existing.value.contacts.filter((row) => row.brand === auth.brand).map((row) => `${row.accountId}|${key(row.name)}|${key(row.email || '')}`));
+  const contactEmails = new Set(existing.value.contacts.filter((row) => row.brand === auth.brand && row.email).map((row) => `${row.accountId}|${key(row.email || '')}`));
   const dealKeys = new Set(existing.value.opportunities.filter((row) => row.brand === auth.brand).map((row) => `${row.accountId}|${key(row.name)}`));
   const rememberAccount = (id: string, name: string, license: string | null | undefined) => {
     const names = nameHits.get(key(name)) ?? [];
@@ -657,12 +658,9 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
       const license = parsed.value.licenseRef ? key(parsed.value.licenseRef) : '';
       if (license && accountsByLicense.has(license)) { outcomes.push({ line, status: 'skipped', reason: 'An account with this license number already exists.' }); continue; }
       if (!license && accountsByName.has(name)) { outcomes.push({ line, status: 'skipped', reason: 'An account with this name already exists.' }); continue; }
-      if (!commit) {
-        if (license) accountsByLicense.set(license, `pending-${line}`);
-        else accountsByName.set(name, `pending-${line}`);
-        outcomes.push({ line, status: 'ready' });
-        continue;
-      }
+      if (license) accountsByLicense.set(license, `pending-${line}`);
+      else accountsByName.set(name, `pending-${line}`);
+      if (!commit) { outcomes.push({ line, status: 'ready' }); continue; }
       const created = await ctx.store.createAccount(auth.brand, auth.actorId, {
         displayName: parsed.value.displayName,
         status: parsed.value.status ?? 'prospect',
@@ -675,7 +673,12 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
         accountType: parsed.value.accountType ?? null,
         leadSource: parsed.value.leadSource ?? null,
       });
-      if (created.state !== 'ok') { outcomes.push({ line, status: 'error', reason: 'Storage did not accept this row.' }); continue; }
+      if (created.state !== 'ok') {
+        if (license && accountsByLicense.get(license) === `pending-${line}`) accountsByLicense.delete(license);
+        if (!license && accountsByName.get(name) === `pending-${line}`) accountsByName.delete(name);
+        outcomes.push({ line, status: 'error', reason: 'Storage did not accept this row.' });
+        continue;
+      }
       accountsByName.set(name, created.value.id);
       rememberAccount(created.value.id, created.value.displayName, created.value.licenseRef);
       outcomes.push({ line, status: 'created' });
@@ -707,9 +710,11 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
       if ('error' in resolved) { outcomes.push({ line, status: 'error', reason: resolved.error }); continue; }
       const parsed = parseContactWrite({ ...fields, accountId: resolved.id, preference: 'unspecified' }, 'create');
       if (!parsed.ok || !parsed.value.name) { outcomes.push({ line, status: 'error', reason: parsed.ok ? 'Contact name is empty.' : parsed.reason }); continue; }
+      if (parsed.value.email && contactEmails.has(`${resolved.id}|${key(parsed.value.email)}`)) { outcomes.push({ line, status: 'skipped', reason: 'This account already has this email.' }); continue; }
       const contactKey = `${resolved.id}|${key(parsed.value.name)}|${key(parsed.value.email || '')}`;
       if (contactKeys.has(contactKey)) { outcomes.push({ line, status: 'skipped', reason: 'This account already has this contact.' }); continue; }
       contactKeys.add(contactKey);
+      if (parsed.value.email) contactEmails.add(`${resolved.id}|${key(parsed.value.email)}`);
       if (!commit) { outcomes.push({ line, status: 'ready' }); continue; }
       const created = await ctx.store.createContact(auth.brand, auth.actorId, { ...parsed.value, accountId: resolved.id, name: parsed.value.name });
       outcomes.push(created.state === 'ok' ? { line, status: 'created' } : { line, status: 'error', reason: 'Storage did not accept this row.' });
