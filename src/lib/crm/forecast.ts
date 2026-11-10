@@ -219,10 +219,9 @@ export function forecastCapacityRows<T extends CapacityRow>(rows: readonly T[], 
   return [...inWindow, ...prior.values()];
 }
 
-// Same selection as the database read. First-of-month rows are chosen before
-// the prior lookup takes its newest row, so a mid-month date cannot hide the
-// real earlier month. The database expresses that predicate as
-// month::text like '%-01'.
+// Same selection as the database read. Migration 0126 rejects a month whose
+// day is not 1, and this guard drops a mid-month value if one is still passed
+// in. The prior row is chosen only from first-of-month dates.
 export function readForecastCapacity<T extends CapacityRow>(rows: readonly T[], window: { start: string; end: string }): T[] {
   const eligible = rows.filter((row) => isFirstOfMonth(row.month));
   const inWindow = eligible.filter((row) => row.month >= window.start && row.month <= window.end);
@@ -347,6 +346,10 @@ function cellGap(demand: number, capacityUnits: number | null): number | null {
 
 // A capacity row counts only when month is exactly YYYY-MM-01. A value such as
 // 2026-01-15 does not match January and is not a carry-forward candidate.
+export function isCapacityMonth(value: string): boolean {
+  return isFirstOfMonth(value);
+}
+
 function isFirstOfMonth(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-01$/.exec(value);
   if (!match) return false;

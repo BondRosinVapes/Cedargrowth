@@ -16,10 +16,10 @@ import {
   ACCOUNT_TYPES,
   LEAD_SOURCES,
   OPEN_STAGES,
-  PRODUCT_LINES,
   type AccountType,
   type LeadSource,
 } from './engine';
+import { forecastCapacityRequests } from './capacityQuery';
 import { forecastCapacityRows } from './forecast';
 import { DISTRIBUTORS, ORDER_SOURCES, ORDER_STATUSES, PAYOUT_STATUSES, RETAILER_PAYMENT_STATUSES, type Distributor, type DistributorOrderDraft, type OrderSource, type OrderStatus, type PayoutStatus, type RetailerPaymentStatus } from './distributor';
 import { sampleTaskTitle, type MediaKind, type VisitOutcome } from './field';
@@ -1154,21 +1154,14 @@ class SupabaseCrmStore implements CrmStore {
     );
   }
 
-  // Capacity for one forecast window, plus the latest earlier first-of-month
-  // row for each product line. month::text like '%-01' is applied before
-  // limit 1. A date column has no LIKE operator, so the cast is required.
-  // A mid-month value such as 2026-01-15 cannot be the row that limit returns.
+  // Capacity for one forecast window, plus the latest earlier row for each
+  // product line. Migration 0126 checks extract(day from month) = 1, so the
+  // table cannot store a mid-month date. No cast and no LIKE filter: PostgREST
+  // drops a column cast and then rejects LIKE on the date column.
   async listCapacity(brand: CrmBrand, window: { start: string; end: string }) {
-    const cols = 'id,brand,month,product_line,capacity_units,notes';
-    const scoped = () => this.db.from('crm_capacity').select(cols).eq('brand', brand).like('month::text', '%-01');
-    const [inWindow, ...priors] = await Promise.all([
-      this.rows(brand, scoped().gte('month', window.start).lte('month', window.end), mapCapacity),
-      ...PRODUCT_LINES.map((line) => this.rows(
-        brand,
-        scoped().eq('product_line', line).lt('month', window.start).order('month', { ascending: false }).limit(1),
-        mapCapacity,
-      )),
-    ]);
+    const from = (table: string) => (this.db as unknown as { from: (name: string) => { select: (columns: string) => any } }).from(table);
+    const queries = forecastCapacityRequests(from, brand, window) as PromiseLike<{ data: Record<string, unknown>[] | null; error: DbError }>[];
+    const [inWindow, ...priors] = await Promise.all(queries.map((query) => this.rows(brand, query, mapCapacity)));
     if (inWindow.state !== 'ok') return inWindow;
     const loaded = [...inWindow.value];
     for (const prior of priors) {

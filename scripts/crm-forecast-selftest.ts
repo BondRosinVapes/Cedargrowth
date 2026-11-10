@@ -1,6 +1,8 @@
 // Synthetic forecast checks. These rows are not account findings.
 // Run through scripts/crm-selftest.ts.
 
+import { createClient } from '@supabase/supabase-js';
+import { forecastCapacityRequests } from '../src/lib/crm/capacityQuery.ts';
 import { OPEN_STAGES, PRODUCT_LINES, type OpportunityStage } from '../src/lib/crm/engine.ts';
 import { CARRY_FORWARD_CAPACITY, DEFAULT_WIN_RATES, forecastCapacityRows, forecastStatus, isoWeekOf, monthCaption, monthStart, monthStarts, parseForecastQuery, productionForecast, readForecastCapacity, stageWinRates, weekStarts, weeklyCapacityUnits, weeklyProductionForecast, type CapacityRow, type ForecastOpportunity, type StageRate } from '../src/lib/crm/forecast.ts';
 
@@ -21,7 +23,7 @@ function cap(month: string, productLine: CapacityRow['productLine'], capacityUni
   return { brand: 'cedargrowth', month, productLine, capacityUnits };
 }
 
-export function assertForecastPeriods(assert: Assert) {
+export async function assertForecastPeriods(assert: Assert) {
   const week46 = isoWeekOf('2026-11-09');
   const week46Sunday = isoWeekOf('2026-11-15');
   const week47 = isoWeekOf('2026-11-16');
@@ -292,6 +294,8 @@ export function assertForecastPeriods(assert: Assert) {
   });
   assert(read.length === 1 && read[0].month === '2025-12-01' && read[0].capacityUnits === 10 && carried.cells.length === 3 && carried.cells.every((cell) => cell.capacityUnits === 10 && cell.capacitySource === 'extended' && cell.gap === 10), 'a mid-month row does not hide the earlier first-of-month capacity');
   assert(legacyHidden.cells.every((cell) => cell.capacityUnits === null && cell.gap === null && !('capacitySource' in cell)), 'the legacy month response stays null when only an earlier row exists');
+  const capacityUrls = await captureCapacityQueries('cedargrowth', { start: '2026-02-01', end: '2026-04-01' });
+  assert(capacityUrls.length === 5 && capacityUrls.every((url) => !url.includes('::') && !url.toLowerCase().includes('like')) && capacityUrls.some((url) => url.includes('month=gte.2026-02-01') && url.includes('month=lte.2026-04-01')) && capacityUrls.filter((url) => url.includes('month=lt.2026-02-01') && url.includes('order=month.desc') && url.includes('limit=1')).length === 4, 'capacity queries do not cast the month or use a LIKE filter');
 
   const learned = stageWinRates([], []);
   assert(learned.find((row) => row.stage === 'lead')?.rate === 0.1, 'default rates remain available to both periods');
@@ -324,6 +328,22 @@ export function assertForecastPeriods(assert: Assert) {
   assert(!badFrom.ok && badFrom.reason === 'Month must be the first day of a month.', 'from must be the first day of a month');
   assert(!badFromDay.ok && !badFromOnWeek.ok && badFromOnWeek.reason === 'from applies to a month forecast.', 'an impossible from date is rejected, and from does not apply to a week');
   assert(blankLine.ok && blankLine.shape === 'legacy', 'an empty product line means every line and stays legacy');
+}
+
+async function captureCapacityQueries(brand: string, window: { start: string; end: string }): Promise<string[]> {
+  const urls: string[] = [];
+  const db = createClient('https://example.supabase.co', 'test-anon-key', {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: {
+      fetch: async (input) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        urls.push(url);
+        return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    },
+  });
+  await Promise.all(forecastCapacityRequests((table) => db.from(table), brand, window));
+  return urls;
 }
 
 function baseRate(stage: OpportunityStage, stageRates: readonly StageRate[]): number {
