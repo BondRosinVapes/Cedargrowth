@@ -34,7 +34,7 @@ import {
 import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
-import { monthStart, monthStarts, parseCapacityWrite, parseForecastQuery, productionForecast, stageWinRates, weekStarts, weeklyProductionForecast } from './forecast';
+import { monthCapacityRange, monthStart, monthStarts, parseCapacityWrite, parseForecastQuery, productionForecast, stageWinRates, weekCapacityRange, weekStarts, weeklyProductionForecast } from './forecast';
 import { monthCloseWindow, weekCloseWindow } from './forecastRead';
 import { buildDigest, digestConfigured, digestFromAddress, digestRecipients, digestSummary, nyWeek, renderDigestHtml, renderDigestText, secretMatches } from './digest';
 import { COVERAGE_UPLOAD, NEEDS_HOODIE, NY_REGIONS } from './nyRegions';
@@ -751,20 +751,20 @@ export async function handleForecast(ctx: CrmContext): Promise<CrmResult> {
   const weeks = parsed.shape === 'week' ? weekStarts(today, parsed.weeks) : null;
   const from = parsed.shape === 'week' ? null : parsed.shape === 'legacy' ? monthStart(today) : (parsed.from ?? monthStart(today));
   const months = parsed.shape === 'week' || !from ? null : monthStarts(from, parsed.months);
-  const window = weeks ? weekCloseWindow(weeks) : months ? monthCloseWindow(months) : null;
-  if (!window || (parsed.shape !== 'week' && !from) || (parsed.shape !== 'week' && !months)) {
+  const closeWindow = weeks ? weekCloseWindow(weeks) : months ? monthCloseWindow(months) : null;
+  const bounds = weeks ? weekCapacityRange(weeks) : months ? monthCapacityRange(months) : null;
+  if (!closeWindow || !bounds || (parsed.shape !== 'week' && !from) || (parsed.shape !== 'week' && !months)) {
     return { status: 400, body: { ok: false, reason: 'Month must be the first day of a month.' } };
   }
   const [inputs, capacity] = await Promise.all([
-    ctx.store.listForecastInputs(auth.brand, window),
-    ctx.store.listCapacity(auth.brand),
+    ctx.store.listForecastInputs(auth.brand, closeWindow),
+    ctx.store.listCapacity(auth.brand, bounds),
   ]);
   for (const result of [inputs, capacity]) {
     if (result.state !== 'ok') return storageBody(auth.brand, result.state === 'rejected' || result.state === 'missing' ? 'unavailable' : result.state);
   }
   if (inputs.state !== 'ok' || capacity.state !== 'ok') return storageBody(auth.brand, 'unavailable');
   const rates = stageWinRates(inputs.value.events, inputs.value.opportunities);
-  // listCapacity is the brand's full history, including months before this window.
   // Legacy keeps the original keys: months, rates, cells, notForecastable, shorts.
   if (parsed.shape === 'legacy') {
     const forecast = productionForecast({
@@ -1317,13 +1317,14 @@ async function loadDigest(store: CrmStore, brand: CrmBrand, nowMs: number): Prom
   const today = nyWeek(nowMs).today;
   const digestMonths = monthStarts(today, 6);
   const digestWindow = monthCloseWindow(digestMonths);
+  const digestBounds = monthCapacityRange(digestMonths) ?? { start: today, end: today };
   const [all, notes, orders, visits, events, capacity, forecastInputs] = await Promise.all([
     store.exportBrand(brand),
     store.listNotes(brand, null),
     store.listDistributorOrders(brand),
     store.listVisits(brand),
     store.listStageEvents(brand),
-    store.listCapacity(brand),
+    store.listCapacity(brand, digestBounds),
     digestWindow ? store.listForecastInputs(brand, digestWindow) : Promise.resolve({ state: 'unavailable' as const }),
   ]);
   if (all.state !== 'ok') return storageBody(brand, all.state === 'rejected' || all.state === 'missing' ? 'unavailable' : all.state);

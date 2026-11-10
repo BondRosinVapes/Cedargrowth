@@ -2,7 +2,7 @@
 // Run through scripts/crm-selftest.ts.
 
 import { OPEN_STAGES, PRODUCT_LINES, type OpportunityStage } from '../src/lib/crm/engine.ts';
-import { CARRY_FORWARD_CAPACITY, DEFAULT_WIN_RATES, forecastStatus, isoWeekOf, monthCaption, monthStart, monthStarts, parseForecastQuery, productionForecast, stageWinRates, weekStarts, weeklyCapacityUnits, weeklyProductionForecast, type CapacityRow, type ForecastOpportunity, type StageRate } from '../src/lib/crm/forecast.ts';
+import { CARRY_FORWARD_CAPACITY, DEFAULT_WIN_RATES, forecastCapacityRows, forecastStatus, isoWeekOf, monthCaption, monthStart, monthStarts, parseForecastQuery, productionForecast, readForecastCapacity, stageWinRates, weekStarts, weeklyCapacityUnits, weeklyProductionForecast, type CapacityRow, type ForecastOpportunity, type StageRate } from '../src/lib/crm/forecast.ts';
 
 type Assert = (ok: boolean, message: string) => void;
 
@@ -252,6 +252,46 @@ export function assertForecastPeriods(assert: Assert) {
   const legacyBase = baseMonthlyForecast(legacyInput);
   assert(JSON.stringify(legacyActual) === JSON.stringify(legacyBase), 'the default monthly forecast matches the original cells, including a null December');
   assert(legacyActual.cells.every((cell) => !('capacitySource' in cell)) && legacyActual.cells.find((cell) => cell.productLine === 'vape' && cell.month === '2026-12-01')?.capacityUnits === null, 'legacy output omits capacitySource and does not carry September forward');
+
+  const ancient = monthStarts('1000-01-01', 5001).map((month) => cap(month, 'vape', 1));
+  const historyPastLimit = [...ancient, cap('2026-10-01', 'vape', 50), cap('2026-11-01', 'vape', 80), cap('2026-01-15', 'vape', 7)];
+  const droppedByAscendingLimit = [...historyPastLimit].sort((left, right) => left.month < right.month ? -1 : left.month > right.month ? 1 : 0).slice(0, 5000);
+  const kept = forecastCapacityRows(historyPastLimit, '2026-11-01', '2026-12-01');
+  const keptForecast = productionForecast({
+    opportunities: [deal('kept-won', 'won', '2026-11-15', 'vape', 10)],
+    capacity: kept,
+    rates,
+    months: ['2026-11-01', '2026-12-01'],
+    productLine: 'vape',
+    brand: 'cedargrowth',
+    carryForward: true,
+    includeSource: true,
+  });
+  assert(droppedByAscendingLimit.every((row) => row.month < '2026-10-01') && kept.some((row) => row.month === '2026-11-01' && row.capacityUnits === 80) && kept.some((row) => row.month === '2026-10-01' && row.capacityUnits === 50) && kept.every((row) => row.capacityUnits !== 1), 'a windowed read keeps the newest capacity after more than 5000 older rows');
+  assert(keptForecast.cells[0].capacityUnits === 80 && keptForecast.cells[0].capacitySource === 'entered' && keptForecast.cells[0].demand === 10 && keptForecast.cells[1].capacityUnits === 80 && keptForecast.cells[1].capacitySource === 'extended', 'the in-window row and the carried latest prior are the numbers that are used');
+  const keptLegacy = productionForecast({ opportunities: [], capacity: kept, rates, months: ['2026-12-01'], productLine: 'vape' });
+  assert(keptLegacy.cells[0].capacityUnits === null && !('capacitySource' in keptLegacy.cells[0]), 'the scoped prior row does not change a legacy month that has no exact entry');
+  const hiddenPrior = [cap('2025-12-01', 'vape', 10), cap('2026-01-15', 'vape', 999)];
+  const read = readForecastCapacity(hiddenPrior, { start: '2026-02-01', end: '2026-04-01' });
+  const carried = productionForecast({
+    opportunities: [],
+    capacity: read,
+    rates,
+    months: ['2026-02-01', '2026-03-01', '2026-04-01'],
+    productLine: 'vape',
+    brand: 'cedargrowth',
+    carryForward: true,
+    includeSource: true,
+  });
+  const legacyHidden = productionForecast({
+    opportunities: [],
+    capacity: read,
+    rates,
+    months: ['2026-02-01', '2026-03-01', '2026-04-01'],
+    productLine: 'vape',
+  });
+  assert(read.length === 1 && read[0].month === '2025-12-01' && read[0].capacityUnits === 10 && carried.cells.length === 3 && carried.cells.every((cell) => cell.capacityUnits === 10 && cell.capacitySource === 'extended' && cell.gap === 10), 'a mid-month row does not hide the earlier first-of-month capacity');
+  assert(legacyHidden.cells.every((cell) => cell.capacityUnits === null && cell.gap === null && !('capacitySource' in cell)), 'the legacy month response stays null when only an earlier row exists');
 
   const learned = stageWinRates([], []);
   assert(learned.find((row) => row.stage === 'lead')?.rate === 0.1, 'default rates remain available to both periods');

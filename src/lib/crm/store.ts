@@ -16,16 +16,17 @@ import {
   ACCOUNT_TYPES,
   LEAD_SOURCES,
   OPEN_STAGES,
+  PRODUCT_LINES,
   type AccountType,
   type LeadSource,
 } from './engine';
+import { forecastCapacityRows, type ForecastOpportunity } from './forecast';
 import { DISTRIBUTORS, ORDER_SOURCES, ORDER_STATUSES, PAYOUT_STATUSES, RETAILER_PAYMENT_STATUSES, type Distributor, type DistributorOrderDraft, type OrderSource, type OrderStatus, type PayoutStatus, type RetailerPaymentStatus } from './distributor';
 import { sampleTaskTitle, type MediaKind, type VisitOutcome } from './field';
 import { confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, reorderDeal, type ReleasedBatch, type ReorderLine } from './reorder';
 import { knownEmailEvent, type EmailEvent } from './emailStatus';
 import { intakeTestMarker, type IntakeLead } from './intake';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
-import type { ForecastOpportunity } from './forecast';
 import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
 
 export type StoreResult<T> =
@@ -339,7 +340,7 @@ export interface CrmStore {
   markDealWonFromOrder(brand: CrmBrand, actor: string, orderId: string, opportunityId: string): Promise<StoreResult<{ order: DistributorOrder; stage: OpportunityStage }>>;
   listStageEvents(brand: CrmBrand): Promise<StoreResult<StageEvent[]>>;
   listForecastInputs(brand: CrmBrand, window: ForecastWindow): Promise<StoreResult<{ opportunities: ForecastOpportunity[]; events: StageEvent[] }>>;
-  listCapacity(brand: CrmBrand): Promise<StoreResult<Capacity[]>>;
+  listCapacity(brand: CrmBrand, window: { start: string; end: string }): Promise<StoreResult<Capacity[]>>;
   upsertCapacity(brand: CrmBrand, actor: string, input: { month: string; productLine: ProductLine; capacityUnits: number; notes: string }): Promise<StoreResult<Capacity>>;
   listVisits(brand: CrmBrand): Promise<StoreResult<Visit[]>>;
   checkIn(brand: CrmBrand, actor: string, input: { accountId: string; outcome: VisitOutcome; notes: string; latitude: number | null; longitude: number | null }): Promise<StoreResult<Visit>>;
@@ -1185,14 +1186,28 @@ class SupabaseCrmStore implements CrmStore {
     });
   }
 
-  // Every capacity row for the brand, including months before a forecast window.
-  // Carry-forward reads this history. The query is not limited to the requested months.
-  listCapacity(brand: CrmBrand) {
-    return this.rows(
-      brand,
-      this.db.from('crm_capacity').select('id,brand,month,product_line,capacity_units,notes').eq('brand', brand).order('month', { ascending: true }).limit(5000),
-      mapCapacity,
-    );
+  // Capacity for one forecast window, plus the latest earlier first-of-month
+  // row for each product line. month::text like '%-01' is applied before
+  // limit 1. A date column has no LIKE operator, so the cast is required.
+  // A mid-month value such as 2026-01-15 cannot be the row that limit returns.
+  async listCapacity(brand: CrmBrand, window: { start: string; end: string }) {
+    const cols = 'id,brand,month,product_line,capacity_units,notes';
+    const scoped = () => this.db.from('crm_capacity').select(cols).eq('brand', brand).like('month::text', '%-01');
+    const [inWindow, ...priors] = await Promise.all([
+      this.rows(brand, scoped().gte('month', window.start).lte('month', window.end), mapCapacity),
+      ...PRODUCT_LINES.map((line) => this.rows(
+        brand,
+        scoped().eq('product_line', line).lt('month', window.start).order('month', { ascending: false }).limit(1),
+        mapCapacity,
+      )),
+    ]);
+    if (inWindow.state !== 'ok') return inWindow;
+    const loaded = [...inWindow.value];
+    for (const prior of priors) {
+      if (prior.state !== 'ok') return prior;
+      loaded.push(...prior.value);
+    }
+    return { state: 'ok' as const, value: forecastCapacityRows(loaded, window.start, window.end) };
   }
 
   async upsertCapacity(brand: CrmBrand, actor: string, input: { month: string; productLine: ProductLine; capacityUnits: number; notes: string }): Promise<StoreResult<Capacity>> {
