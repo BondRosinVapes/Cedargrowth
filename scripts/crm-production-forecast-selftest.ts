@@ -1,12 +1,15 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { monthStarts, productionForecast, stageWinRates, weekStarts, weeklyProductionForecast } from '../src/lib/crm/forecast.ts';
 import { LineDashboard, SpanControl, WeeklyOverview, YearWindow } from '../src/app/admin/crm/ProductionForecast.tsx';
 import {
   FORECAST_UNREADABLE,
   NO_CAPACITY,
   WEEKLY_PENDING,
+  asOfLine,
   buildMonthlyBoard,
   buildWeeklyBoard,
+  chartSeries,
   coversYearWindow,
   echoedFrom,
   forecastPath,
@@ -14,9 +17,11 @@ import {
   loadWeeklyForecast,
   parseMonthlyForecast,
   parseWeeklyForecast,
+  partialCapacitySentence,
   roundCapacityUnits,
   selectSpan,
   shiftMonth,
+  todayInNewYork,
   yearWindowCaption,
   type MonthlyForecastCell,
 } from '../src/lib/crm/forecastClient.ts';
@@ -78,7 +83,11 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     && weekOverview.includes('period=week'),
     'forecast queries send period, and year paging sends from',
   );
-  assert(shiftMonth('2026-11-01', -3) === '2026-08-01' && shiftMonth('2026-11-01', 3) === '2027-02-01' && yearWindowCaption('2026-08-01') === 'Aug 26 to Jul 27' && coversYearWindow(['2026-11-01'], '2026-08-01') === false, 'the year window steps three months and names its range');
+  assert(shiftMonth('2026-11-01', -3) === '2026-08-01' && shiftMonth('2026-11-01', 3) === '2027-02-01' && yearWindowCaption('2026-08-01') === 'Aug 2026 to Jul 2027' && coversYearWindow(['2026-11-01'], '2026-08-01') === false, 'the year window steps three months and names its range');
+  const thisWeek = buildWeeklyBoard([{ isoWeek: '2026-W46', weekStart: '2026-11-09', productLine: 'vape', demand: 4, capacityUnits: 8, gap: 4, status: 'ok' }], 'vape', '2026-11-10');
+  const thisMonth = buildMonthlyBoard([{ month: '2026-11-01', productLine: 'vape', demand: 4, capacityUnits: 8, gap: 4, status: 'ok' }], 'vape', '2026-11-10');
+  assert(todayInNewYork(new Date('2026-11-11T04:00:00Z')) === '2026-11-10' && asOfLine('2026-11-10') === 'As of Tuesday, Nov 10, 2026', 'today is the New York calendar date');
+  assert(thisWeek.columns[0].label === 'WK 46' && thisWeek.columns[0].dates === 'NOV 9' && thisWeek.columns[0].kicker === 'WK 46 · NOV 9' && thisWeek.columns[0].caption === 'Nov 9 to Nov 15, 2026' && thisMonth.columns[0].label === 'NOV 26' && thisMonth.columns[0].dates === '' && thisMonth.columns[0].kicker === 'NOV 26', 'week headers are two lines and month headers are not repeated');
 
   assert(parseWeeklyForecast(monthlyBody) === null, 'a monthly payload is not a weekly forecast');
   assert(parseWeeklyForecast({ ...weeklyBody, period: 'month' }) === null, 'a week request that comes back without period week stays pending');
@@ -123,7 +132,10 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     && blankHtml.includes('name="capacityUnits"')
     && blankHtml.includes('Save capacity')
     && blankHtml.includes('href="/admin/crm?section=production&amp;brand=cedargrowth&amp;line=vape"')
-    && blankHtml.includes('960 / 560')
+    && blankHtml.includes('h-[120px]')
+    && blankHtml.includes('Enter capacity')
+    && blankHtml.includes('bg-parchment')
+    && blankHtml.includes('text-[96px]')
     && blankHtml.includes('md:hidden')
     && blankHtml.includes('md:grid'),
     'a blank capacity renders No capacity entered, and the capacity form still saves',
@@ -140,6 +152,31 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     onOpenLine: () => {},
   }));
   assert(zeroHtml.includes('data-capacity="0"') && zero.columns[0].capacityUnits === 0, 'an entered capacity of zero stays zero');
+
+  const holeCells = ['2026-11-09', '2026-11-16', '2026-11-23'].map((weekStart, index) => ({
+    isoWeek: `2026-W${46 + index}`,
+    weekStart,
+    productLine: 'vape' as const,
+    demand: 4,
+    capacityUnits: index === 1 ? null : 20,
+    gap: index === 1 ? null : 16,
+    status: (index === 1 ? 'no_capacity' : 'ok') as 'no_capacity' | 'ok',
+  }));
+  const holeBoard = buildWeeklyBoard(holeCells, null, '2026-11-10');
+  const holeHtml = renderToStaticMarkup(createElement(WeeklyOverview, {
+    brand: 'cedargrowth',
+    view: { state: 'ready', board: holeBoard, notForecastable: 0 },
+    canEdit: false,
+  }));
+  const gummyCells = holeHtml.split('aria-label="Gummy,').slice(1).map((chunk) => chunk.slice(0, chunk.indexOf('</button>')));
+  const vapeHole = holeHtml.split('aria-label="Vape, WK 47.').slice(1).map((chunk) => chunk.slice(0, chunk.indexOf('</button>')));
+  assert(
+    gummyCells.length === 3
+    && gummyCells.every((chunk) => chunk.includes(`>${NO_CAPACITY}<`) === false)
+    && holeHtml.includes(`>${NO_CAPACITY}<`)
+    && vapeHole.some((chunk) => chunk.includes(`>${NO_CAPACITY}<`)),
+    'a blank line gets one chip, and only an isolated empty period repeats No capacity entered',
+  );
 
   const coming = renderToStaticMarkup(createElement(LineDashboard, {
     brand: 'cedargrowth',
@@ -179,12 +216,12 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     && monthHtml.includes('>Month<')
     && monthHtml.includes(WEEKLY_PENDING) === false
     && monthHtml.includes(NO_CAPACITY)
-    && monthHtml.includes('Jan 20')
-    && monthHtml.includes('Jun 20')
-    && monthHtml.includes('Dec 20') === false
+    && monthHtml.includes('JAN 20')
+    && monthHtml.includes('JUN 20')
+    && monthHtml.includes('DEC 20') === false
     && yearHtml.includes('>Year<')
-    && yearHtml.includes('Jan 20')
-    && yearHtml.includes('Dec 20')
+    && yearHtml.includes('JAN 20')
+    && yearHtml.includes('DEC 20')
     && yearHtml.includes(NO_CAPACITY)
     && weekPressed.includes('aria-checked="true"')
     && monthPressed.indexOf('aria-checked="true"') > weekPressed.length - weekPressed.length
@@ -208,8 +245,282 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     onBack: () => {},
   }));
   assert(extended.columns[1].capacityUnits === 40 && extended.columns[1].capacitySource === 'extended' && extended.columns[1].carriedFrom === '2020-01-01' && extended.columns[2].capacityUnits === null, 'extended capacity keeps its number and a blank with no earlier entry stays null');
-  assert(extendedHtml.includes('ext.') && extendedHtml.includes('Carried forward from Jan 20') && extendedHtml.includes(NO_CAPACITY) && extendedHtml.includes('stroke-dasharray="2 7"'), 'extended capacity shows ext. and a dotted segment, and a true blank stays No capacity entered');
+  assert(extendedHtml.includes('ext.') && extendedHtml.includes('Carried forward from Jan 2020') && extendedHtml.includes(NO_CAPACITY) && extendedHtml.includes('stroke-dasharray="2 7"'), 'extended capacity shows ext. and a dotted segment, and a true blank stays No capacity entered');
 
   const older = renderToStaticMarkup(createElement(YearWindow, { from: '2026-08-01', canPrev: false, canNext: true, onShift: () => {} }));
-  assert(older.includes('← 3 months') && older.includes('3 months →') && older.includes('Aug 26 to Jul 27') && (older.match(/disabled=""/g) || []).length === 1, 'year paging uses square mono controls and can disable one direction');
+  assert(older.includes('← 3 months') && older.includes('3 months →') && older.includes('Aug 2026 to Jul 2027') && (older.match(/disabled=""/g) || []).length === 1, 'year paging uses square mono controls and can disable one direction');
+
+  const rates = stageWinRates([], []);
+  const opportunities = [
+    { id: 'o1', brand: 'cedargrowth', stage: 'won' as const, expectedCloseOn: '2026-12-18', productLine: 'vape' as const, quantityUnits: 10 },
+  ];
+  const capacity = [
+    { brand: 'cedargrowth', month: '2026-11-01', productLine: 'vape' as const, capacityUnits: 300 },
+    { brand: 'cedargrowth', month: '2026-12-01', productLine: 'vape' as const, capacityUnits: 310 },
+  ];
+  const monthRaw = {
+    ok: true,
+    period: 'month' as const,
+    from: '2026-11-01',
+    productLine: 'vape' as const,
+    ...productionForecast({ opportunities, capacity, rates, months: monthStarts('2026-11-01', 6), productLine: 'vape', brand: 'cedargrowth', carryForward: true, includeSource: true }),
+  };
+  const weekRaw = {
+    ok: true,
+    period: 'week' as const,
+    productLine: 'vape' as const,
+    ...weeklyProductionForecast({ opportunities, capacity, rates, weeks: weekStarts('2026-11-10', 13), productLine: 'vape', brand: 'cedargrowth', carryForward: true }),
+  };
+  const monthParsed = parseMonthlyForecast(monthRaw);
+  const weekParsed = parseWeeklyForecast(weekRaw);
+  const crossedMonth = buildMonthlyBoard(monthParsed?.cells ?? [], 'vape', '2026-11-10');
+  const crossedWeek = buildWeeklyBoard(weekParsed?.cells ?? [], 'vape', '2026-11-10');
+  const janRaw = monthRaw.cells.find((cell) => cell.month === '2027-01-01' && cell.productLine === 'vape');
+  const jan = crossedMonth.lines[0]?.points[crossedMonth.columns.findIndex((column) => column.id === '2027-01-01')];
+  const w53 = crossedWeek.columns.findIndex((column) => column.id === '2026-W53');
+  const w01 = crossedWeek.columns.findIndex((column) => column.id === '2027-W01');
+  const raw53 = weekRaw.cells.find((cell) => cell.isoWeek === '2026-W53');
+  const raw01 = weekRaw.cells.find((cell) => cell.isoWeek === '2027-W01');
+  const series = chartSeries(crossedWeek);
+  assert(!!janRaw && janRaw.capacitySource === 'extended' && janRaw.capacityUnits === 310 && !!jan && jan.capacityUnits === 310 && jan.capacitySource === 'extended', 'an extended January 2027 cell keeps the December capacity');
+  assert(!!raw53 && !!raw01 && raw53.capacityUnits !== null && raw01.capacityUnits !== null && raw53.capacitySource === 'extended' && raw01.capacitySource === 'extended' && w53 > 0 && w01 === w53 + 1 && crossedWeek.lines[0]?.points[w53]?.capacityUnits === Math.round(raw53.capacityUnits as number) && crossedWeek.lines[0]?.points[w01]?.capacityUnits === Math.round(raw01.capacityUnits as number), '2026-W53 stays next to 2027-W01 and both keep the carried capacity');
+  assert(series[w53]?.capacityUnits !== null && series[w01]?.capacityUnits !== null && series.slice(w53, w01 + 1).every((point) => point.capacityUnits !== null), 'the capacity line does not break between W53 and the next year');
+
+  const mixed = buildWeeklyBoard(weekParsed?.cells ?? [], null, '2026-11-10');
+  const mixedSeries = chartSeries(mixed);
+  const mixedW53 = mixed.columns.findIndex((column) => column.id === '2026-W53');
+  const mixedW01 = mixed.columns.findIndex((column) => column.id === '2027-W01');
+  assert(
+    mixedW01 === mixedW53 + 1
+    && mixed.columns[mixedW53]?.capacityUnits === null
+    && mixedSeries[mixedW53]?.partial === true
+    && mixedSeries[mixedW53]?.partialUnits !== null
+    && mixedSeries[mixedW01]?.partialUnits !== null
+    && mixedSeries[mixedW53]?.capacityUnits === null,
+    'a blank product line does not erase carried capacity between W53 and W01',
+  );
+  const overview = renderToStaticMarkup(createElement(WeeklyOverview, {
+    brand: 'cedargrowth',
+    view: { state: 'ready', board: mixed, notForecastable: 0 },
+    canEdit: false,
+  }));
+  const overviewCell = (line: string, label: string) => new RegExp(`aria-label="${line}, ${label}\\.[^"]*" data-capacity="([^"]+)"`).exec(overview)?.[1] ?? '';
+  assert(
+    overview.includes('Demand this week')
+    && overview.includes('pro-rated')
+    && overviewCell('Vape', 'WK 53') !== 'none'
+    && overviewCell('Vape', 'WK 1') !== 'none'
+    && overviewCell('Gummy', 'WK 53') === 'none'
+    && overviewCell('Gummy', 'WK 1') === 'none',
+    'the overview keeps carried Vape capacity across the year and still marks a blank line as no capacity',
+  );
+
+  const janWindow = {
+    ok: true,
+    period: 'month' as const,
+    from: '2027-01-01',
+    months: 3,
+    productLine: 'vape' as const,
+    ...productionForecast({ opportunities, capacity, rates, months: monthStarts('2027-01-01', 3), productLine: 'vape', brand: 'cedargrowth', carryForward: true, includeSource: true }),
+  };
+  let janRequest = '';
+  const loaded = await loadMonthlyForecast('cedargrowth', 12, 'vape', async (input) => {
+    janRequest = String(input);
+    return new Response(JSON.stringify(janWindow), { status: 200, headers: { 'content-type': 'application/json' } });
+  }, '2027-01-01');
+  const janBoard = loaded.state === 'ready' ? buildMonthlyBoard(loaded.cells, 'vape', '2026-11-10') : null;
+  const janHtml = janBoard ? renderToStaticMarkup(createElement(LineDashboard, {
+    brand: 'cedargrowth',
+    line: 'vape',
+    span: 'month',
+    view: { state: 'ready', board: janBoard, notForecastable: 0 },
+    onSpan: () => {},
+    onBack: () => {},
+  })) : '';
+  const weekHtml = renderToStaticMarkup(createElement(LineDashboard, {
+    brand: 'cedargrowth',
+    line: 'vape',
+    span: 'week',
+    view: { state: 'ready', board: crossedWeek, notForecastable: 0 },
+    onSpan: () => {},
+    onBack: () => {},
+  }));
+  const weekCell = (label: string) => new RegExp(`aria-label="Vape, ${label}\\.[^"]*" data-capacity="([^"]+)"`).exec(weekHtml)?.[1] ?? '';
+  assert(
+    janRequest.includes('period=month')
+    && janRequest.includes('from=2027-01-01')
+    && loaded.state === 'ready'
+    && loaded.honoredFrom === true
+    && janWindow.cells.filter((cell) => cell.productLine === 'vape').every((cell) => cell.capacitySource === 'extended' && cell.capacityUnits === 310)
+    && janBoard?.columns[0]?.id === '2027-01-01'
+    && janBoard.lines[0]?.points[0]?.capacityUnits === 310
+    && janBoard.lines[0]?.points[0]?.capacitySource === 'extended'
+    && janHtml.includes('JAN 27')
+    && janHtml.includes('data-capacity="310"')
+    && janHtml.includes('ext.')
+    && janHtml.includes('Jan 2027 to Mar 2027')
+    && janHtml.includes('The next six months') === false
+    && janHtml.includes('Carried forward from the last entered month')
+    && janHtml.includes('Carried forward from January') === false
+    && janHtml.includes('>Demand<')
+    && janHtml.includes('>Capacity<')
+    && janHtml.includes('not a weekly pro-rate')
+    && janHtml.includes('border-0'),
+    'from=2027-01-01 months=3 keeps the extended January cell and its value',
+  );
+  assert(
+    weekCell('WK 53') === String(Math.round(raw53?.capacityUnits as number))
+    && weekCell('WK 1') === String(Math.round(raw01?.capacityUnits as number))
+    && weekHtml.includes('WK 53')
+    && weekHtml.includes('WK 1')
+    && weekHtml.includes('Week by week')
+    && weekHtml.includes('in ISO weeks'),
+    'the week view keeps 2026-W53 and 2027-W01 capacity in the cells',
+  );
+  const pagedYear = janBoard ? renderToStaticMarkup(createElement(LineDashboard, {
+    brand: 'cedargrowth',
+    line: 'vape',
+    span: 'year',
+    yearFrom: '2027-01-01',
+    view: { state: 'ready', board: janBoard, notForecastable: 0 },
+    onSpan: () => {},
+    onBack: () => {},
+  })) : '';
+  assert(pagedYear.includes('Jan 2027 to Mar 2027') && pagedYear.includes('The next twelve months') === false, 'a paged window titles itself with its date range');
+
+  const lines = ['vape', 'preroll', 'gummy', 'other'] as const;
+  const partialCells = ['2026-12-07', '2026-12-14'].flatMap((weekStart, weekIndex) => lines.map((productLine) => {
+    const capacityUnits = productLine === 'preroll' ? null : productLine === 'vape' ? 10 : productLine === 'gummy' ? 0 : 5;
+    const demand = productLine === 'preroll' ? 20 : productLine === 'vape' ? 6 : 0;
+    return {
+      isoWeek: weekIndex === 0 ? '2026-W50' : '2026-W51',
+      weekStart,
+      productLine,
+      demand,
+      capacityUnits,
+      gap: capacityUnits === null ? null : capacityUnits - demand,
+      status: (capacityUnits === null ? 'no_capacity' : 'ok') as 'no_capacity' | 'ok',
+      capacitySource: capacityUnits === null ? null : productLine === 'vape' ? 'extended' as const : 'entered' as const,
+    };
+  }));
+  const partialBoard = buildWeeklyBoard(partialCells, null, '2026-12-07');
+  const partialHtml = renderToStaticMarkup(createElement(WeeklyOverview, {
+    brand: 'cedargrowth',
+    view: { state: 'ready', board: partialBoard, notForecastable: 0 },
+    canEdit: false,
+  }));
+  const partialPoint = chartSeries(partialBoard)[0];
+  assert(
+    partialPoint?.partial === true
+    && partialPoint.partialUnits === 15
+    && partialPoint.capacityUnits === null
+    && partialPoint.known === 3
+    && partialPoint.expected === 4
+    && partialPoint.carriedCount === 1
+    && partialHtml.includes('Capacity 15 for 3 of 4 lines, 1 carried forward. Pre-roll has no capacity entered.')
+    && partialHtml.includes('Short') === false
+    && partialHtml.includes('Tight') === false
+    && partialHtml.includes('data-capacity-partial="true"')
+    && partialHtml.includes('stroke-dasharray="3 4"'),
+    'a partial overview total names the missing line and does not invent a shortfall',
+  );
+  assert(
+    partialCapacitySentence({ partialUnits: 15, known: 3, expected: 4, missing: ['Pre-roll'], carriedCount: 0 }) === 'Capacity 15 for 3 of 4 lines. Pre-roll has no capacity entered.'
+    && partialCapacitySentence({ partialUnits: 15, known: 3, expected: 4, missing: ['Pre-roll', 'Gummy'], carriedCount: 2 }) === 'Capacity 15 for 3 of 4 lines, 2 carried forward. Pre-roll and Gummy have no capacity entered.',
+    'a partial sentence omits a zero carry count and pluralizes the carried count',
+  );
+
+  const fullCells = lines.map((productLine) => {
+    const capacityUnits = productLine === 'vape' ? 10 : productLine === 'preroll' ? 4 : productLine === 'gummy' ? 0 : 5;
+    const demand = productLine === 'vape' ? 30 : 0;
+    return {
+      isoWeek: '2026-W50',
+      weekStart: '2026-12-07',
+      productLine,
+      demand,
+      capacityUnits,
+      gap: capacityUnits - demand,
+      status: (productLine === 'vape' ? 'short' : 'ok') as 'short' | 'ok',
+      capacitySource: 'entered' as const,
+    };
+  });
+  const fullBoard = buildWeeklyBoard(fullCells, null, '2026-12-07');
+  const fullHtml = renderToStaticMarkup(createElement(WeeklyOverview, {
+    brand: 'cedargrowth',
+    view: { state: 'ready', board: fullBoard, notForecastable: 0 },
+    canEdit: false,
+  }));
+  const fullPoint = chartSeries(fullBoard)[0];
+  assert(
+    fullPoint?.partial === false
+    && fullPoint.capacityUnits === 19
+    && fullHtml.includes('Capacity 19, pro-rated from December. Short by 11 units.')
+    && fullHtml.includes('of 4 lines') === false,
+    'a complete overview total keeps the gap when every line has a number',
+  );
+  const carriedCells = lines.map((productLine) => ({
+    isoWeek: '2026-W50',
+    weekStart: '2026-12-07',
+    productLine,
+    demand: productLine === 'vape' ? 1 : 0,
+    capacityUnits: 10,
+    gap: productLine === 'vape' ? 9 : 10,
+    status: 'ok' as const,
+    capacitySource: 'extended' as const,
+    capacityFrom: '2026-11-01',
+  }));
+  const carriedBoard = buildWeeklyBoard(carriedCells, null, '2026-12-07');
+  const carriedHtml = renderToStaticMarkup(createElement(WeeklyOverview, {
+    brand: 'cedargrowth',
+    view: { state: 'ready', board: carriedBoard, notForecastable: 0 },
+    canEdit: false,
+  }));
+  assert(
+    chartSeries(carriedBoard)[0]?.extended === true
+    && carriedHtml.includes('Capacity 40, pro-rated from December. Carried forward from November. Spare room 39 units.'),
+    'a fully carried total keeps the spare room after the carried wording',
+  );
+
+  const statusCells = [
+    { line: 'vape' as const, demand: 10, capacityUnits: 2 as number | null, status: 'short' as const, source: 'entered' as const },
+    { line: 'preroll' as const, demand: 9, capacityUnits: 10 as number | null, status: 'tight' as const, source: 'entered' as const },
+    { line: 'gummy' as const, demand: 1, capacityUnits: 10 as number | null, status: 'ok' as const, source: 'entered' as const },
+    { line: 'other' as const, demand: 0, capacityUnits: null as number | null, status: 'no_capacity' as const, source: null },
+  ].flatMap((item) => [
+    {
+      isoWeek: '2026-W46',
+      weekStart: '2026-11-09',
+      productLine: item.line,
+      demand: item.demand,
+      capacityUnits: item.capacityUnits,
+      gap: item.capacityUnits === null ? null : item.capacityUnits - item.demand,
+      status: item.status,
+      capacitySource: item.capacityUnits === null ? null : item.source,
+    },
+    {
+      isoWeek: '2026-W47',
+      weekStart: '2026-11-16',
+      productLine: item.line,
+      demand: 0,
+      capacityUnits: 4,
+      gap: 4,
+      status: 'ok' as const,
+      capacitySource: 'entered' as const,
+    },
+  ]);
+  const statusBoard = buildWeeklyBoard(statusCells, null, '2026-11-10');
+  const statusHtml = renderToStaticMarkup(createElement(WeeklyOverview, {
+    brand: 'cedargrowth',
+    view: { state: 'ready', board: statusBoard, notForecastable: 0 },
+    canEdit: false,
+  }));
+  const phone = statusHtml.slice(statusHtml.indexOf('data-layout="phone"'));
+  assert(
+    phone.includes('aria-label="Short"')
+    && phone.includes('aria-label="Tight"')
+    && phone.includes('aria-label="OK"')
+    && phone.includes('aria-label="No capacity"')
+    && phone.includes('sr-only'),
+    'phone status squares expose Short, Tight, OK, and No capacity',
+  );
 }
