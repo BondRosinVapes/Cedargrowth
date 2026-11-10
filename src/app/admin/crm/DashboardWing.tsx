@@ -87,7 +87,7 @@ function topWithOther(rows: Bucket[]): Bucket[] {
   ];
 }
 
-export function DashboardWing({ brand, brandName, canEditCapacity = false }: { brand: CrmBrand; brandName: string; onOpen?: (wing: Jump) => void; canEditCapacity?: boolean }) {
+export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpenAccount }: { brand: CrmBrand; brandName: string; onOpen?: (wing: Jump) => void; canEditCapacity?: boolean; onOpenAccount: (id: string) => void }) {
   const [section, setSection] = useState<Section>('overview');
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [body, setBody] = useState<DashboardBody | null>(null);
@@ -230,7 +230,7 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false }: { b
           </div>
         ) : null}
 
-        <TerritoryMap brand={brand} canAssign={canEditCapacity} territory={filters.territory} onSelect={(region) => setFilters((current) => ({ ...current, territory: current.territory === region ? '' : region }))} />
+        <TerritoryMap brand={brand} canAssign={canEditCapacity} territory={filters.territory} onSelect={(region) => setFilters((current) => ({ ...current, territory: current.territory === region ? '' : region }))} onOpenAccount={onOpenAccount} />
 
         {section === 'overview' ? (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">

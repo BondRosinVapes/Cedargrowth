@@ -12,6 +12,7 @@ import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmat
 import { buildDigest, hoodieSignals, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
 import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, parseCounty, regionForCounty } from '../src/lib/crm/nyRegions.ts';
 import { coverageLabel } from '../src/lib/crm/territory.ts';
+import { clusterPins, countyAt, pinCard, placePins, unmappedAccountCount, type MapPin } from '../src/lib/crm/nyMap.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
@@ -1428,6 +1429,15 @@ await runCodexLoad(['--accounts', 'accounts.csv', '--contacts', 'contacts.csv'],
 assert(sentKinds.join(',') === 'account,contact', 'accounts are posted before contacts');
 const reportLines = codexReport('accounts', 1, [{ line: 4, reason: 'Email buyer@test.only was rejected.' }], [], ['loader-secret']);
 assert(reportLines.some((line) => line === 'row 4: Row was rejected.'), 'a reason that contains an email is not printed');
+
+assert(countyAt(-78.878, 42.886) === 'Erie', 'a Buffalo coordinate falls in Erie county');
+assert(countyAt(-73.985, 40.758) === 'New York', 'a Manhattan coordinate falls in New York county');
+const testPin = (id: string, latitude: number, longitude: number): MapPin => ({ id, displayName: `TEST ONLY ${id}`, licenseRef: 'TEST-ONLY-LIC', licenseExpiry: '2027-01-02', ocmStatus: 'unverified', city: 'Buffalo', county: 'Erie', assignedRep: null, distributor: 'nabis', contactCount: 2, latitude, longitude });
+const placed = placePins([testPin('north', 42.89, -78.88), testPin('south', 42.891, -78.881)]).placed;
+assert(clusterPins(placed, 40).clusters.length === 1 && clusterPins(placed, 0.05).singles.length === 2, 'nearby TEST ONLY pins cluster, then split when the cell is smaller');
+const card = pinCard(testPin('card', 42.89, -78.88));
+assert(card.some((row) => row.label === 'Rep' && row.value === 'No rep') && card.some((row) => row.mono && row.value === 'TEST-ONLY-LIC') && card.some((row) => row.label === 'Distributor' && row.value === 'Nabis') && card.some((row) => row.label === 'Contacts' && row.value === '2'), 'a pin card shows the dispensary fields and No rep');
+assert(unmappedAccountCount([{ latitude: null, longitude: null }, { latitude: 42.8, longitude: -78.8 }, { latitude: 10, longitude: -78.8 }, { latitude: 10, longitude: -78.8, recordMarker: 'test' }]) === 2, 'accounts without a New York coordinate stay off the map');
 
 const suiteSql = readFileSync('supabase/migrations/0123_crm_suite_workflows.sql', 'utf8');
 const raiseAt = suiteSql.indexOf('unsupported opportunity stage');

@@ -469,7 +469,7 @@ export function CrmConsole({
       ) : null}
 
       {wing === 'dashboard' ? (
-        <DashboardWing key={`${brand}-${refresh}`} brand={brand} brandName={label} onOpen={setWing} canEditCapacity={roleLabel !== 'Sales'} />
+        <DashboardWing key={`${brand}-${refresh}`} brand={brand} brandName={label} onOpen={setWing} canEditCapacity={roleLabel !== 'Sales'} onOpenAccount={(id) => { setSelectedAccountId(id); setWing('accounts'); }} />
       ) : null}
 
       {wing === 'batches' ? (

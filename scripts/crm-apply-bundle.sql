@@ -1,4 +1,4 @@
--- Apply CRM migrations 0120 through 0134 as one transaction.
+-- Apply CRM migrations 0120 through 0135 as one transaction.
 -- This file is not in supabase/migrations, so a hosted migration runner does not
 -- pick it up by itself. Run it only with psql --single-transaction against an
 -- isolated database after review. This repository does not run it.
@@ -21,3 +21,4 @@
 \ir ../supabase/migrations/0132_crm_bond_intake.sql
 \ir ../supabase/migrations/0133_crm_agent_intake.sql
 \ir ../supabase/migrations/0134_crm_agent_account_fields.sql
+\ir ../supabase/migrations/0135_crm_account_geocode.sql

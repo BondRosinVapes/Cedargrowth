@@ -168,6 +168,21 @@ fi
 echo 'ok: agent accounts keep street, ZIP, expiry, OCM status, lead source, rep, and importer notes'
 expect_fail 'note delete after intake' "delete from public.crm_notes where body like 'TEST ONLY%';"
 
+sudo -u postgres psql -d "$DB" -q -v ON_ERROR_STOP=1 -c "insert into public.crm_accounts (brand, display_name, status, created_by, updated_by) values ('cedargrowth', 'TEST ONLY geocode', 'prospect', 'test-only', 'test-only');" >/dev/null
+GEO=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select id from public.crm_accounts where display_name = 'TEST ONLY geocode';" | tr -d '[:space:]')
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update public.crm_accounts set latitude = 42.886000, longitude = -78.878000, geocode_source = 'test-only', geocode_match = 'rooftop', geocoded_at = '2026-11-10T00:00:00Z' where id = '${GEO}';" >/dev/null
+KEPT=$(sudo -u postgres psql -d "$DB" -tA -c "select latitude::text || ',' || longitude::text || ',' || geocode_source from public.crm_accounts where id = '${GEO}';")
+TRIGGERS=$(sudo -u postgres psql -d "$DB" -tA -c "select string_agg(tgname, ',' order by tgname) from pg_trigger where tgrelid = 'public.crm_accounts'::regclass and not tgisinternal and tgname in ('crm_accounts_audit', 'crm_accounts_guard', 'crm_accounts_no_delete');")
+set +e
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update public.crm_accounts set latitude = 10, longitude = -78.878000 where id = '${GEO}';" >/tmp/crm-geocode-range.log 2>&1
+RANGE_CODE=$?
+set -e
+if [ "$KEPT" != "42.886000,-78.878000,test-only" ] || [ "$TRIGGERS" != "crm_accounts_audit,crm_accounts_guard,crm_accounts_no_delete" ] || [ "$RANGE_CODE" -eq 0 ]; then
+  echo "FAIL: geocode guard ${KEPT} ${TRIGGERS} ${RANGE_CODE}"
+  exit 1
+fi
+echo 'ok: a coordinate-only update is kept and a latitude outside New York is rejected'
+
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${DB};" >/dev/null
 
 UP=crm_suite_upgrade

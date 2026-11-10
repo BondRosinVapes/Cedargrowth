@@ -59,6 +59,11 @@ export type Account = {
   recordMarker?: 'test' | null;
   sourceInquiryId?: string | null;
   sourceRequestId?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  geocodeSource?: string | null;
+  geocodeMatch?: string | null;
+  geocodedAt?: string | null;
   distributor: Distributor | null;
   distributorAccountRef: string | null;
   createdAt: string;
@@ -367,7 +372,7 @@ export interface CrmStore {
   receiveAgentRecords(input: { requestId: string; receivedAt: string; ops: AgentOp[] }): Promise<StoreResult<{ code: 'replay' } | { code: 'rate'; retryAfter: number } | { code: 'ok'; created: { accounts: number; contacts: number; notes: number }; skipped: { index: number; reason: string }[]; failed: AgentRowFailure[] }>>;
 }
 
-const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,street,state,postal_code,consent_version,consent_received_at,intake_submitted_at,ocm_status,record_marker,source_inquiry_id,created_at,updated_at,created_by,updated_by';
+const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,street,state,postal_code,consent_version,consent_received_at,intake_submitted_at,ocm_status,record_marker,source_inquiry_id,latitude,longitude,geocode_source,geocode_match,geocoded_at,created_at,updated_at,created_by,updated_by';
 const ORDER_COLS = 'id,public_id,brand,account_id,distributor,order_ref,retailer_name,ordered_on,delivered_on,order_status,invoice_cents,retailer_payment_status,retailer_paid_on,payout_status,payout_cents,payout_on,opportunity_id,source,imported_at';
 const CONTACT_COLS = 'id,public_id,brand,account_id,name,title,email,phone,notes,preference,created_at,updated_at';
 const OPP_COLS = 'id,public_id,brand,account_id,name,stage,forecast_cents,expected_close_on,notes,loss_reason,next_action,next_action_on,product_line,quantity_units,updated_at';
@@ -411,6 +416,11 @@ function mapAccount(row: Record<string, unknown>): Account | null {
     ocmStatus: row.ocm_status === 'unverified' || row.ocm_status === 'verified' ? row.ocm_status : null,
     recordMarker: row.record_marker === 'test' ? 'test' : null,
     sourceInquiryId: row.source_inquiry_id ? String(row.source_inquiry_id) : null,
+    latitude: row.latitude === null || row.latitude === undefined || row.latitude === '' ? null : Number(row.latitude),
+    longitude: row.longitude === null || row.longitude === undefined || row.longitude === '' ? null : Number(row.longitude),
+    geocodeSource: row.geocode_source ? String(row.geocode_source) : null,
+    geocodeMatch: row.geocode_match ? String(row.geocode_match) : null,
+    geocodedAt: row.geocoded_at ? String(row.geocoded_at) : null,
     distributor: (DISTRIBUTORS as readonly string[]).includes(String(row.distributor)) ? (row.distributor as Distributor) : null,
     distributorAccountRef: row.distributor_account_ref ? String(row.distributor_account_ref) : null,
     createdAt: String(row.created_at ?? ''),
