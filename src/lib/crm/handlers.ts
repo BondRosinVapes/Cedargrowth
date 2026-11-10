@@ -34,7 +34,7 @@ import {
 import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
-import { monthStart, monthStarts, parseCapacityWrite, parseForecastQuery, productionForecast, stageWinRates, weekStarts, weeklyProductionForecast } from './forecast';
+import { monthCapacityRange, monthStart, monthStarts, parseCapacityWrite, parseForecastQuery, productionForecast, stageWinRates, weekCapacityRange, weekStarts, weeklyProductionForecast } from './forecast';
 import { buildDigest, digestConfigured, digestFromAddress, digestRecipients, digestSummary, nyWeek, renderDigestHtml, renderDigestText, secretMatches } from './digest';
 import { COVERAGE_UPLOAD, NEEDS_HOODIE, NY_REGIONS } from './nyRegions';
 import { coverageLabel, territoryTiles, TERRITORY_METRICS, type TerritoryMetric } from './territory';
@@ -746,18 +746,22 @@ export async function handleForecast(ctx: CrmContext): Promise<CrmResult> {
   if (isResult(auth)) return auth;
   const parsed = parseForecastQuery(url.searchParams);
   if (!parsed.ok) return { status: 400, body: { ok: false, reason: parsed.reason } };
+  const today = new Date().toISOString().slice(0, 10);
+  const weeks = parsed.shape === 'week' ? weekStarts(today, parsed.weeks) : null;
+  const from = parsed.shape === 'week' ? null : parsed.shape === 'legacy' ? monthStart(today) : (parsed.from ?? monthStart(today));
+  const months = parsed.shape === 'week' || !from ? null : monthStarts(from, parsed.months);
+  const bounds = weeks ? weekCapacityRange(weeks) : months ? monthCapacityRange(months) : null;
+  if (!bounds || (parsed.shape !== 'week' && !from)) return { status: 400, body: { ok: false, reason: 'Month must be the first day of a month.' } };
   const [opps, events, capacity] = await Promise.all([
     ctx.store.listOpportunities(auth.brand),
     ctx.store.listStageEvents(auth.brand),
-    ctx.store.listCapacity(auth.brand),
+    ctx.store.listCapacity(auth.brand, bounds),
   ]);
   for (const result of [opps, events, capacity]) {
     if (result.state !== 'ok') return storageBody(auth.brand, result.state === 'rejected' || result.state === 'missing' ? 'unavailable' : result.state);
   }
   if (opps.state !== 'ok' || events.state !== 'ok' || capacity.state !== 'ok') return storageBody(auth.brand, 'unavailable');
-  const today = new Date().toISOString().slice(0, 10);
   const rates = stageWinRates(events.value, opps.value);
-  // listCapacity is the brand's full history, including months before this window.
   if (parsed.shape === 'legacy') {
     const forecast = productionForecast({
       opportunities: opps.value,
@@ -772,20 +776,18 @@ export async function handleForecast(ctx: CrmContext): Promise<CrmResult> {
       opportunities: opps.value,
       capacity: capacity.value,
       rates,
-      weeks: weekStarts(today, parsed.weeks),
+      weeks: weeks || [],
       productLine: parsed.productLine,
       brand: auth.brand,
       carryForward: true,
     });
     return { status: 200, body: { ok: true, configured: true, brand: auth.brand, period: 'week', weeks: parsed.weeks, productLine: parsed.productLine, rates, ...forecast } };
   }
-  const from = parsed.from ?? monthStart(today);
-  if (!from) return { status: 400, body: { ok: false, reason: 'Month must be the first day of a month.' } };
   const forecast = productionForecast({
     opportunities: opps.value,
     capacity: capacity.value,
     rates,
-    months: monthStarts(from, parsed.months),
+    months: months || [],
     productLine: parsed.productLine,
     brand: auth.brand,
     carryForward: true,
@@ -1307,21 +1309,23 @@ function emailStatusRow(row: { recipient: string; lastEvent: string | null; last
 }
 
 async function loadDigest(store: CrmStore, brand: CrmBrand, nowMs: number): Promise<{ model: ReturnType<typeof buildDigest> } | CrmResult> {
+  const today = nyWeek(nowMs).today;
+  const digestMonths = monthStarts(today, 6);
+  const digestBounds = monthCapacityRange(digestMonths) ?? { start: today, end: today };
   const [all, notes, orders, visits, events, capacity] = await Promise.all([
     store.exportBrand(brand),
     store.listNotes(brand, null),
     store.listDistributorOrders(brand),
     store.listVisits(brand),
     store.listStageEvents(brand),
-    store.listCapacity(brand),
+    store.listCapacity(brand, digestBounds),
   ]);
   if (all.state !== 'ok') return storageBody(brand, all.state === 'rejected' || all.state === 'missing' ? 'unavailable' : all.state);
   if (notes.state !== 'ok') return storageBody(brand, notes.state === 'rejected' || notes.state === 'missing' ? 'unavailable' : notes.state);
   if (events.state !== 'ok' && events.state !== 'absent') return storageBody(brand, events.state === 'rejected' || events.state === 'missing' ? 'unavailable' : events.state);
   if (capacity.state !== 'ok' && capacity.state !== 'absent') return storageBody(brand, capacity.state === 'rejected' || capacity.state === 'missing' ? 'unavailable' : capacity.state);
-  const today = nyWeek(nowMs).today;
   const forecast = events.state === 'ok' && capacity.state === 'ok'
-    ? productionForecast({ opportunities: all.value.opportunities, capacity: capacity.value, rates: stageWinRates(events.value, all.value.opportunities), months: monthStarts(today, 6) })
+    ? productionForecast({ opportunities: all.value.opportunities, capacity: capacity.value, rates: stageWinRates(events.value, all.value.opportunities), months: digestMonths })
     : { shorts: [] as string[] };
   const model = buildDigest({
     brand,
