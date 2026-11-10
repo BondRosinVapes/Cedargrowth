@@ -2,12 +2,15 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { LineDashboard, SpanControl, WeeklyOverview, YearWindow } from '../src/app/admin/crm/ProductionForecast.tsx';
 import {
+  FORECAST_UNREADABLE,
   NO_CAPACITY,
   WEEKLY_PENDING,
   buildMonthlyBoard,
   buildWeeklyBoard,
   coversYearWindow,
+  echoedFrom,
   forecastPath,
+  loadMonthlyForecast,
   loadWeeklyForecast,
   parseMonthlyForecast,
   parseWeeklyForecast,
@@ -67,12 +70,13 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
   assert(
     weekOverview === '/api/admin/crm/forecast?brand=cedargrowth&period=week&weeks=13'
     && weekLine === '/api/admin/crm/forecast?brand=bond&period=week&weeks=13&productLine=preroll'
-    && monthLine === '/api/admin/crm/forecast?brand=cedargrowth&months=6&productLine=gummy'
-    && yearLine === '/api/admin/crm/forecast?brand=cedargrowth&months=12&productLine=other'
-    && yearFrom === '/api/admin/crm/forecast?brand=cedargrowth&months=12&productLine=vape&from=2026-08-01'
+    && monthLine === '/api/admin/crm/forecast?brand=cedargrowth&period=month&months=6&productLine=gummy'
+    && yearLine === '/api/admin/crm/forecast?brand=cedargrowth&period=month&months=12&productLine=other'
+    && yearFrom === '/api/admin/crm/forecast?brand=cedargrowth&period=month&months=12&from=2026-08-01&productLine=vape'
     && yearLine.includes('period=year') === false
-    && monthLine.includes('period=') === false,
-    'forecast queries use week, month, and year ranges without a year period',
+    && monthLine.includes('months=6')
+    && weekOverview.includes('period=week'),
+    'forecast queries send period, and year paging sends from',
   );
   assert(shiftMonth('2026-11-01', -3) === '2026-08-01' && shiftMonth('2026-11-01', 3) === '2027-02-01' && yearWindowCaption('2026-08-01') === 'Aug 26 to Jul 27' && coversYearWindow(['2026-11-01'], '2026-08-01') === false, 'the year window steps three months and names its range');
 
@@ -94,7 +98,13 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     return new Response(JSON.stringify(monthlyBody), { status: 200, headers: { 'content-type': 'application/json' } });
   });
   const ready = await loadWeeklyForecast('cedargrowth', 'vape', async () => new Response(JSON.stringify(weeklyBody), { status: 200, headers: { 'content-type': 'application/json' } }));
-  assert(pending.state === 'pending' && requested.endsWith('period=week&weeks=13') && ready.state === 'ready' && ready.state === 'ready' && ready.cells[1].capacityUnits === null, 'the current monthly API shows the weekly forecast as not ready');
+  assert(pending.state === 'pending' && requested.endsWith('period=week&weeks=13') && ready.state === 'ready' && ready.cells[1].capacityUnits === null, 'a body without isoWeek cells stays pending and a weekly body is kept');
+  const rejected = await loadWeeklyForecast('cedargrowth', 'vape', async () => new Response(JSON.stringify({ reason: 'Weeks must be a whole number.' }), { status: 400, headers: { 'content-type': 'application/json' } }));
+  const monthRejected = await loadMonthlyForecast('cedargrowth', 6, 'vape', async () => new Response(JSON.stringify({ reason: 'From must be the first of a month.' }), { status: 400, headers: { 'content-type': 'application/json' } }));
+  const silent = { ok: true, period: 'month', months: 12, cells: [{ month: '2026-11-01', productLine: 'vape', demand: 1, capacityUnits: 2, gap: 1, status: 'ok' }] };
+  const echoed = { ...silent, from: '2026-08-01' };
+  assert(rejected.state === 'error' && rejected.reason === FORECAST_UNREADABLE && monthRejected.state === 'error' && monthRejected.reason === FORECAST_UNREADABLE, 'a 400 is a quiet forecast failure');
+  assert(echoedFrom(silent, '2026-08-01') === false && echoedFrom(echoed, '2026-08-01') === true, 'paging stays off unless the response echoes from');
 
   const blank = buildWeeklyBoard([
     { isoWeek: '2020-W02', weekStart: '2020-01-06', productLine: 'vape', demand: 12, capacityUnits: null, gap: null, status: 'no_capacity' },

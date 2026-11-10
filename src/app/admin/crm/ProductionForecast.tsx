@@ -749,7 +749,7 @@ export function ProductionSection({
   const [line, setLine] = useState<ProductLine | null>(null);
   const [span, setSpan] = useState<ForecastSpan>('week');
   const [yearFrom, setYearFrom] = useState(currentMonthStart);
-  const [yearMoves, setYearMoves] = useState({ prev: true, next: true });
+  const [yearMoves, setYearMoves] = useState({ prev: false, next: false });
   const [yearBusy, setYearBusy] = useState(false);
   const [view, setView] = useState<ForecastView>({ state: 'loading' });
   const [tick, setTick] = useState(0);
@@ -777,7 +777,11 @@ export function ProductionSection({
     loadForecastView(brand, line ? span : 'week', line, undefined, from)
       .then((next) => {
         if (cancel) return;
-        if (span === 'year') appliedYear.current = `${brand}:${line ?? ''}:${yearFrom}:${tick}`;
+        if (span === 'year') {
+          appliedYear.current = `${brand}:${line ?? ''}:${yearFrom}:${tick}`;
+          const paging = next.state === 'ready' && next.honoredFrom === true;
+          setYearMoves({ prev: paging, next: paging });
+        }
         setView(next);
       })
       .catch(() => { if (!cancel) setView(line && span !== 'week' ? { state: 'error', reason: 'Production forecast is not available yet.' } : { state: 'pending' }); });
@@ -820,7 +824,7 @@ export function ProductionSection({
           window.history.replaceState(null, '', writeProductionUrl(brand, line, 'year', nextFrom));
           return;
         }
-        setYearMoves((current) => ({ ...current, [key]: false }));
+        setYearMoves({ prev: false, next: false });
       })
       .finally(() => setYearBusy(false));
   }

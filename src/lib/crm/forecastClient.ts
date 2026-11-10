@@ -78,6 +78,7 @@ export type ForecastStats = {
 
 export const NO_CAPACITY = 'No capacity entered';
 export const WEEKLY_PENDING = 'Weekly forecast coming soon';
+export const FORECAST_UNREADABLE = 'That forecast could not be read.';
 
 const ISO_WEEK = /^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$/;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -116,7 +117,15 @@ function monthKey(value: string): string | null {
 }
 
 function readCapacitySource(cell: Record<string, unknown>): CapacitySource | null {
+  // Optional until the carry-forward API lands. null means no earlier entry.
+  if (cell.capacitySource === null || cell.capacitySource === undefined) return null;
   return cell.capacitySource === 'entered' || cell.capacitySource === 'extended' ? cell.capacitySource : null;
+}
+
+export function echoedFrom(body: unknown, requested: string | null): boolean {
+  if (!requested || !body || typeof body !== 'object') return false;
+  const value = (body as { from?: unknown }).from;
+  return typeof value === 'string' && monthKey(value) === requested;
 }
 
 function readCapacityFrom(cell: Record<string, unknown>): string | null {
@@ -480,43 +489,53 @@ async function readBody(res: Response): Promise<unknown> {
 }
 
 export function forecastPath(brand: string, span: ForecastSpan, productLine: ProductLine | null, from?: string | null): string {
+  // Always send period, productLine, or from. A bare ?brand=&months= call is the legacy shape.
   const params = new URLSearchParams({ brand });
   if (span === 'week') {
-    // Overview omits productLine. A line dashboard sends it. There is no year period.
     params.set('period', 'week');
     params.set('weeks', '13');
     if (productLine) params.set('productLine', productLine);
   } else {
+    params.set('period', 'month');
     params.set('months', span === 'year' ? '12' : '6');
-    if (productLine) params.set('productLine', productLine);
-    // Year paging. The API is expected to honor from=YYYY-MM-01. Until it does, the screen keeps the returned window.
     if (span === 'year' && from) params.set('from', from);
+    if (productLine) params.set('productLine', productLine);
   }
   return `/api/admin/crm/forecast?${params.toString()}`;
+}
+
+function quietFailure(status: number, json: unknown): string {
+  if (status === 400) return FORECAST_UNREADABLE;
+  const reason = json && typeof json === 'object' && typeof (json as { reason?: unknown }).reason === 'string'
+    ? (json as { reason: string }).reason
+    : '';
+  return reason.length > 0 && reason.length < 120 ? reason : 'Production forecast is not available yet.';
 }
 
 export async function loadWeeklyForecast(
   brand: string,
   productLine: ProductLine | null,
   fetchImpl: FetchLike = fetch,
-): Promise<{ state: 'pending' } | { state: 'ready'; cells: WeeklyForecastCell[]; notForecastable: number }> {
+): Promise<{ state: 'pending' } | { state: 'error'; reason: string } | { state: 'ready'; cells: WeeklyForecastCell[]; notForecastable: number }> {
   // WEEK ADAPTER.
   // GET /api/admin/crm/forecast?brand=&period=week&weeks=13[&productLine=]
-  // Response contract: { ok, configured, brand, period:'week', weeks, productLine, rates, cells:[{ isoWeek, weekStart, productLine, demand, capacityUnits|null, gap|null, status }], notForecastable, shorts }.
-  // Until that contract is on main, the monthly API ignores period=week. A body
-  // with no period:'week', or with no isoWeek cells, stays pending. The screen
-  // says "Weekly forecast coming soon". No weekly numbers are invented.
+  // Cells may include capacitySource: 'entered' | 'extended' | null. A week is
+  // extended when any part of it was carried forward. capacityUnits is null only
+  // when nothing earlier was entered. A 400 is a quiet failure. A 200 body that
+  // is not period:'week' with isoWeek cells stays "Weekly forecast coming soon".
   try {
     const res = await fetchImpl(forecastPath(brand, 'week', productLine), {
       headers: { 'x-cedargrowth-crm': '1' },
       credentials: 'same-origin',
       cache: 'no-store',
     });
-    const parsed = parseWeeklyForecast(await readBody(res));
-    if (!res.ok || !parsed) return { state: 'pending' };
+    const json = await readBody(res);
+    if (!res.ok) return { state: 'error', reason: quietFailure(res.status, json) };
+    const parsed = parseWeeklyForecast(json);
+    if (!parsed) return { state: 'pending' };
     return { state: 'ready', cells: parsed.cells, notForecastable: parsed.notForecastable };
   } catch {
-    return { state: 'pending' };
+    return { state: 'error', reason: 'Production forecast is not available yet.' };
   }
 }
 
@@ -527,9 +546,8 @@ export async function loadMonthlyForecast(
   fetchImpl: FetchLike = fetch,
   from?: string | null,
 ): Promise<{ state: 'ready'; cells: MonthlyForecastCell[]; notForecastable: number; honoredFrom: boolean | null } | { state: 'error'; reason: string }> {
-  // Month is ?months=6&productLine=. Year is ?months=12&productLine=. No period=year.
-  // The current API already serves this shape. productLine is ignored until the
-  // server filter lands, so the board still keeps only the requested line.
+  // Month is ?period=month&months=6&productLine=. Year is ?period=month&months=12&from=&productLine=.
+  // from is optional until the paging API lands. honoredFrom is true only when the response echoes it.
   const span: ForecastSpan = months === 12 ? 'year' : 'month';
   try {
     const res = await fetchImpl(forecastPath(brand, span, productLine, from), {
@@ -538,19 +556,14 @@ export async function loadMonthlyForecast(
       cache: 'no-store',
     });
     const json = await readBody(res);
+    if (!res.ok) return { state: 'error', reason: quietFailure(res.status, json) };
     const parsed = parseMonthlyForecast(json);
-    if (!res.ok || !parsed) {
-      const reason = json && typeof json === 'object' && typeof (json as { reason?: unknown }).reason === 'string'
-        ? (json as { reason: string }).reason
-        : 'Production forecast is not available yet.';
-      return { state: 'error', reason };
-    }
+    if (!parsed) return { state: 'error', reason: 'Production forecast is not available yet.' };
     const cells = productLine ? parsed.cells.filter((cell) => cell.productLine === productLine) : parsed.cells;
     const notForecastable = json && typeof json === 'object' && typeof (json as { notForecastable?: unknown }).notForecastable === 'number'
       ? (json as { notForecastable: number }).notForecastable
       : 0;
-    const present = [...new Set(cells.map((cell) => cell.month))];
-    const honoredFrom = from ? coversYearWindow(present, from) : null;
+    const honoredFrom = from ? echoedFrom(json, from) : null;
     return { state: 'ready', cells: from && honoredFrom ? sliceYearCells(cells, from) : cells, notForecastable, honoredFrom };
   } catch {
     return { state: 'error', reason: 'Production forecast is not available yet.' };
@@ -567,6 +580,7 @@ export async function loadForecastView(brand: string, span: ForecastSpan, produc
   if (span === 'week') {
     const weekly = await loadWeeklyForecast(brand, productLine, fetchImpl);
     if (weekly.state === 'pending') return { state: 'pending' };
+    if (weekly.state === 'error') return weekly;
     return { state: 'ready', board: buildWeeklyBoard(weekly.cells, productLine), notForecastable: weekly.notForecastable, honoredFrom: null };
   }
   const monthly = await loadMonthlyForecast(brand, monthsForSpan(span), productLine, fetchImpl, span === 'year' ? from : null);
