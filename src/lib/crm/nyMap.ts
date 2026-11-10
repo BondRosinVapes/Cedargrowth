@@ -41,6 +41,12 @@ const SCALE = 1000 / (maxX - minX);
 
 export const MAP_WIDTH = 1000;
 export const MAP_HEIGHT = (maxY - minY) * SCALE;
+export const CITY_MENU_LABEL = 'Search cities';
+export const COUNTY_MENU_LABEL = 'Search counties';
+
+export function wholeStateFrame(): { x: number; y: number; w: number; h: number } {
+  return { x: -24, y: -24, w: MAP_WIDTH + 48, h: MAP_HEIGHT + 48 };
+}
 
 export function projectNy(lon: number, lat: number): { x: number; y: number } {
   const point = mercator(lon, lat);
