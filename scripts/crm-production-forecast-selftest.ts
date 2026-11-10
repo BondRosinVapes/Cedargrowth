@@ -17,6 +17,7 @@ import {
   loadWeeklyForecast,
   parseMonthlyForecast,
   parseWeeklyForecast,
+  partialCapacitySentence,
   roundCapacityUnits,
   selectSpan,
   shiftMonth,
@@ -415,13 +416,18 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     && partialPoint.capacityUnits === null
     && partialPoint.known === 3
     && partialPoint.expected === 4
-    && partialPoint.carried === true
-    && partialHtml.includes('Capacity 15 carried forward for 3 of 4 lines. Pre-roll has no capacity entered.')
+    && partialPoint.carriedCount === 1
+    && partialHtml.includes('Capacity 15 for 3 of 4 lines, 1 carried forward. Pre-roll has no capacity entered.')
     && partialHtml.includes('Short') === false
     && partialHtml.includes('Tight') === false
     && partialHtml.includes('data-capacity-partial="true"')
     && partialHtml.includes('stroke-dasharray="3 4"'),
     'a partial overview total names the missing line and does not invent a shortfall',
+  );
+  assert(
+    partialCapacitySentence({ partialUnits: 15, known: 3, expected: 4, missing: ['Pre-roll'], carriedCount: 0 }) === 'Capacity 15 for 3 of 4 lines. Pre-roll has no capacity entered.'
+    && partialCapacitySentence({ partialUnits: 15, known: 3, expected: 4, missing: ['Pre-roll', 'Gummy'], carriedCount: 2 }) === 'Capacity 15 for 3 of 4 lines, 2 carried forward. Pre-roll and Gummy have no capacity entered.',
+    'a partial sentence omits a zero carry count and pluralizes the carried count',
   );
 
   const fullCells = lines.map((productLine) => {
@@ -451,6 +457,28 @@ export async function assertProductionForecast(assert: (ok: boolean, message: st
     && fullHtml.includes('Capacity 19, pro-rated from December. Short by 11 units.')
     && fullHtml.includes('of 4 lines') === false,
     'a complete overview total keeps the gap when every line has a number',
+  );
+  const carriedCells = lines.map((productLine) => ({
+    isoWeek: '2026-W50',
+    weekStart: '2026-12-07',
+    productLine,
+    demand: productLine === 'vape' ? 1 : 0,
+    capacityUnits: 10,
+    gap: productLine === 'vape' ? 9 : 10,
+    status: 'ok' as const,
+    capacitySource: 'extended' as const,
+    capacityFrom: '2026-11-01',
+  }));
+  const carriedBoard = buildWeeklyBoard(carriedCells, null, '2026-12-07');
+  const carriedHtml = renderToStaticMarkup(createElement(WeeklyOverview, {
+    brand: 'cedargrowth',
+    view: { state: 'ready', board: carriedBoard, notForecastable: 0 },
+    canEdit: false,
+  }));
+  assert(
+    chartSeries(carriedBoard)[0]?.extended === true
+    && carriedHtml.includes('Capacity 40, pro-rated from December. Carried forward from November. Spare room 39 units.'),
+    'a fully carried total keeps the spare room after the carried wording',
   );
 
   const statusCells = [

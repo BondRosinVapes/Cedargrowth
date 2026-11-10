@@ -213,11 +213,10 @@ function capacitySentence(column: ForecastColumn, weekly: boolean, partial?: Cha
   const amount = formatCapacity(column.capacityUnits);
   const lead = weekly ? `Capacity ${amount}, pro-rated from ${monthLong(column.start)}.` : `Capacity ${amount}.`;
   const carried = column.capacitySource === 'extended' ? ` ${carriedClause(column.carriedFrom)}` : '';
-  if (column.gap !== null && column.gap < 0) return `${lead} Short by ${formatUnits(Math.abs(column.gap))} units.${carried}`;
-  if (column.capacitySource === 'extended') return `${lead}${carried}`;
-  if (column.gap !== null && column.gap > 0 && column.demand !== null && column.demand >= column.capacityUnits * 0.9) return `${lead} Tight.`;
-  if (column.gap !== null && column.gap > 0) return `${lead} Spare room ${formatUnits(column.gap)} units.`;
-  return lead;
+  if (column.gap !== null && column.gap < 0) return `${lead}${carried} Short by ${formatUnits(Math.abs(column.gap))} units.`;
+  if (column.gap !== null && column.gap > 0 && column.demand !== null && column.demand >= column.capacityUnits * 0.9) return `${lead}${carried} Tight.`;
+  if (column.gap !== null && column.gap > 0) return `${lead}${carried} Spare room ${formatUnits(column.gap)} units.`;
+  return `${lead}${carried}`;
 }
 
 function dashboardTitle(span: ForecastSpan, view: ForecastView, yearFrom: string): string {
@@ -358,6 +357,9 @@ function ForecastChart({ board, held, onHold, label, height }: { board: Forecast
           <li className="flex items-center gap-2 font-mono text-specimen uppercase tracking-specimen text-tertiary"><span className="inline-block h-px w-8 bg-ink" aria-hidden="true" />Capacity</li>
           {columns.some((column) => column.capacitySource === 'extended') ? (
             <li className="flex items-center gap-2 font-mono text-specimen uppercase tracking-specimen text-tertiary"><span className="inline-block w-8 border-t border-dotted border-ink" aria-hidden="true" />Extended</li>
+          ) : null}
+          {columns.some((column) => column.partialUnits !== null) ? (
+            <li className="flex items-center gap-2 font-mono text-specimen uppercase tracking-specimen text-tertiary"><span className="inline-block w-8 border-t border-dashed border-tertiary" aria-hidden="true" />Partial</li>
           ) : null}
         </ul>
       ) : null}

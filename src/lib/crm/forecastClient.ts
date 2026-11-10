@@ -524,7 +524,7 @@ export type ChartPoint = {
   known: number;
   expected: number;
   missing: string[];
-  carried: boolean;
+  carriedCount: number;
 };
 
 // A complete column sums every line. A partial column keeps the known sum
@@ -548,21 +548,21 @@ export function chartSeries(board: ForecastBoard): ChartPoint[] {
       known: known.length,
       expected,
       missing,
-      carried: known.some((row) => row.point.capacitySource === 'extended'),
+      carriedCount: known.filter((row) => row.point.capacitySource === 'extended').length,
     };
   });
 }
 
-export function partialCapacitySentence(point: Pick<ChartPoint, 'partialUnits' | 'known' | 'expected' | 'missing' | 'carried'>): string {
+export function partialCapacitySentence(point: Pick<ChartPoint, 'partialUnits' | 'known' | 'expected' | 'missing' | 'carriedCount'>): string {
   const amount = formatCapacity(point.partialUnits);
-  const verb = point.carried ? 'carried forward' : 'entered';
+  const carried = point.carriedCount <= 0 ? '' : point.carriedCount === 1 ? ', 1 carried forward' : `, ${point.carriedCount} carried forward`;
   const names = point.missing.length <= 1
     ? (point.missing[0] ?? '')
     : point.missing.length === 2
       ? `${point.missing[0]} and ${point.missing[1]}`
       : `${point.missing.slice(0, -1).join(', ')} and ${point.missing[point.missing.length - 1]}`;
   const has = point.missing.length === 1 ? 'has' : 'have';
-  return `Capacity ${amount} ${verb} for ${point.known} of ${point.expected} lines. ${names} ${has} no capacity entered.`;
+  return `Capacity ${amount} for ${point.known} of ${point.expected} lines${carried}. ${names} ${has} no capacity entered.`;
 }
 
 export function heldIndex(columns: readonly ForecastColumn[], today = todayInNewYork()): number {
