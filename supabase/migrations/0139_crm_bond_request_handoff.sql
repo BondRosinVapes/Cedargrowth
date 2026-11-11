@@ -253,6 +253,7 @@ begin
   if v_lines < 1 or v_lines > 10 or v_units > 5 then
     return pg_catalog.jsonb_build_object('result', 'rejected:items');
   end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(v_id::text));
   select status into v_existing from public.crm_bond_request_handoffs where handoff_id = v_id;
   if found then
     return pg_catalog.jsonb_build_object('result', 'duplicate', 'status', v_existing);
@@ -282,17 +283,22 @@ begin
     values (v_account, 50);
     return pg_catalog.jsonb_build_object('result', 'rejected:rate');
   end if;
-  insert into public.crm_bond_request_handoffs (
-    handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items,
-    member_first_name, member_contact, contact_kind, visit_preference, share_consent_version,
-    source, source_event, status
-  ) values (
-    v_id, p_payload->>'bond_request_id', v_now, v_submitted, v_account, v_items,
-    v_name, v_contact, v_kind, v_visit, 'v1:898aa08ccea983db',
-    'bond-haus', v_event, 'queued'
-  );
-  insert into public.crm_bond_request_audit (handoff_id, status) values (v_id, 'queued');
-  return pg_catalog.jsonb_build_object('result', 'accepted', 'status', 'queued');
+  begin
+    insert into public.crm_bond_request_handoffs (
+      handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items,
+      member_first_name, member_contact, contact_kind, visit_preference, share_consent_version,
+      source, source_event, status
+    ) values (
+      v_id, p_payload->>'bond_request_id', v_now, v_submitted, v_account, v_items,
+      v_name, v_contact, v_kind, v_visit, 'v1:898aa08ccea983db',
+      'bond-haus', v_event, 'queued'
+    );
+    insert into public.crm_bond_request_audit (handoff_id, status) values (v_id, 'queued');
+    return pg_catalog.jsonb_build_object('result', 'accepted', 'status', 'queued');
+  exception when unique_violation then
+    select status into v_existing from public.crm_bond_request_handoffs where handoff_id = v_id;
+    return pg_catalog.jsonb_build_object('result', 'duplicate', 'status', v_existing);
+  end;
 end;
 $$;
 

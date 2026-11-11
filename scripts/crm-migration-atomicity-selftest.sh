@@ -407,10 +407,23 @@ if [ "$BAD_CONSENT" != "rejected:consent" ] || [ "$OK_HAND" != "accepted" ] || [
   exit 1
 fi
 echo 'ok: handoff sql rejects the other consent versions, replays one row, and hides the row from other roles'
+RACE_SQL="select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','83838383-8383-4383-8383-838383838383','bond_request_id','race','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';"
+sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "$RACE_SQL" >/tmp/crm-handoff-race-a.txt &
+sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "$RACE_SQL" >/tmp/crm-handoff-race-b.txt &
+wait || true
+RACE_A=$(tr -d '[:space:]' < /tmp/crm-handoff-race-a.txt)
+RACE_B=$(tr -d '[:space:]' < /tmp/crm-handoff-race-b.txt)
+RACE_ROWS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_handoffs where handoff_id = '83838383-8383-4383-8383-838383838383';")
+RACE_SORTED=$(printf '%s\n%s\n' "$RACE_A" "$RACE_B" | sort | tr '\n' ',')
+if [ "$RACE_SORTED" != "accepted,duplicate," ] || [ "$RACE_ROWS" != "1" ]; then
+  echo "FAIL: concurrent handoff replay ${RACE_A} ${RACE_B} rows=${RACE_ROWS}"
+  exit 1
+fi
+echo 'ok: a concurrent handoff replay keeps one row and returns duplicate'
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update public.crm_bond_request_handoffs set received_at = now() - interval '13 months' where handoff_id = '82828282-8282-4282-8282-828282828282'; insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, status) values ('82828282-8282-4282-8282-828282828282', 'A', 'v1:6321250367f61781', 'abc', 'sent'); insert into public.crm_bond_request_audit (handoff_id, status) values ('82828282-8282-4282-8282-828282828282', 'queued');" >/dev/null
 PURGE_HAND=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now())->>'purged';")
-LEFT_HAND=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_bond_request_handoffs) || ',' || (select count(*) from public.crm_bond_request_send_log) || ',' || (select count(*) from public.crm_bond_request_audit);")
-if [ "$PURGE_HAND" != "1" ] || [ "$LEFT_HAND" != "0,0,0" ]; then
+LEFT_HAND=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_bond_request_handoffs where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_send_log where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_audit where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_handoffs where handoff_id = '83838383-8383-4383-8383-838383838383');")
+if [ "$PURGE_HAND" != "1" ] || [ "$LEFT_HAND" != "0,0,0,1" ]; then
   echo "FAIL: handoff purge ${PURGE_HAND} ${LEFT_HAND}"
   exit 1
 fi

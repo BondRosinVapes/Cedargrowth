@@ -541,6 +541,15 @@ function privateHeadersEnv(options?: { env?: Record<string, string | undefined> 
   };
 }
 
+const handoffLocks = new Map<string, Promise<void>>();
+
+function withHandoffLock<T>(id: string, work: () => Promise<T>): Promise<T> {
+  const previous = handoffLocks.get(id) ?? Promise.resolve();
+  const run = previous.then(work, work);
+  handoffLocks.set(id, run.then(() => undefined, () => undefined));
+  return run;
+}
+
 export async function handleBondRequestHttp(
   request: Request,
   deps: HandoffDeps,
@@ -592,25 +601,27 @@ export async function handleBondRequestHttp(
   }
   const parsed = parseHandoff(parsedJson, nowMs);
   if (!parsed.ok) return { status: 400, body: { result: parsed.result } };
-  const account = await deps.accountById(parsed.value.dispensaryRef);
-  const saved = deps.remoteReceive
-    ? await deps.remoteReceive(parsedJson)
-    : receiveHandoff(deps.book, account, parsed.value, nowIso);
-  if (saved.result === 'rejected:rate') {
-    const recipient = env.CG_BOND_REQUEST_ALERT_TO;
-    const emails = (await deps.accounts()).map((item) => item.requestContactEmail || '').filter(Boolean);
-    if (alertRecipientAllowed(recipient, emails)) {
-      // The recipient is unset until Gary names one. A dispensary address is never used.
+  return withHandoffLock(parsed.value.handoffId, async () => {
+    const account = await deps.accountById(parsed.value.dispensaryRef);
+    const saved = deps.remoteReceive
+      ? await deps.remoteReceive(parsedJson)
+      : receiveHandoff(deps.book, account, parsed.value, nowIso);
+    if (saved.result === 'rejected:rate') {
+      const recipient = env.CG_BOND_REQUEST_ALERT_TO;
+      const emails = (await deps.accounts()).map((item) => item.requestContactEmail || '').filter(Boolean);
+      if (alertRecipientAllowed(recipient, emails)) {
+        // The recipient is unset until Gary names one. A dispensary address is never used.
+      }
+      return { status: 400, body: { result: 'rejected:rate' } };
     }
-    return { status: 400, body: { result: 'rejected:rate' } };
-  }
-  if (saved.result !== 'accepted' || !account) return { status: saved.result === 'duplicate' ? 200 : 400, body: saved };
-  if (!deps.book.rows.some((item) => item.handoffId === parsed.value.handoffId)) {
-    receiveHandoff(deps.book, account, parsed.value, nowIso);
-  }
-  const row = deps.book.rows.find((item) => item.handoffId === parsed.value.handoffId);
-  if (row) await dispatch(deps, row, account, gates, options?.provider || silentProvider(), nowIso, 'A');
-  return { status: 200, body: { result: 'accepted', status: row?.status || 'queued' } };
+    if (saved.result !== 'accepted' || !account) return { status: saved.result === 'duplicate' ? 200 : 400, body: saved };
+    if (!deps.book.rows.some((item) => item.handoffId === parsed.value.handoffId)) {
+      receiveHandoff(deps.book, account, parsed.value, nowIso);
+    }
+    const row = deps.book.rows.find((item) => item.handoffId === parsed.value.handoffId);
+    if (row) await dispatch(deps, row, account, gates, options?.provider || silentProvider(), nowIso, 'A');
+    return { status: 200, body: { result: 'accepted', status: row?.status || 'queued' } };
+  });
 }
 
 function silentProvider(): HandoffProvider {
