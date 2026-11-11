@@ -1,6 +1,7 @@
 // New York county shapes and pin placement. Coordinates stay in the browser.
 // The county file is a Census cartographic boundary, generalized from TIGER/Line.
 
+import { ACCOUNT_TYPE_LABELS } from './engine';
 import { DISTRIBUTOR_LABELS, type Distributor } from './distributor';
 import { COUNTY_REGION, NY_COUNTIES, regionForCounty, type NyRegion } from './nyRegions';
 import shapes from './nyCounties.json' with { type: 'json' };
@@ -120,27 +121,201 @@ export function placePins(pins: readonly MapPin[]): { placed: PlacedPin[]; rejec
   return { placed, rejected };
 }
 
-// Chips that would draw on top of each other share one count at their centroid.
-// The pins keep the coordinates placePins stored.
-export function declutterPins(pins: readonly PlacedPin[], gap: number): { singles: PlacedPin[]; clusters: PinCluster[] } {
-  const span = Math.max(gap, 0.001);
+// The merge gap stays this fraction of the view. It is not floored, so zoom still shrinks it.
+const MARKER_FRACTION = 1 / 90;
+const MERGE_MULTIPLE = 2.8;
+const MIN_MARK_PX = 8;
+const MIN_TARGET_PX = 24;
+const TOUCH_TARGET_PX = 44;
+const TOUCH_MAP_PX = 768;
+
+export function markerSpan(viewWidth: number): number {
+  return viewWidth * MARKER_FRACTION;
+}
+
+export function hitTargetPx(svgClientWidth: number): number {
+  if (svgClientWidth > 0 && svgClientWidth <= TOUCH_MAP_PX) return TOUCH_TARGET_PX;
+  return MIN_TARGET_PX;
+}
+
+export function mergeGap(viewWidth: number, svgClientWidth = 0): number {
+  const fractional = markerSpan(viewWidth) * MERGE_MULTIPLE;
+  if (svgClientWidth <= 0) return fractional;
+  const hitUnits = (hitTargetPx(svgClientWidth) / svgClientWidth) * viewWidth;
+  return Math.max(fractional, hitUnits);
+}
+
+// 0.0001 degrees of latitude near the city, about 11 m.
+export function storefrontSeparation(): number {
+  const origin = projectNy(-73.99, 40.75);
+  const shifted = projectNy(-73.99, 40.7501);
+  return Math.hypot(origin.x - shifted.x, origin.y - shifted.y);
+}
+
+// Closest pair of CedarGrowth pins with different coordinates, read on 11 Nov 2026.
+// 1040 pinned accounts, and no two share a coordinate. The value is map units.
+export const CLOSEST_DISTINCT_PIN_UNITS = 0.08783995047322923;
+
+const NARROW_SVG_PX = 284;
+
+export function minZoomWidth(wholeWidth: number, svgClientWidth = 0): number {
+  const rendered = svgClientWidth > 0 ? svgClientWidth : NARROW_SVG_PX;
+  const separation = storefrontSeparation();
+  const hit = hitTargetPx(rendered) / rendered;
+  const coefficient = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, hit);
+  return Math.min(wholeWidth, (separation * 0.95) / coefficient);
+}
+
+export function zoomInFactor(currentWidth: number, wholeWidth: number, svgClientWidth = 0): number {
+  const ratio = currentWidth / minZoomWidth(wholeWidth, svgClientWidth);
+  if (ratio > 80) return 2;
+  if (ratio > 12) return 2.5;
+  return 3;
+}
+
+export function zoomStops(wholeWidth: number, svgClientWidth = 0): number[] {
+  const floor = minZoomWidth(wholeWidth, svgClientWidth);
+  const stops = [wholeWidth];
+  let width = wholeWidth;
+  while (width > floor + 1e-6 && stops.length < 40) {
+    width = Math.max(floor, width / zoomInFactor(width, wholeWidth, svgClientWidth));
+    stops.push(width);
+  }
+  return stops;
+}
+
+export function zoomPresses(wholeWidth: number, svgClientWidth = 0): number {
+  return Math.max(0, zoomStops(wholeWidth, svgClientWidth).length - 1);
+}
+
+export function nextZoomView(
+  current: { x: number; y: number; w: number; h: number },
+  direction: 1 | -1,
+  whole: { w: number; h: number },
+  svgClientWidth = 0,
+): { x: number; y: number; w: number; h: number } {
+  const stops = zoomStops(whole.w, svgClientWidth);
+  let nearest = 0;
+  let best = Infinity;
+  stops.forEach((stop, index) => {
+    const delta = Math.abs(stop - current.w);
+    if (delta < best) { best = delta; nearest = index; }
+  });
+  const next = stops[Math.min(stops.length - 1, Math.max(0, nearest + direction))];
+  if (Math.abs(next - current.w) < 1e-6) return current;
+  const h = next * (whole.h / whole.w);
+  const cx = current.x + current.w / 2;
+  const cy = current.y + current.h / 2;
+  return { x: cx - next / 2, y: cy - h / 2, w: next, h };
+}
+
+export function clusterFrame(points: readonly { x: number; y: number }[], whole: { x: number; y: number; w: number; h: number }, svgClientWidth = 0): { x: number; y: number; w: number; h: number } {
+  const floor = minZoomWidth(whole.w, svgClientWidth);
+  const left = Math.min(...points.map((point) => point.x));
+  const right = Math.max(...points.map((point) => point.x));
+  const top = Math.min(...points.map((point) => point.y));
+  const bottom = Math.max(...points.map((point) => point.y));
+  const span = Math.max(right - left, bottom - top);
+  const w = Math.min(whole.w, Math.max(span * 1.8, floor));
+  const h = w * (whole.h / whole.w);
+  return { x: (left + right) / 2 - w / 2, y: (top + bottom) / 2 - h / 2, w, h };
+}
+
+// Visible size and hit target in CSS pixels. Touch widths use a 44px target.
+export function markerPixels(viewWidth: number, svgClientWidth: number): { visible: number; target: number } {
+  const fractional = svgClientWidth > 0 ? svgClientWidth * MARKER_FRACTION : markerSpan(viewWidth);
+  const visible = Math.max(fractional, MIN_MARK_PX);
+  return { visible, target: Math.max(visible, hitTargetPx(svgClientWidth)) };
+}
+
+export function markerUnits(viewWidth: number, svgClientWidth: number): { visible: number; target: number } {
+  if (svgClientWidth <= 0 || viewWidth <= 0) {
+    const mark = markerSpan(viewWidth);
+    return { visible: mark, target: mark };
+  }
+  const scale = svgClientWidth / viewWidth;
+  const pixels = markerPixels(viewWidth, svgClientWidth);
+  return { visible: pixels.visible / scale, target: pixels.target / scale };
+}
+
+export function clusterMembers(pins: readonly MapPin[]): { id: string; name: string; place: string }[] {
+  return pins.map((pin) => ({
+    id: pin.id,
+    name: pin.displayName,
+    place: pin.city?.trim() || pin.county?.trim() || 'City not set',
+  }));
+}
+
+export type HitBox = { x: number; y: number; w: number; h: number };
+
+export function boxesIntersect(a: HitBox, b: HitBox): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+export function groupHitBox(count: number, x: number, y: number, viewWidth: number, svgClientWidth: number): HitBox {
+  const units = markerUnits(viewWidth, svgClientWidth);
+  if (count <= 1) {
+    const hit = Math.max(units.visible, units.target);
+    return { x: x - hit / 2, y: y - hit / 2, w: hit, h: hit };
+  }
+  const label = String(count);
+  const textSize = units.visible * 0.5;
+  const chipW = Math.max(units.visible * 1.8, label.length * textSize * 0.65 + textSize * 0.5);
+  const chipH = Math.max(textSize * 1.8, units.visible);
+  const hitW = Math.max(chipW, units.target);
+  const hitH = Math.max(chipH, units.target);
+  return { x: x - hitW / 2, y: y - hitH / 2, w: hitW, h: hitH };
+}
+
+type PinGroup = { pins: PlacedPin[]; x: number; y: number };
+
+function centroidOf(pins: readonly PlacedPin[]): { x: number; y: number } {
+  return {
+    x: pins.reduce((sum, pin) => sum + pin.x, 0) / pins.length,
+    y: pins.reduce((sum, pin) => sum + pin.y, 0) / pins.length,
+  };
+}
+
+// A chip starts with pins inside the gap of its seed. Groups whose hit rectangles still meet are joined until none overlap.
+// The pins keep the coordinates placePins stored. The chip is drawn at their centroid.
+export function declutterPins(pins: readonly PlacedPin[], gap: number, screen?: { viewWidth: number; svgClientWidth: number }): { singles: PlacedPin[]; clusters: PinCluster[] } {
+  const span = Math.max(gap, 0);
   const spanSq = span * span;
-  type Group = { pins: PlacedPin[]; x: number; y: number };
-  let groups: Group[] = pins.map((pin) => ({ pins: [pin], x: pin.x, y: pin.y }));
-  let merged = true;
-  while (merged) {
-    merged = false;
-    for (let i = 0; i < groups.length && !merged; i += 1) {
-      for (let j = i + 1; j < groups.length; j += 1) {
-        const dx = groups[i].x - groups[j].x;
-        const dy = groups[i].y - groups[j].y;
-        if (dx * dx + dy * dy >= spanSq) continue;
-        const members = groups[i].pins.concat(groups[j].pins);
-        const x = members.reduce((sum, pin) => sum + pin.x, 0) / members.length;
-        const y = members.reduce((sum, pin) => sum + pin.y, 0) / members.length;
-        groups = [...groups.slice(0, i), ...groups.slice(i + 1, j), ...groups.slice(j + 1), { pins: members, x, y }];
-        merged = true;
-        break;
+  const pending = [...pins];
+  const groups: PinGroup[] = [];
+  while (pending.length) {
+    const seed = pending[0];
+    const members: PlacedPin[] = [];
+    const rest: PlacedPin[] = [];
+    for (const pin of pending) {
+      const dx = pin.x - seed.x;
+      const dy = pin.y - seed.y;
+      if (dx * dx + dy * dy <= spanSq) members.push(pin);
+      else rest.push(pin);
+    }
+    pending.length = 0;
+    pending.push(...rest);
+    const center = centroidOf(members);
+    groups.push({ pins: members, x: center.x, y: center.y });
+  }
+  if (screen && screen.svgClientWidth > 0 && screen.viewWidth > 0) {
+    let changed = true;
+    let guard = 0;
+    while (changed && guard <= pins.length) {
+      changed = false;
+      guard += 1;
+      for (let i = 0; i < groups.length && !changed; i += 1) {
+        for (let j = i + 1; j < groups.length; j += 1) {
+          const left = groupHitBox(groups[i].pins.length, groups[i].x, groups[i].y, screen.viewWidth, screen.svgClientWidth);
+          const right = groupHitBox(groups[j].pins.length, groups[j].x, groups[j].y, screen.viewWidth, screen.svgClientWidth);
+          if (!boxesIntersect(left, right)) continue;
+          const members = groups[i].pins.concat(groups[j].pins);
+          const center = centroidOf(members);
+          groups.splice(j, 1);
+          groups.splice(i, 1, { pins: members, x: center.x, y: center.y });
+          changed = true;
+          break;
+        }
       }
     }
   }
@@ -151,6 +326,46 @@ export function declutterPins(pins: readonly PlacedPin[], gap: number): { single
     else clusters.push({ x: group.x, y: group.y, count: group.pins.length, pins: group.pins });
   }
   return { singles, clusters };
+}
+
+export function boundaryPins(): PlacedPin[] {
+  const pins: PlacedPin[] = [];
+  for (const county of file.counties) {
+    for (const ring of county.rings) {
+      for (const [lon, lat] of ring) {
+        const point = projectNy(lon, lat);
+        pins.push({
+          id: `bound-${pins.length}`,
+          displayName: county.name,
+          licenseRef: null,
+          licenseExpiry: null,
+          ocmStatus: null,
+          city: null,
+          county: county.name,
+          assignedRep: null,
+          distributor: null,
+          contactCount: 0,
+          latitude: lat,
+          longitude: lon,
+          x: point.x,
+          y: point.y,
+        });
+      }
+    }
+  }
+  return pins;
+}
+
+export type HitMarker = { id: string; x: number; y: number; halfW: number; halfH: number };
+
+export function hitAt(markers: readonly HitMarker[], x: number, y: number): string | null {
+  let best: { id: string; dist: number } | null = null;
+  for (const marker of markers) {
+    if (Math.abs(x - marker.x) > marker.halfW || Math.abs(y - marker.y) > marker.halfH) continue;
+    const dist = Math.hypot(x - marker.x, y - marker.y);
+    if (!best || dist < best.dist) best = { id: marker.id, dist };
+  }
+  return best?.id ?? null;
 }
 
 export function clusterPins(pins: readonly PlacedPin[], cell: number): { singles: PlacedPin[]; clusters: PinCluster[] } {
@@ -173,6 +388,56 @@ export function clusterPins(pins: readonly PlacedPin[], cell: number): { singles
     }
   }
   return { singles, clusters };
+}
+
+export type DispensaryContact = { id: string; name: string; title?: string | null; email?: string | null; phone?: string | null; preference?: string | null };
+
+export type DispensaryRecord = {
+  displayName?: string | null;
+  licenseRef?: string | null;
+  accountType?: string | null;
+  ocmStatus?: 'verified' | 'unverified' | null;
+  street?: string | null;
+  city?: string | null;
+  postalCode?: string | null;
+  county?: string | null;
+  status?: string | null;
+  assignedRep?: string | null;
+};
+
+const STATUS_LABEL: Record<string, string> = { prospect: 'Prospect', active: 'Active', paused: 'Paused', closed: 'Closed' };
+
+function stored(value: string | null | undefined): string | null {
+  const text = value?.trim();
+  return text ? text : null;
+}
+
+export function dispensaryCard(account: DispensaryRecord, contacts: readonly DispensaryContact[]): { name: string; lines: { label: string; value: string }[]; contacts: { id: string; name: string; title: string | null; email: string | null; phone: string | null; preference: 'unspecified' | 'store_only' | 'do_not_contact' }[] } {
+  const lines: { label: string; value: string }[] = [];
+  const license = stored(account.licenseRef);
+  if (license) lines.push({ label: 'License', value: license });
+  const type = account.accountType && (ACCOUNT_TYPE_LABELS as Record<string, string>)[account.accountType];
+  if (type) lines.push({ label: 'Account type', value: type });
+  if (account.ocmStatus === 'verified' || account.ocmStatus === 'unverified') lines.push({ label: 'OCM status', value: account.ocmStatus === 'verified' ? 'Verified' : 'Unverified' });
+  const street = stored(account.street);
+  if (street) lines.push({ label: 'Street', value: street });
+  const city = stored(account.city);
+  if (city) lines.push({ label: 'City', value: city });
+  const zip = stored(account.postalCode);
+  if (zip) lines.push({ label: 'ZIP', value: zip });
+  const county = stored(account.county);
+  if (county) lines.push({ label: 'County', value: county });
+  const status = account.status ? STATUS_LABEL[account.status] : undefined;
+  if (status) lines.push({ label: 'Status', value: status });
+  const rep = stored(account.assignedRep);
+  if (rep) lines.push({ label: 'Rep', value: rep });
+  const people = contacts.flatMap((row) => {
+    const name = stored(row.name);
+    if (!name) return [];
+    const preference: 'unspecified' | 'store_only' | 'do_not_contact' = row.preference === 'store_only' || row.preference === 'do_not_contact' ? row.preference : 'unspecified';
+    return [{ id: row.id, name, title: stored(row.title), email: stored(row.email), phone: stored(row.phone), preference }];
+  });
+  return { name: stored(account.displayName) || 'Dispensary', lines, contacts: people };
 }
 
 export function pinCard(pin: MapPin): { label: string; value: string; mono?: boolean }[] {

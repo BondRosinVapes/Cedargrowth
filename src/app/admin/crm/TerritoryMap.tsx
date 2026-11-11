@@ -73,7 +73,7 @@ export function TerritoryMap({ brand, canAssign, territory, onSelect, onOpenAcco
       </div>
       <p className="text-caption text-tertiary">{metric === 'invoiced' ? (data?.invoicedLabel || 'No Nabis data imported.') : metric === 'pipeline' ? 'Amounts are forecast.' : 'Region comes from the account county.'}</p>
       {notice ? <p role="status" className="text-body-m text-primary">{notice}</p> : null}
-      <NyDispensaryMap pins={data?.pins || []} unmapped={data?.unmapped ?? 0} onOpenAccount={onOpenAccount} />
+      <NyDispensaryMap pins={data?.pins || []} unmapped={data?.unmapped ?? 0} brand={brand} onOpenAccount={onOpenAccount} />
       <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         {(data?.tiles || NY_REGIONS.map((region) => ({ region, value: null, text: 'no data yet', unassigned: true, rep: null }))).map((tile) => (
           <li key={tile.region}>

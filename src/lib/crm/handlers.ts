@@ -31,6 +31,7 @@ import {
   type InsightSnapshot,
   type TaskStatus,
 } from './engine';
+import { cardAccountFields, cardContactFields } from './pinCard';
 import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
@@ -183,6 +184,17 @@ export async function handleAccountCollection(ctx: CrmContext, method: 'GET' | '
   return { status: 201, body: { ok: true, configured: true, brand: auth.brand, account: created.value } };
 }
 
+export async function handleAccountRead(ctx: CrmContext, id: string): Promise<CrmResult> {
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  if (!parseUuid(id)) return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
+  const row = await ctx.store.readAccount(auth.brand, id);
+  if (row.state !== 'ok') return storageBody(auth.brand, row.state === 'rejected' || row.state === 'missing' ? 'unavailable' : row.state);
+  if (!row.value || row.value.brand !== auth.brand) return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
+  return { status: 200, body: { ok: true, configured: true, brand: auth.brand, account: cardAccountFields(row.value) } };
+}
+
 export async function handleAccountUpdate(ctx: CrmContext, id: string): Promise<CrmResult> {
   const body = await readBody(ctx.request);
   if (isCrmResult(body)) return body;
@@ -225,7 +237,8 @@ export async function handleContactCollection(ctx: CrmContext, method: 'GET' | '
     if (accountId && !parseUuid(accountId)) return { status: 400, body: { ok: false, reason: 'Account is not in this brand.' } };
     const rows = await ctx.store.listContacts(auth.brand, accountId);
     if (rows.state !== 'ok') return storageBody(auth.brand, rows.state === 'rejected' || rows.state === 'missing' ? 'unavailable' : rows.state);
-    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, contacts: rows.value } };
+    const card = url.searchParams.get('card') === '1';
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, contacts: card ? rows.value.map(cardContactFields) : rows.value } };
   }
   const body = await readBody(ctx.request);
   if (isCrmResult(body)) return body;
