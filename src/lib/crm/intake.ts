@@ -29,12 +29,14 @@ export const INTAKE_KEYS = [
   'message',
   'consent_version',
   'source_route',
+  'source_event',
 ] as const;
 
-const OPTIONAL = new Set(['contact_phone', 'license_number', 'county', 'message']);
+const OPTIONAL = new Set(['license_number', 'county', 'message', 'source_event']);
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const EVENT_RE = /^[a-z0-9-]{1,64}$/;
 const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
-const CONSENT_RE = /^v1:[0-9a-f]{16}$/;
+export const DISPENSARY_CONSENT_VERSION = 'v1:46652a17994f78d1';
 
 export type IntakeLead = {
   inquiryId: string;
@@ -42,7 +44,7 @@ export type IntakeLead = {
   businessName: string;
   contactName: string;
   contactEmail: string;
-  contactPhone: string | null;
+  contactPhone: string;
   licenseNumber: string | null;
   street: string;
   city: string;
@@ -51,7 +53,8 @@ export type IntakeLead = {
   county: string | null;
   message: string | null;
   consentVersion: string;
-  sourceRoute: '/order';
+  sourceRoute: '/order' | '/card';
+  sourceEvent: string | null;
 };
 
 export function intakeSecrets(env: Record<string, string | undefined>): { primary: string | null; next: string | null } {
@@ -111,8 +114,8 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
   if (!contactName) fields.push('contact_name');
   const contactEmail = typeof record.contact_email === 'string' && record.contact_email.length <= 200 && EMAIL_RE.test(record.contact_email) ? record.contact_email : null;
   if (!contactEmail) fields.push('contact_email');
-  const contactPhone = optionalText(record.contact_phone, 40);
-  if (contactPhone === 'invalid') fields.push('contact_phone');
+  const contactPhone = parseDispensaryPhone(record.contact_phone);
+  if (!contactPhone) fields.push('contact_phone');
   const licenseNumber = optionalText(record.license_number, 40);
   if (licenseNumber === 'invalid') fields.push('license_number');
   const street = text(record.street, 1, 120);
@@ -126,10 +129,20 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
   if (!county.ok) fields.push('county');
   const message = optionalText(record.message, 500);
   if (message === 'invalid') fields.push('message');
-  const consentVersion = typeof record.consent_version === 'string' && CONSENT_RE.test(record.consent_version) ? record.consent_version : null;
+  const consentVersion = record.consent_version === DISPENSARY_CONSENT_VERSION ? DISPENSARY_CONSENT_VERSION : null;
   if (!consentVersion) fields.push('consent_version');
-  if (record.source_route !== '/order') fields.push('source_route');
-  if (fields.length || !inquiryId || !submittedAt || !businessName || !contactName || !contactEmail || !street || !city || !postalCode || !consentVersion || !county.ok) {
+  const sourceRoute = record.source_route === '/order' || record.source_route === '/card' ? record.source_route : null;
+  if (!sourceRoute) fields.push('source_route');
+  const eventKey = Object.prototype.hasOwnProperty.call(record, 'source_event');
+  const eventRaw = record.source_event;
+  let sourceEvent: string | null = null;
+  if (sourceRoute === '/card') {
+    sourceEvent = typeof eventRaw === 'string' && EVENT_RE.test(eventRaw) ? eventRaw : null;
+    if (!sourceEvent) fields.push('source_event');
+  } else if (sourceRoute === '/order' && eventKey && eventRaw !== null && eventRaw !== undefined) {
+    fields.push('source_event');
+  }
+  if (fields.length || !inquiryId || !submittedAt || !businessName || !contactName || !contactEmail || !contactPhone || !street || !city || !postalCode || !consentVersion || !county.ok || !sourceRoute || (sourceRoute === '/card' && !sourceEvent)) {
     return { ok: false, fields };
   }
   return {
@@ -140,7 +153,7 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
       businessName,
       contactName,
       contactEmail,
-      contactPhone: contactPhone || null,
+      contactPhone,
       licenseNumber: licenseNumber || null,
       street,
       city,
@@ -149,9 +162,22 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
       county: county.county,
       message: message ? intakeMessageText(message) : null,
       consentVersion,
-      sourceRoute: '/order',
+      sourceRoute,
+      sourceEvent,
     },
   };
+}
+
+function parseDispensaryPhone(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 40) return null;
+  if (/(?:ext\.?|extension|(?:^|\s)x)\s*\d*\s*$/i.test(trimmed)) return null;
+  if (!/^[+0-9().\s-]+$/.test(trimmed)) return null;
+  let digits = trimmed.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
+  if (digits.length !== 10) return null;
+  return `+1${digits}`;
 }
 
 function text(value: unknown, min: number, max: number): string | null {

@@ -3,7 +3,7 @@
 // Run: node --experimental-strip-types scripts/crm-selftest.ts
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -102,6 +102,7 @@ import {
   handleEmailStatusRefresh,
   handleTerritoryAssign,
   handleBondIntake,
+  handleSupplierIntake,
   handleAgentIntake,
   handleIntakeDelete,
   handleIntakePurge,
@@ -738,7 +739,8 @@ class MemoryCrm implements CrmStore {
     this.dismissals.push(row);
     return { state: 'ok' as const, value: row };
   }
-  intakeLogs: { inquiryId: string; receivedAt: string; result: 'created' | 'possible_duplicate' }[] = [];
+  intakeLogs: { inquiryId: string; receivedAt: string; result: 'created' | 'possible_duplicate'; sourceRoute: '/order' | '/card'; sourceEvent: string | null }[] = [];
+  supplierInquiries: { inquiryId: string; submittedAt: string; businessName: string; tradeName: string | null; supplyType: string; licenseNumber: string | null; contactName: string; contactRole: string | null; contactEmail: string; contactPhone: string; contactPhoneExt: string | null; county: string; message: string | null; consentVersion: string; sourceRoute: '/card'; sourceEvent: string; repliedAt: string | null }[] = [];
   intakeDeletions: { id: string; reason: 'named' | 'retention'; contactName: 'bond' }[] = [];
   async receiveBondInquiry(lead: IntakeLead, receivedAt: string) {
     if (this.intakeLogs.some((row) => row.inquiryId === lead.inquiryId)) return { state: 'ok' as const, value: { duplicate: true } };
@@ -754,16 +756,39 @@ class MemoryCrm implements CrmStore {
       this.notes.push({ id: this.id(), publicId: 'test-only:note', brand: 'bond', accountId: matched.id, body: duplicateNote(lead.message), actor: 'bond-intake', createdAt: receivedAt, sourceInquiryId: lead.inquiryId });
       this.tasks.push({ id: this.id(), publicId: 'test-only:task', brand: 'bond', accountId: matched.id, opportunityId: null, title: 'Possible duplicate', dueOn: null, status: 'open', notes: 'possible duplicate', ownerActor: 'bond-intake', completedAt: null, sourceInquiryId: lead.inquiryId });
       this.activity.push({ id: this.id(), publicId: 'test-only:activity', brand: 'bond', accountId: matched.id, kind: 'inquiry_received', summary: 'Inquiry received', actor: 'bond-intake', createdAt: receivedAt });
-      this.intakeLogs.push({ inquiryId: lead.inquiryId, receivedAt, result: 'possible_duplicate' });
+      this.intakeLogs.push({ inquiryId: lead.inquiryId, receivedAt, result: 'possible_duplicate', sourceRoute: lead.sourceRoute, sourceEvent: lead.sourceEvent });
       return { state: 'ok' as const, value: { duplicate: false } };
     }
     const accountId = this.id();
-    this.accounts.push({ id: accountId, publicId: 'test-only:bond:account', brand: 'bond', displayName: lead.businessName, status: 'prospect', city: lead.city, county: lead.county, notes: '', licenseRef: lead.licenseNumber, facilityRef: null, licenseJurisdiction: null, licenseExpiry: null, assignedRep: null, accountType: null, leadSource: 'bond_inquiry', street: lead.street, state: 'NY', postalCode: lead.postalCode, consentVersion: lead.consentVersion, consentReceivedAt: receivedAt, intakeSubmittedAt: lead.submittedAt, ocmStatus: 'unverified', recordMarker: marker ? 'test' : null, sourceInquiryId: lead.inquiryId, distributor: null, distributorAccountRef: null, createdAt: receivedAt, updatedAt: receivedAt, createdBy: 'bond-intake', updatedBy: 'bond-intake' });
+    this.accounts.push({ id: accountId, publicId: 'test-only:bond:account', brand: 'bond', displayName: lead.businessName, status: 'prospect', city: lead.city, county: lead.county, notes: '', licenseRef: lead.licenseNumber, facilityRef: null, licenseJurisdiction: null, licenseExpiry: null, assignedRep: null, accountType: null, leadSource: 'bond_inquiry', street: lead.street, state: 'NY', postalCode: lead.postalCode, consentVersion: lead.consentVersion, consentReceivedAt: receivedAt, intakeSubmittedAt: lead.submittedAt, ocmStatus: 'unverified', recordMarker: marker ? 'test' : null, sourceInquiryId: lead.inquiryId, sourceEvent: lead.sourceEvent, distributor: null, distributorAccountRef: null, createdAt: receivedAt, updatedAt: receivedAt, createdBy: 'bond-intake', updatedBy: 'bond-intake' });
     this.contacts.push({ id: this.id(), publicId: 'test-only:contact', brand: 'bond', accountId, name: lead.contactName, title: null, email: lead.contactEmail, phone: lead.contactPhone, notes: '', preference: 'unspecified', createdAt: receivedAt, updatedAt: receivedAt });
     this.opportunities.push({ id: this.id(), publicId: 'test-only:opportunity', brand: 'bond', accountId, name: lead.businessName, stage: 'lead', forecastCents: null, amountKind: 'forecast', invoicedCents: null, paidCents: null, expectedCloseOn: null, notes: '', lossReason: null, nextAction: null, nextActionOn: null, productLine: null, quantityUnits: null, updatedAt: receivedAt, sourceInquiryId: lead.inquiryId });
     if (lead.message) this.notes.push({ id: this.id(), publicId: 'test-only:note', brand: 'bond', accountId, body: intakeMessageText(lead.message), actor: 'bond-intake', createdAt: receivedAt, sourceInquiryId: lead.inquiryId });
     this.activity.push({ id: this.id(), publicId: 'test-only:activity', brand: 'bond', accountId, kind: 'inquiry_received', summary: 'Inquiry received', actor: 'bond-intake', createdAt: receivedAt });
-    this.intakeLogs.push({ inquiryId: lead.inquiryId, receivedAt, result: 'created' });
+    this.intakeLogs.push({ inquiryId: lead.inquiryId, receivedAt, result: 'created', sourceRoute: lead.sourceRoute, sourceEvent: lead.sourceEvent });
+    return { state: 'ok' as const, value: { duplicate: false } };
+  }
+  async receiveSupplierInquiry(lead: import('../src/lib/crm/supplierIntake.ts').SupplierLead, _receivedAt: string) {
+    if (this.supplierInquiries.some((row) => row.inquiryId === lead.inquiryId)) return { state: 'ok' as const, value: { duplicate: true } };
+    this.supplierInquiries.push({
+      inquiryId: lead.inquiryId,
+      submittedAt: lead.submittedAt,
+      businessName: lead.businessName,
+      tradeName: lead.tradeName,
+      supplyType: lead.supplyType,
+      licenseNumber: lead.licenseNumber,
+      contactName: lead.contactName,
+      contactRole: lead.contactRole,
+      contactEmail: lead.contactEmail,
+      contactPhone: lead.contactPhone,
+      contactPhoneExt: lead.contactPhoneExt,
+      county: lead.county,
+      message: lead.message,
+      consentVersion: lead.consentVersion,
+      sourceRoute: '/card',
+      sourceEvent: lead.sourceEvent,
+      repliedAt: null,
+    });
     return { state: 'ok' as const, value: { duplicate: false } };
   }
   async deleteBondInquiry(inquiryId: string) {
@@ -1307,6 +1332,7 @@ function intakePayload(overrides: Record<string, unknown> = {}) {
     business_name: 'North Store',
     contact_name: 'Ada Buyer',
     contact_email: 'ada@northstore.test',
+    contact_phone: '(716) 555-0100',
     street: '1 Main',
     city: 'Buffalo',
     state: 'NY',
@@ -1314,7 +1340,7 @@ function intakePayload(overrides: Record<string, unknown> = {}) {
     county: 'Erie',
     license_number: 'OCM-1',
     message: 'Hello plain',
-    consent_version: 'v1:0123456789abcdef',
+    consent_version: 'v1:46652a17994f78d1',
     source_route: '/order',
     ...overrides,
   };
@@ -1344,7 +1370,9 @@ const rotatedAccount = intakeStore.accounts.find((row) => row.brand === 'bond' &
 assert(intakeUnconfigured.status === 503 && rotated.status === 200 && rotated.body.duplicate !== true, 'a missing intake secret does nothing');
 assert(badSig.status === 401 && stale.status === 401 && JSON.stringify(badSig.body) === '{"ok":false}' && intakeStore.intakeLogs.length === 1, 'a bad or stale signature stores nothing');
 assert(rotated.status === 200 && rotated.body.ok === true && replay.status === 200 && replay.body.duplicate === true && intakeStore.accounts.filter((row) => row.brand === 'bond').length === 1, 'the rotation secret is accepted and a replay creates nothing');
-assert(rotatedAccount?.status === 'prospect' && rotatedAccount.leadSource === 'bond_inquiry' && rotatedAccount.county === 'Erie' && rotatedAccount.ocmStatus === 'unverified' && rotatedAccount.consentVersion === 'v1:0123456789abcdef' && regionForCounty(rotatedAccount.county) === 'Western New York', 'one bond lead keeps the county and stays unverified');
+assert(rotatedAccount?.status === 'prospect' && rotatedAccount.leadSource === 'bond_inquiry' && rotatedAccount.county === 'Erie' && rotatedAccount.ocmStatus === 'unverified' && rotatedAccount.consentVersion === 'v1:46652a17994f78d1' && regionForCounty(rotatedAccount.county) === 'Western New York', 'one bond lead keeps the county and stays unverified');
+const northContact = intakeStore.contacts.find((row) => row.accountId === rotatedAccount?.id);
+assert(northContact?.phone === '+17165550100', 'an order lead stores the work phone as E.164');
 const leadOpp = intakeStore.opportunities.find((row) => row.accountId === rotatedAccount?.id);
 const leadNote = intakeStore.notes.find((row) => row.accountId === rotatedAccount?.id);
 const leadActivity = intakeStore.activity.find((row) => row.accountId === rotatedAccount?.id && row.kind === 'inquiry_received');
@@ -1363,8 +1391,10 @@ const badState = await handleBondIntake(intakeStore, intakeRequest(intakePayload
 const badCounty = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', county: 'Brooklyn' })), { nowMs: intakeNow, env: intakeEnv });
 const longMessage = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', message: 'm'.repeat(501) })), { nowMs: intakeNow, env: intakeEnv });
 const badConsent = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', consent_version: 'v1:ABCDEF0123456789' })), { nowMs: intakeNow, env: intakeEnv });
+const supplierConsentOnCard = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '27272727-2727-4272-8272-272727272727', business_name: 'Supplier Consent Shop', license_number: 'CARD-7', contact_email: 'mix@card.test', source_route: '/card', source_event: 'nyc-2026', consent_version: 'v1:56b70a071c4714eb' })), { nowMs: intakeNow, env: intakeEnv });
+const otherConsent = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '28282828-2828-4282-8282-282828282828', business_name: 'Other Consent Shop', license_number: 'CARD-8', contact_email: 'other@card.test', consent_version: 'v1:0123456789abcdef' })), { nowMs: intakeNow, env: intakeEnv });
 const badKey = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '12121212-1212-4121-8121-121212121212' }), { headers: { 'idempotency-key': '99999999-9999-4999-8999-999999999999' } }), { nowMs: intakeNow, env: intakeEnv });
-assert(oversize.status === 413 && badState.status === 400 && badCounty.status === 400 && longMessage.status === 400 && badConsent.status === 400 && badKey.status === 400 && intakeStore.intakeLogs.length === 1, 'oversize, state, county, message, consent, and idempotency failures store no body');
+assert(oversize.status === 413 && badState.status === 400 && badCounty.status === 400 && longMessage.status === 400 && badConsent.status === 400 && supplierConsentOnCard.status === 400 && otherConsent.status === 400 && badKey.status === 400 && intakeStore.intakeLogs.length === 1 && intakeStore.accounts.every((row) => row.displayName !== 'Supplier Consent Shop' && row.displayName !== 'Other Consent Shop'), 'oversize, state, county, message, consent, and idempotency failures store no body');
 await intakeStore.createAccount('cedargrowth', 'test-only', { displayName: 'Cedar Twin', status: 'prospect', city: 'Buffalo', notes: '', licenseRef: 'OCM-9' });
 const cedarId = intakeStore.accounts.find((row) => row.brand === 'cedargrowth')?.id || '';
 await intakeStore.createContact('cedargrowth', 'test-only', { accountId: cedarId, name: 'Cedar Buyer', email: 'twin@cedar.test' });
@@ -1397,9 +1427,138 @@ const keptLog = intakeStore.intakeLogs.find((row) => row.inquiryId === keptAccou
 if (keptLog) keptLog.receivedAt = '2024-01-01T00:00:00Z';
 const purged = await handleIntakePurge({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/intake?action=purge', { brand: 'bond' }), store: intakeStore });
 assert(oldLead.status === 200 && keptLead.status === 200 && purged.status === 200 && purged.body.purged === 1 && intakeStore.accounts.every((row) => row.displayName !== 'Old Shop') && intakeStore.accounts.some((row) => row.displayName === 'Kept Shop'), 'purge deletes an unqualified lead and keeps a verified one');
+const cardLead = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '21212121-2121-4121-8121-212121212121', business_name: 'Card Shop', license_number: 'CARD-1', contact_email: 'eve@card.test', source_route: '/card', source_event: 'nyc-2026' })), { nowMs: intakeNow, env: intakeEnv });
+const cardAccount = intakeStore.accounts.find((row) => row.displayName === 'Card Shop');
+const cardLog = intakeStore.intakeLogs.find((row) => row.inquiryId === '21212121-2121-4121-8121-212121212121');
+const cardMissing = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '22222222-2222-4222-8222-222222222222', business_name: 'No Event', license_number: 'CARD-2', contact_email: 'no@event.test', source_route: '/card' })), { nowMs: intakeNow, env: intakeEnv });
+const orderEvent = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '23232323-2323-4232-8232-232323232323', business_name: 'Order Event', license_number: 'CARD-3', contact_email: 'order@event.test', source_route: '/order', source_event: 'nyc-2026' })), { nowMs: intakeNow, env: intakeEnv });
+const orderNull = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '24242424-2424-4242-8242-242424242424', business_name: 'Order Null', license_number: 'CARD-4', contact_email: 'null@event.test', source_event: null })), { nowMs: intakeNow, env: intakeEnv });
+const badEvent = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '25252525-2525-4252-8252-252525252525', business_name: 'Bad Event', license_number: 'CARD-5', contact_email: 'bad@event.test', source_route: '/card', source_event: 'NYC_Show' })), { nowMs: intakeNow, env: intakeEnv });
+const spaceEvent = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '29292929-2929-4292-8292-292929292929', business_name: 'TEST ONLY Space Event', license_number: 'CARD-9', contact_email: 'space@event.test', source_route: '/card', source_event: 'nyc 2026' })), { nowMs: intakeNow, env: intakeEnv });
+const numericRoute = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '30303030-3030-4303-8303-303030303030', business_name: 'TEST ONLY Numeric Route', license_number: 'CARD-10', contact_email: 'num@event.test', source_route: 1 })), { nowMs: intakeNow, env: intakeEnv });
+const objectEvent = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '31313131-3131-4313-8313-313131313132', business_name: 'TEST ONLY Object Event', license_number: 'CARD-11', contact_email: 'obj@event.test', source_route: '/card', source_event: { id: 'nyc' } })), { nowMs: intakeNow, env: intakeEnv });
+const visitorKeys = ['ip', 'user_agent', 'cookie_id', 'card_view'];
+const visitorRejected = [];
+for (const key of visitorKeys) {
+  const result = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '26262626-2626-4262-8262-262626262626', business_name: 'Visitor Shop', license_number: 'CARD-6', contact_email: 'visit@card.test', source_route: '/card', source_event: 'nyc-2026', [key]: 'hidden' })), { nowMs: intakeNow, env: intakeEnv });
+  visitorRejected.push(result.status === 400 && Array.isArray(result.body.fields) && result.body.fields.includes(key) && JSON.stringify(result.body).includes('hidden') === false);
+}
+const intakeHandler = readFileSync('src/lib/crm/handlers.ts', 'utf8');
+const bondIntakeBody = intakeHandler.slice(intakeHandler.indexOf('export async function handleBondIntake'), intakeHandler.indexOf('export async function handleSupplierIntake'));
+const intakeSql = readFileSync('supabase/migrations/0138_crm_card_and_supplier_intake.sql', 'utf8');
+const intakeLogInserts = intakeSql.split('insert into public.crm_intake_log').slice(1).join('\n');
+assert(cardLead.status === 200 && cardAccount?.leadSource === 'bond_inquiry' && cardAccount.sourceEvent === 'nyc-2026' && cardLog?.sourceRoute === '/card' && cardLog.sourceEvent === 'nyc-2026' && rotatedAccount?.sourceEvent == null && cardMissing.status === 400 && orderEvent.status === 400 && orderNull.status === 200 && badEvent.status === 400 && spaceEvent.status === 400 && numericRoute.status === 400 && objectEvent.status === 400 && visitorRejected.every(Boolean) && intakeStore.accounts.every((row) => row.displayName !== 'No Event' && row.displayName !== 'Order Event' && row.displayName !== 'Bad Event' && row.displayName !== 'Visitor Shop' && row.displayName !== 'TEST ONLY Space Event' && row.displayName !== 'TEST ONLY Numeric Route' && row.displayName !== 'TEST ONLY Object Event') && bondIntakeBody.includes('user-agent') === false && bondIntakeBody.includes('x-forwarded-for') === false && intakeLogInserts.includes('user_agent') === false && intakeLogInserts.includes(' ip') === false, 'a card lead stores its event, and an order lead cannot carry one');
 clearIntakeRates();
+const orderMissingPhoneBody = intakePayload({ inquiry_id: '71717171-7171-4171-8171-717171717171', business_name: 'No Phone Shop', license_number: 'NO-PHONE', contact_email: 'none@phone.test' });
+delete orderMissingPhoneBody.contact_phone;
+const orderMissingPhone = await handleBondIntake(intakeStore, intakeRequest(orderMissingPhoneBody), { nowMs: intakeNow, env: intakeEnv });
+const orderEmptyPhone = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '72727272-7272-4272-8272-727272727272', business_name: 'Empty Phone Shop', license_number: 'EMPTY-PHONE', contact_email: 'empty@phone.test', contact_phone: '' })), { nowMs: intakeNow, env: intakeEnv });
+const orderBadPhone = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '73737373-7373-4373-8373-737373737373', business_name: 'Bad Phone Shop', license_number: 'BAD-PHONE', contact_email: 'bad@phone.test', contact_phone: '555-0100' })), { nowMs: intakeNow, env: intakeEnv });
+const orderExtPhone = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '74747474-7474-4474-8474-747474747474', business_name: 'Ext Phone Shop', license_number: 'EXT-PHONE', contact_email: 'ext@phone.test', source_route: '/card', source_event: 'nyc-2026', contact_phone: '(716) 555-0100 ext 12' })), { nowMs: intakeNow, env: intakeEnv });
+const orderCardPhone = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '75757575-7575-4575-8575-757575757575', business_name: 'Phone Card Shop', license_number: 'CARD-PHONE', contact_email: 'card@phone.test', source_route: '/card', source_event: 'nyc-2026', contact_phone: '+1 (716) 555-0199' })), { nowMs: intakeNow, env: intakeEnv });
+const orderCardPhoneContact = intakeStore.contacts.find((row) => row.email === 'card@phone.test');
+const orderPhoneRejected = [orderMissingPhone, orderEmptyPhone, orderBadPhone, orderExtPhone].every((result) => result.status === 400 && Array.isArray(result.body.fields) && result.body.fields.includes('contact_phone'));
+assert(orderPhoneRejected && orderCardPhone.status === 200 && orderCardPhoneContact?.phone === '+17165550199' && intakeStore.accounts.every((row) => row.displayName !== 'No Phone Shop' && row.displayName !== 'Empty Phone Shop' && row.displayName !== 'Bad Phone Shop' && row.displayName !== 'Ext Phone Shop'), 'a dispensary work phone is required on /order and /card and is stored as E.164');
 for (let hit = 0; hit < 30; hit += 1) takeIntakeRate('/order', intakeNow);
 const limited = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '20202020-2020-4202-8202-202020202020', business_name: 'Late Shop', license_number: 'LATE-1', contact_email: 'late@late.test' })), { nowMs: intakeNow, env: intakeEnv });
+function supplierPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    inquiry_id: '31313131-3131-4131-8131-313131313131',
+    submitted_at: '2026-11-09T15:00:00Z',
+    business_name: 'TEST ONLY North Farm',
+    contact_name: 'Ada Grower',
+    contact_email: 'ada@northfarm.test',
+    contact_phone: '(716) 555-0100',
+    supply_type: 'hemp_or_hemp_extract',
+    county: 'Erie',
+    message: 'Frozen lot',
+    consent_version: 'v1:56b70a071c4714eb',
+    source_route: '/card',
+    source_event: 'nyc-2026',
+    ...overrides,
+  };
+}
+function supplierRequest(body: unknown, options?: { secret?: string; stamp?: string; raw?: string; headers?: Record<string, string> }) {
+  const raw = options?.raw ?? JSON.stringify(body);
+  const stamp = options?.stamp ?? intakeStamp;
+  const secret = options?.secret ?? 'supplier-secret';
+  const inquiry = body && typeof body === 'object' && 'inquiry_id' in (body as Record<string, unknown>) ? String((body as { inquiry_id: unknown }).inquiry_id) : '';
+  return new Request('https://cedargrowth.vercel.app/api/intake/supplier-inquiry', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-cg-timestamp': stamp, 'x-cg-signature': signIntake(secret, stamp, raw), 'idempotency-key': inquiry, ...options?.headers },
+    body: raw,
+  });
+}
+const supplierEnv = { CG_BOND_SUPPLIER_INTAKE_SECRET: 'supplier-secret', CG_BOND_SUPPLIER_INTAKE_SECRET_NEXT: 'supplier-next' };
+const accountsBeforeSupplier = intakeStore.accounts.length;
+const supplierOff = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload()), { nowMs: intakeNow, env: {} });
+const supplierBad = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload(), { secret: 'wrong' }), { nowMs: intakeNow, env: supplierEnv });
+const supplierStale = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload(), { stamp: String(Number(intakeStamp) - 301) }), { nowMs: intakeNow, env: supplierEnv });
+const supplierOk = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload(), { secret: 'supplier-next' }), { nowMs: intakeNow, env: supplierEnv });
+const supplierReplay = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload(), { secret: 'supplier-next' }), { nowMs: intakeNow, env: supplierEnv });
+const supplierRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '31313131-3131-4131-8131-313131313131');
+const removedKeys = ['street', 'date_of_birth', 'ssn', 'ein', 'tax_id', 'bank_account', 'upload', 'yield', 'price', 'quantity', 'personal_phone', 'personal_email', 'haus', 'consumer', 'lead_type', 'ip', 'user_agent'];
+const removedRejected = [];
+for (const key of removedKeys) {
+  const result = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '32323232-3232-4232-8232-323232323232', [key]: 'hidden' })), { nowMs: intakeNow, env: supplierEnv });
+  removedRejected.push(result.status === 400 && Array.isArray(result.body.fields) && result.body.fields.includes(key) && JSON.stringify(result.body).includes('hidden') === false);
+}
+const supplierCounty = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '33333333-3333-4333-8333-333333333333', county: 'Brooklyn' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierRoute = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '34343434-3434-4434-8434-343434343434', source_route: '/order' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierEvent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '35353535-3535-4535-8535-353535353535', source_event: null })), { nowMs: intakeNow, env: supplierEnv });
+const supplierRod = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '36363636-3636-4636-8636-363636363636', supply_type: 'ROD' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierRond = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '37373737-3737-4737-8737-373737373737', supply_type: 'ROND' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierNoLicense = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '40404040-4040-4040-8040-404040404040', supply_type: 'cannabis_nys_adult_use_cultivator' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierBadLicense = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '41414141-4141-4141-8141-414141414141', supply_type: 'cannabis_nys_microbusiness_or_cooperative', license_number: 'OCM-1' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierDispensaryConsent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '42424242-4242-4242-8242-424242424242', consent_version: 'v1:46652a17994f78d1' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierUnknownConsent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '43434343-4343-4343-8343-434343434343', consent_version: 'v1:0123456789abcdef' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierCannabis = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '44444444-4444-4444-8444-444444444444', supply_type: 'cannabis_nys_adult_use_cultivator', license_number: 'OCM-AU-26-000123', trade_name: 'North Lot', contact_role: 'Grower' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierCannabisRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '44444444-4444-4444-8444-444444444444');
+clearIntakeRates();
+const phoneRowsBefore = intakeStore.supplierInquiries.length;
+const missingPhone = supplierPayload({ inquiry_id: '65656565-6565-4565-8565-656565656565', business_name: 'TEST ONLY Missing Phone Farm', contact_email: 'miss@farm.test' });
+delete missingPhone.contact_phone;
+const supplierMissingPhone = await handleSupplierIntake(intakeStore, supplierRequest(missingPhone), { nowMs: intakeNow, env: supplierEnv });
+const supplierEmptyPhone = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '66666666-6666-4666-8666-666666666666', business_name: 'TEST ONLY Empty Phone Farm', contact_email: 'empty@farm.test', contact_phone: '' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierBadPhone = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '67676767-6767-4676-8676-676767676767', business_name: 'TEST ONLY Bad Phone Farm', contact_email: 'badphone@farm.test', contact_phone: '555-0100' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierExt = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '68686868-6868-4686-8686-686868686868', business_name: 'TEST ONLY Ext Farm', contact_email: 'ext@farm.test', contact_phone: '(716) 555-0100 ext 12' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierExtRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '68686868-6868-4686-8686-686868686868');
+const supplierLongExt = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '69696969-6969-4696-8696-696969696969', business_name: 'TEST ONLY Long Ext Farm', contact_email: 'longext@farm.test', contact_phone_ext: '1234567' })), { nowMs: intakeNow, env: supplierEnv });
+function listTsFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : listTsFiles(path);
+    return entry.name.endsWith('.ts') || entry.name.endsWith('.tsx') ? [path] : [];
+  });
+}
+const supplierSendHits = listTsFiles('src').filter((path) => {
+  const text = readFileSync(path, 'utf8');
+  return /resend|twilio|\botp\b|\bsms\b|marketing/i.test(text) && /crm_supplier_inquiries|supplierInquiries/.test(text);
+});
+const supplierRodLicense = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '45454545-4545-4545-8545-454545454545', supply_type: 'cannabis_nys_adult_use_cultivator', license_number: 'OCM-ROD-25-000001' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierRondLicense = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '46464646-4646-4646-8646-464646464646', supply_type: 'cannabis_nys_microbusiness_or_cooperative', license_number: 'OCM-ROND-25-000001' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierLowerRod = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '47474747-4747-4747-8747-474747474747', license_number: 'rod' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierEin = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '48484848-4848-4848-8848-484848484848', license_number: '12-3456789' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierInputsLicense = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '49494949-4949-4949-8949-494949494949', supply_type: 'non_cannabis_inputs', license_number: 'ABC-123' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierEmptyEvent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '50505050-5050-4505-8505-505050505050', source_event: '' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierLongEvent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '51515151-5151-4515-8515-515151515151', source_event: 'a'.repeat(65) })), { nowMs: intakeNow, env: supplierEnv });
+const supplierUnicodeEvent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '52525252-5252-4525-8525-525252525252', source_event: 'nyc-2026-é' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierMetrc = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '53535353-5353-4535-8535-535353535353', metrc_id: 'hidden' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierSpaceEvent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '70707070-7070-4707-8707-707070707070', business_name: 'TEST ONLY Space Event Farm', contact_email: 'space@farm.test', source_event: 'nyc 2026' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierNumericRoute = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '71717171-7171-4717-8717-717171717171', business_name: 'TEST ONLY Numeric Route Farm', contact_email: 'num@farm.test', source_route: 1 })), { nowMs: intakeNow, env: supplierEnv });
+const supplierObjectEvent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '72727272-7272-4727-8727-727272727272', business_name: 'TEST ONLY Object Event Farm', contact_email: 'obj@farm.test', source_event: { id: 'nyc' } })), { nowMs: intakeNow, env: supplierEnv });
+const supplierFrozen = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '73737373-7373-4737-8737-737373737373', business_name: 'TEST ONLY Frozen Farm', contact_email: 'frozen@farm.test', supply_type: 'fresh_frozen_biomass' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierOtherBiomass = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '74747474-7474-4747-8747-747474747474', business_name: 'TEST ONLY Other Biomass Farm', contact_email: 'otherbio@farm.test', supply_type: 'other_biomass' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierEmptyCounty = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '75757575-7575-4757-8757-757575757575', business_name: 'TEST ONLY Empty County Farm', contact_email: 'emptycounty@farm.test', county: '' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierLongMessage = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '76767676-7676-4767-8767-767676767676', business_name: 'TEST ONLY 501 Farm', contact_email: 'longmsg@farm.test', message: 'm'.repeat(501) })), { nowMs: intakeNow, env: supplierEnv });
+const supplierErie = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '77777777-7777-4777-8777-777777777777', business_name: 'TEST ONLY Erie Farm', contact_email: 'erie@farm.test', county: 'erie' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierErieRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '77777777-7777-4777-8777-777777777777');
+const supplierMessageOk = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '54545454-5454-4545-8545-545454545454', business_name: 'TEST ONLY Message Farm', contact_email: 'msg@farm.test', message: 'm'.repeat(500) })), { nowMs: intakeNow, env: supplierEnv });
+const supplierEmojiOk = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '55555555-5555-4555-8555-555555555555', business_name: 'TEST ONLY Emoji Farm', contact_email: 'emoji@farm.test', message: '😀'.repeat(250) })), { nowMs: intakeNow, env: supplierEnv });
+const supplierEmojiLong = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '56565656-5656-4565-8565-565656565656', business_name: 'TEST ONLY Long Emoji Farm', contact_email: 'long@farm.test', message: '😀'.repeat(251) })), { nowMs: intakeNow, env: supplierEnv });
+const supplierHuge = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload(), { raw: 'x'.repeat(20 * 1024) }), { nowMs: intakeNow, env: supplierEnv });
+const supplierMessageRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '54545454-5454-4545-8545-545454545454');
+assert(supplierOff.status === 503 && supplierBad.status === 401 && supplierStale.status === 401 && supplierOk.status === 200 && supplierReplay.status === 200 && supplierReplay.body.duplicate === true && supplierRow?.businessName.startsWith('TEST ONLY ') && supplierRow.contactPhone === '+17165550100' && supplierRow.consentVersion === 'v1:56b70a071c4714eb' && supplierRow.supplyType === 'hemp_or_hemp_extract' && supplierRow.licenseNumber === null && supplierRow.sourceEvent === 'nyc-2026' && supplierRow.repliedAt === null && intakeStore.accounts.length === accountsBeforeSupplier && removedRejected.every(Boolean) && supplierCounty.status === 400 && supplierRoute.status === 400 && supplierEvent.status === 400 && supplierRod.status === 400 && supplierRond.status === 400 && supplierNoLicense.status === 400 && supplierBadLicense.status === 400 && supplierRodLicense.status === 400 && supplierRondLicense.status === 400 && supplierLowerRod.status === 400 && supplierEin.status === 400 && supplierInputsLicense.status === 400 && supplierDispensaryConsent.status === 400 && supplierUnknownConsent.status === 400 && supplierEmptyEvent.status === 400 && supplierLongEvent.status === 400 && supplierUnicodeEvent.status === 400 && supplierMetrc.status === 400 && supplierSpaceEvent.status === 400 && supplierNumericRoute.status === 400 && supplierObjectEvent.status === 400 && supplierFrozen.status === 400 && supplierOtherBiomass.status === 400 && supplierEmptyCounty.status === 400 && supplierLongMessage.status === 400 && intakeStore.supplierInquiries.every((row) => !row.businessName.includes('Space Event') && !row.businessName.includes('Numeric Route') && !row.businessName.includes('Object Event') && !row.businessName.includes('Frozen') && !row.businessName.includes('Other Biomass') && !row.businessName.includes('Empty County') && !row.businessName.includes('501')) && supplierErie.status === 200 && supplierErieRow?.county === 'Erie' && supplierMessageOk.status === 200 && supplierMessageRow?.message?.length === 500 && supplierEmojiOk.status === 200 && supplierEmojiLong.status === 400 && supplierHuge.status === 413 && supplierMissingPhone.status === 400 && supplierEmptyPhone.status === 400 && supplierBadPhone.status === 400 && intakeStore.supplierInquiries.every((row) => !row.businessName.includes('Missing Phone') && !row.businessName.includes('Empty Phone') && !row.businessName.includes('Bad Phone')) && supplierExt.status === 200 && supplierExtRow?.contactPhone === '+17165550100' && supplierExtRow.contactPhoneExt === '12' && supplierLongExt.status === 400 && supplierSendHits.length === 0 && phoneRowsBefore > 0 && supplierCannabis.status === 200 && supplierCannabisRow?.licenseNumber === 'OCM-AU-26-000123' && supplierCannabisRow.consentVersion === 'v1:56b70a071c4714eb' && supplierCannabisRow.tradeName === 'North Lot', 'supplier intake stays out of dispensary accounts and rejects a bad signature, county, license, or consent version');
 assert(limited.status === 429 && (limited.retryAfter || 0) >= 1 && intakeStore.accounts.every((row) => row.displayName !== 'Late Shop'), 'the source rate limit returns retry after and stores nothing');
 assert(intakeLogs.every((line) => line.includes('test-secret') === false && line.includes('next-secret') === false && line.includes('ada@northstore.test') === false && line.includes('Hello plain') === false), 'secret and payload never logged');
 assert(parseIntake({ consumer: true }).ok === false && intakeExpired('2024-01-01T00:00:00Z', '2026-11-09T15:00:00Z') && intakeExpired('2026-10-01T00:00:00Z', '2026-11-09T15:00:00Z') === false, 'consumer fields are rejected and the retention window is twelve months');

@@ -49,7 +49,19 @@ if [ "$LEFT" != "0" ]; then
 fi
 echo 'ok: injected failure left no crm tables'
 
-sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-apply-bundle.sql" >/tmp/crm-atomicity-ok.log
+awk -v root="$ROOT" '
+  /^\\ir / {
+    orig = $0
+    sub(/^\\ir \.\.\//, "\\ir " root "/")
+    if (orig ~ /0138_crm_card_and_supplier_intake\.sql$/) {
+      print "alter default privileges for role postgres in schema public grant all on tables to service_role, anon, authenticated;"
+    }
+    print
+    next
+  }
+  { print }
+' "${ROOT}/scripts/crm-apply-bundle.sql" > /tmp/crm-bundle-with-defaults.sql
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f /tmp/crm-bundle-with-defaults.sql >/tmp/crm-atomicity-ok.log
 RLS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname like 'crm_%' and c.relkind='r' and c.relrowsecurity and c.relforcerowsecurity;")
 TABLES=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname like 'crm_%' and c.relkind='r';")
 if [ "$RLS" != "$TABLES" ] || [ "$TABLES" = "0" ]; then
@@ -57,6 +69,13 @@ if [ "$RLS" != "$TABLES" ] || [ "$TABLES" = "0" ]; then
   exit 1
 fi
 echo "ok: bundle committed ${TABLES} tables with forced row level security"
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-check-0138-rls.sql" >/tmp/crm-0138-rls.log 2>&1
+BYPASS_COUNT=$(grep -c 'can bypass forced row level security' /tmp/crm-0138-rls.log || true)
+if [ "$BYPASS_COUNT" != "4" ]; then
+  echo "FAIL: 0138 post-apply bypass check confirmed ${BYPASS_COUNT} function owners"
+  exit 1
+fi
+echo 'ok: all four 0138 function owners still bypass forced row level security'
 
 expect_fail() {
   label=$1
@@ -130,15 +149,25 @@ echo 'ok: service_role can still append a note through the pinned function'
 KINDS=$(sudo -u postgres psql -d "$DB" -tA -c "select pg_get_constraintdef(oid) from pg_constraint where conname = 'crm_activity_kind_check';")
 echo "$KINDS" | grep -q 'digest_sent' && echo "$KINDS" | grep -q 'inquiry_received' || { echo 'FAIL: activity kinds'; exit 1; }
 echo 'ok: activity kinds keep digest_sent and add inquiry_received'
-RECV=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('11111111-1111-4111-8111-111111111111'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'North Store', 'Ada Buyer', 'ada@northstore.test', null, 'OCM-1', '1 Main', 'Buffalo', '14201', 'Erie', 'Hello plain', 'v1:0123456789abcdef', false)::text;")
-REPLAY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('11111111-1111-4111-8111-111111111111'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'North Store', 'Ada Buyer', 'ada@northstore.test', null, 'OCM-1', '1 Main', 'Buffalo', '14201', 'Erie', 'Hello plain', 'v1:0123456789abcdef', false)::text;")
-DUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('22222222-2222-4222-8222-222222222222'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Other Shop', 'Bea Buyer', 'bea@other.test', null, 'OCM-1', '2 Main', 'Buffalo', '14201', 'Erie', null, 'v1:0123456789abcdef', false)::text;")
+RECV=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('11111111-1111-4111-8111-111111111111'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'North Store', 'Ada Buyer', 'ada@northstore.test', '(716) 555-0100', 'OCM-1', '1 Main', 'Buffalo', '14201', 'Erie', 'Hello plain', 'v1:46652a17994f78d1', false)::text;")
+REPLAY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('11111111-1111-4111-8111-111111111111'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'North Store', 'Ada Buyer', 'ada@northstore.test', '(716) 555-0100', 'OCM-1', '1 Main', 'Buffalo', '14201', 'Erie', 'Hello plain', 'v1:46652a17994f78d1', false)::text;")
+DUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('22222222-2222-4222-8222-222222222222'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Other Shop', 'Bea Buyer', 'bea@other.test', '(716) 555-0100', 'OCM-1', '2 Main', 'Buffalo', '14201', 'Erie', null, 'v1:46652a17994f78d1', false)::text;")
 COUNTS=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_accounts where brand = 'bond' and lead_source = 'bond_inquiry') || ',' || (select o.stage || ':' || coalesce(o.forecast_cents::text, 'null') || ':' || a.ocm_status from public.crm_opportunities o join public.crm_accounts a on a.id = o.account_id where o.brand = 'bond' limit 1) || ',' || (select body from public.crm_notes where brand = 'bond' and body = 'Hello plain') || ',' || (select count(*) from public.crm_activity where summary like '%ada@northstore.test%' or summary like '%Hello plain%') || ',' || (select count(*) from public.crm_intake_log);")
-if [ "$RECV" != '{"ok": true, "duplicate": false}' ] || [ "$REPLAY" != '{"ok": true, "duplicate": true}' ] || [ "$DUP" != '{"ok": true, "duplicate": false}' ] || [ "$COUNTS" != "1,lead:null:unverified,Hello plain,0,2" ]; then
-  echo "FAIL: bond intake ${RECV} ${REPLAY} ${DUP} ${COUNTS}"
+BOND_PHONE=$(sudo -u postgres psql -d "$DB" -tA -c "select phone from public.crm_contacts where email = 'ada@northstore.test';")
+if [ "$RECV" != '{"ok": true, "duplicate": false}' ] || [ "$REPLAY" != '{"ok": true, "duplicate": true}' ] || [ "$DUP" != '{"ok": true, "duplicate": false}' ] || [ "$COUNTS" != "1,lead:null:unverified,Hello plain,0,2" ] || [ "$BOND_PHONE" != "+17165550100" ]; then
+  echo "FAIL: bond intake ${RECV} ${REPLAY} ${DUP} ${COUNTS} phone=${BOND_PHONE}"
   exit 1
 fi
 echo 'ok: bond intake creates one lead, replays, and flags a weak duplicate'
+expect_fail 'bond phone missing' "select public.crm_receive_bond_inquiry('76767676-7676-4767-8767-767676767676'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Missing Phone Shop', 'No Buyer', 'none@phone.test', null, 'NO-PHONE', '8 Main', 'Buffalo', '14201', 'Erie', null, 'v1:46652a17994f78d1', false);"
+expect_fail 'bond phone empty' "select public.crm_receive_bond_inquiry('77777777-7777-4777-8777-777777777771'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Empty Phone Shop', 'No Buyer', 'empty@phone.test', '', 'EMPTY-PHONE', '8 Main', 'Buffalo', '14201', 'Erie', null, 'v1:46652a17994f78d1', false);"
+expect_fail 'bond phone malformed' "select public.crm_receive_bond_inquiry('78787878-7878-4787-8787-787878787878'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Bad Phone Shop', 'No Buyer', 'bad@phone.test', '555-0100', 'BAD-PHONE', '8 Main', 'Buffalo', '14201', 'Erie', null, 'v1:46652a17994f78d1', false);"
+BAD_PHONE_ROWS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_accounts where display_name in ('Missing Phone Shop', 'Empty Phone Shop', 'Bad Phone Shop');")
+if [ "$BAD_PHONE_ROWS" != "0" ]; then
+  echo "FAIL: a bad dispensary phone wrote ${BAD_PHONE_ROWS} accounts"
+  exit 1
+fi
+echo 'ok: a missing, empty, or malformed dispensary phone writes nothing'
 EMAIL_COLS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'crm_intake_deletions' and column_name like '%email%';")
 DELETED=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_delete_bond_inquiry('11111111-1111-4111-8111-111111111111'::uuid)::text;")
 LEFT=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_accounts where brand = 'bond') || ',' || (select count(*) from public.crm_intake_log) || ',' || (select contact_name from public.crm_intake_deletions limit 1) || ',' || (select count(*) from public.crm_notes where body like '%ada@%');")
@@ -147,8 +176,8 @@ if [ "$EMAIL_COLS" != "0" ] || [ "$DELETED" != '{"ok": true, "deleted": true}' ]
   exit 1
 fi
 echo 'ok: intake deletion removes the lead and records bond with no mailbox'
-OLD=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('33333333-3333-4333-8333-333333333333'::uuid, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Old Shop', 'Cara Buyer', 'cara@old.test', null, 'OLD-1', '3 Main', 'Buffalo', '14201', 'Erie', null, 'v1:0123456789abcdef', false)::text;")
-KEPT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('44444444-4444-4444-8444-444444444444'::uuid, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Kept Shop', 'Dan Buyer', 'dan@kept.test', null, 'KEPT-1', '4 Main', 'Buffalo', '14201', 'Erie', null, 'v1:0123456789abcdef', false)::text;")
+OLD=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('33333333-3333-4333-8333-333333333333'::uuid, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Old Shop', 'Cara Buyer', 'cara@old.test', '(716) 555-0100', 'OLD-1', '3 Main', 'Buffalo', '14201', 'Erie', null, 'v1:46652a17994f78d1', false)::text;")
+KEPT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('44444444-4444-4444-8444-444444444444'::uuid, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 'Kept Shop', 'Dan Buyer', 'dan@kept.test', '(716) 555-0100', 'KEPT-1', '4 Main', 'Buffalo', '14201', 'Erie', null, 'v1:46652a17994f78d1', false)::text;")
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update public.crm_accounts set ocm_status = 'verified' where display_name = 'Kept Shop';" >/dev/null
 PURGED=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_inquiries('2026-11-09T15:00:00Z'::timestamptz)::text;")
 AFTER=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_accounts where display_name = 'Old Shop') || ',' || (select count(*) from public.crm_accounts where display_name = 'Kept Shop') || ',' || (select ocm_status from public.crm_accounts where display_name = 'Kept Shop');")
@@ -157,12 +186,118 @@ if [ "$OLD" != '{"ok": true, "duplicate": false}' ] || [ "$KEPT" != '{"ok": true
   exit 1
 fi
 echo 'ok: purge removes an unverified lead and keeps a verified one'
-EXEC=$(sudo -u postgres psql -d "$DB" -tA -c "select has_function_privilege('anon', 'public.crm_receive_bond_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean)', 'execute')::text || ',' || has_function_privilege('service_role', 'public.crm_receive_bond_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean)', 'execute')::text || ',' || has_table_privilege('service_role', 'public.crm_intake_log', 'insert')::text;")
+EXEC=$(sudo -u postgres psql -d "$DB" -tA -c "select has_function_privilege('anon', 'public.crm_receive_bond_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean, text, text)', 'execute')::text || ',' || has_function_privilege('service_role', 'public.crm_receive_bond_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean, text, text)', 'execute')::text || ',' || has_table_privilege('service_role', 'public.crm_intake_log', 'insert')::text;")
 if [ "$EXEC" != "false,true,false" ]; then
   echo "FAIL: intake grants ${EXEC}"
   exit 1
 fi
 echo 'ok: intake log is writable only through the service role function'
+CARD=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('55555555-5555-4555-8555-555555555555'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Card Shop', 'Eve Buyer', 'eve@card.test', '(716) 555-0100', 'CARD-1', '5 Main', 'Buffalo', '14201', 'Erie', null, 'v1:46652a17994f78d1', false, '/card', 'nyc-2026')::text;")
+CARD_ROW=$(sudo -u postgres psql -d "$DB" -tA -c "select a.lead_source || '|' || a.source_event || '|' || l.source_route || '|' || l.source_event from public.crm_accounts a join public.crm_intake_log l on l.inquiry_id = a.source_inquiry_id where a.display_name = 'Card Shop';")
+set +e
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('56565656-5656-4565-8565-565656565656'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Order Event', 'Fay Buyer', 'fay@order.test', '(716) 555-0100', 'ORD-9', '6 Main', 'Buffalo', '14201', 'Erie', null, 'v1:46652a17994f78d1', false, '/order', 'nyc-2026');" >/tmp/crm-order-event.log 2>&1
+ORDER_EVENT=$?
+set -e
+SUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('57575757-5757-4575-8575-575757575757'::uuid, '2026-11-09T15:00:00Z', 'TEST ONLY North Farm', null, 'cannabis_nys_adult_use_cultivator', 'OCM-AU-26-000123', 'Ada Grower', null, 'ada@northfarm.test', '(716) 555-0100', null, 'Erie', 'Frozen lot', 'v1:56b70a071c4714eb', '/card', 'nyc-2026')::text;")
+SUP_REPLAY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('57575757-5757-4575-8575-575757575757'::uuid, '2026-11-09T15:00:00Z', 'TEST ONLY North Farm', null, 'cannabis_nys_adult_use_cultivator', 'OCM-AU-26-000123', 'Ada Grower', null, 'ada@northfarm.test', '(716) 555-0100', null, 'Erie', 'Frozen lot', 'v1:56b70a071c4714eb', '/card', 'nyc-2026')::text;")
+SUP_ROW=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_supplier_inquiries) || ',' || (select count(*) from public.crm_accounts where display_name = 'TEST ONLY North Farm') || ',' || (select supply_type || '|' || license_number || '|' || consent_version || '|' || source_event || '|' || contact_phone from public.crm_supplier_inquiries);")
+set +e
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('58585858-5858-4585-8585-585858585858'::uuid, '2026-11-09T15:00:00Z', 'TEST ONLY Bad County Farm', null, 'hemp_or_hemp_extract', null, 'Bea Grower', null, 'bea@farm.test', '(716) 555-0100', null, 'Brooklyn', null, 'v1:56b70a071c4714eb', '/card', 'nyc-2026');" >/tmp/crm-supplier-county.log 2>&1
+SUP_COUNTY=$?
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('59595959-5959-4595-8595-595959595959'::uuid, '2026-11-09T15:00:00Z', 'TEST ONLY No License Farm', null, 'cannabis_nys_adult_use_cultivator', null, 'Cal Grower', null, 'cal@farm.test', '(716) 555-0100', null, 'Erie', null, 'v1:56b70a071c4714eb', '/card', 'nyc-2026');" >/tmp/crm-supplier-license.log 2>&1
+SUP_LICENSE=$?
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('60606060-6060-4606-8606-606060606060'::uuid, '2026-11-09T15:00:00Z', 'TEST ONLY Dispensary Consent Farm', null, 'hemp_or_hemp_extract', null, 'Dee Grower', null, 'dee@farm.test', '(716) 555-0100', null, 'Erie', null, 'v1:46652a17994f78d1', '/card', 'nyc-2026');" >/tmp/crm-supplier-consent.log 2>&1
+SUP_CONSENT=$?
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('63636363-6363-4636-8636-636363636363'::uuid, '2026-11-09T15:00:00Z', 'TEST ONLY ROD Farm', null, 'cannabis_nys_adult_use_cultivator', 'OCM-ROD-25-000001', 'Hal Grower', null, 'hal@farm.test', '(716) 555-0100', null, 'Erie', null, 'v1:56b70a071c4714eb', '/card', 'nyc-2026');" >/tmp/crm-supplier-rod.log 2>&1
+SUP_ROD=$?
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('64646464-6464-4646-8646-646464646464'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Mixed Consent', 'Ivy Buyer', 'ivy@mix.test', '(716) 555-0100', 'MIX-1', '7 Main', 'Buffalo', '14201', 'Erie', null, 'v1:56b70a071c4714eb', false, '/card', 'nyc-2026');" >/tmp/crm-card-consent.log 2>&1
+CARD_MIX=$?
+set -e
+SUP_GRANT=$(sudo -u postgres psql -d "$DB" -tA -c "select has_table_privilege('anon', 'public.crm_supplier_inquiries', 'select')::text || ',' || has_function_privilege('anon', 'public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text, text)', 'execute')::text;")
+if [ "$CARD" != '{"ok": true, "duplicate": false}' ] || [ "$CARD_ROW" != "bond_inquiry|nyc-2026|/card|nyc-2026" ] || [ "$ORDER_EVENT" -eq 0 ] || [ "$SUP" != '{"ok": true, "duplicate": false}' ] || [ "$SUP_REPLAY" != '{"ok": true, "duplicate": true}' ] || [ "$SUP_ROW" != "1,0,cannabis_nys_adult_use_cultivator|OCM-AU-26-000123|v1:56b70a071c4714eb|nyc-2026|+17165550100" ] || [ "$SUP_COUNTY" -eq 0 ] || [ "$SUP_LICENSE" -eq 0 ] || [ "$SUP_CONSENT" -eq 0 ] || [ "$SUP_ROD" -eq 0 ] || [ "$CARD_MIX" -eq 0 ] || [ "$SUP_GRANT" != "false,false" ]; then
+  echo "FAIL: card and supplier intake ${CARD} ${CARD_ROW} order=${ORDER_EVENT} ${SUP} ${SUP_REPLAY} ${SUP_ROW} county=${SUP_COUNTY} license=${SUP_LICENSE} consent=${SUP_CONSENT} rod=${SUP_ROD} mix=${CARD_MIX} grant=${SUP_GRANT}"
+  exit 1
+fi
+echo 'ok: a card lead stores its event and a supplier lead stays out of accounts'
+OLD_SUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('61616161-6161-4616-8616-616161616161'::uuid, '2024-01-01T00:00:00Z', 'TEST ONLY Old Farm', null, 'hemp_or_hemp_extract', null, 'Fay Grower', null, 'fay@farm.test', '(716) 555-0100', null, 'Erie', null, 'v1:56b70a071c4714eb', '/card', 'nyc-2026')::text;")
+KEPT_SUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('62626262-6262-4626-8626-626262626262'::uuid, '2024-01-01T00:00:00Z', 'TEST ONLY Kept Farm', null, 'non_cannabis_inputs', null, 'Gus Grower', null, 'gus@farm.test', '(716) 555-0100', null, 'Erie', null, 'v1:56b70a071c4714eb', '/card', 'nyc-2026')::text;")
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update public.crm_supplier_inquiries set submitted_at = '2024-01-01T00:00:00Z' where business_name = 'TEST ONLY Old Farm'; update public.crm_supplier_inquiries set replied_at = '2026-10-01T00:00:00Z' where business_name = 'TEST ONLY Kept Farm';" >/dev/null
+SUP_PURGE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_purge_supplier_inquiries('2026-11-09T15:00:00Z'::timestamptz)::text;")
+SUP_LEFT=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_supplier_inquiries where business_name = 'TEST ONLY Old Farm') || ',' || (select count(*) from public.crm_supplier_inquiries where business_name = 'TEST ONLY Kept Farm') || ',' || (select count(*) from public.crm_supplier_inquiries where business_name = 'TEST ONLY North Farm');")
+if [ "$OLD_SUP" != '{"ok": true, "duplicate": false}' ] || [ "$KEPT_SUP" != '{"ok": true, "duplicate": false}' ] || [ "$SUP_PURGE" != '{"ok": true, "purged": 1}' ] || [ "$SUP_LEFT" != "0,1,1" ]; then
+  echo "FAIL: supplier purge ${OLD_SUP} ${KEPT_SUP} ${SUP_PURGE} ${SUP_LEFT}"
+  exit 1
+fi
+echo 'ok: supplier purge uses the last reply, then submitted_at, and is not scheduled'
+FUTURE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_purge_supplier_inquiries('2100-01-01T00:00:00Z'::timestamptz)::text;")
+FUTURE_LEFT=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_supplier_inquiries where business_name in ('TEST ONLY North Farm', 'TEST ONLY Kept Farm');")
+MARK=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_mark_supplier_replied('57575757-5757-4575-8575-575757575757'::uuid)::text;")
+MARKED=$(sudo -u postgres psql -d "$DB" -tA -c "select (replied_at is not null)::text from public.crm_supplier_inquiries where inquiry_id = '57575757-5757-4575-8575-575757575757';")
+if [ "$FUTURE" != '{"ok": true, "purged": 0}' ] || [ "$FUTURE_LEFT" != "2" ] || [ "$MARK" != '{"ok": true, "updated": true}' ] || [ "$MARKED" != "true" ]; then
+  echo "FAIL: future purge or reply mark ${FUTURE} ${FUTURE_LEFT} ${MARK} ${MARKED}"
+  exit 1
+fi
+echo 'ok: a future clock does not purge recent supplier rows'
+SUP_ACL=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(string_agg(e.privilege_type, ',' order by e.privilege_type), '') from pg_class c cross join lateral aclexplode(c.relacl) e join pg_roles r on r.oid = e.grantee where c.oid = 'public.crm_supplier_inquiries'::regclass and r.rolname = 'service_role';")
+SUP_COL=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(string_agg(a.attname, ',' order by a.attname), '') from pg_attribute a cross join lateral aclexplode(a.attacl) e join pg_roles r on r.oid = e.grantee where a.attrelid = 'public.crm_supplier_inquiries'::regclass and a.attnum > 0 and not a.attisdropped and r.rolname = 'service_role' and e.privilege_type = 'UPDATE';")
+SUP_OTHER=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from (select 1 from pg_class c cross join lateral aclexplode(c.relacl) e left join pg_roles r on r.oid = e.grantee where c.oid = 'public.crm_supplier_inquiries'::regclass and (e.grantee = 0 or r.rolname in ('anon', 'authenticated')) union all select 1 from pg_attribute a cross join lateral aclexplode(a.attacl) e left join pg_roles r on r.oid = e.grantee where a.attrelid = 'public.crm_supplier_inquiries'::regclass and a.attnum > 0 and not a.attisdropped and (e.grantee = 0 or r.rolname in ('anon', 'authenticated'))) s;")
+SUP_BITS=$(sudo -u postgres psql -d "$DB" -tA -c "select has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'update')::text || ',' || has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'delete')::text || ',' || has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'truncate')::text || ',' || has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'trigger')::text || ',' || has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'references')::text || ',' || has_column_privilege('service_role', 'public.crm_supplier_inquiries', 'submitted_at', 'update')::text || ',' || has_column_privilege('service_role', 'public.crm_supplier_inquiries', 'replied_at', 'update')::text;")
+SUP_RELACL=$(sudo -u postgres psql -d "$DB" -tA -c "select c.relacl::text from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relname = 'crm_supplier_inquiries';")
+PGNUM=$(sudo -u postgres psql -d "$DB" -tA -c "select current_setting('server_version_num');")
+if [ "$PGNUM" -ge 170000 ]; then
+  SUP_MAINTAIN=$(sudo -u postgres psql -d "$DB" -tA -c "select has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'maintain')::text;")
+  SUP_OWNER='{postgres=arwdDxtm/postgres}'
+else
+  SUP_MAINTAIN=unsupported
+  SUP_OWNER='{postgres=arwdDxt/postgres}'
+fi
+expect_fail 'service role supplier submitted_at update' "set role service_role; update public.crm_supplier_inquiries set submitted_at = submitted_at where inquiry_id = '57575757-5757-4575-8575-575757575757';"
+if ! grep -q 'permission denied' /tmp/crm-crud-fail.log; then
+  echo 'FAIL: submitted_at update was not denied by privilege'
+  exit 1
+fi
+SERVICE_MARK=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "set role service_role; select public.crm_mark_supplier_replied('57575757-5757-4575-8575-575757575757'::uuid)::text;" | tail -n 1)
+if [ "$SUP_ACL" != "" ] || [ "$SUP_RELACL" != "$SUP_OWNER" ] || [ "$SUP_COL" != "" ] || [ "$SUP_OTHER" != "0" ] || [ "$SUP_BITS" != "false,false,false,false,false,false,false" ] || { [ "$PGNUM" -ge 170000 ] && [ "$SUP_MAINTAIN" != "false" ]; } || { [ "$PGNUM" -lt 170000 ] && [ "$SUP_MAINTAIN" != "unsupported" ]; } || [ "$SERVICE_MARK" != '{"ok": true, "updated": true}' ]; then
+  echo "FAIL: supplier privileges acl=${SUP_ACL} relacl=${SUP_RELACL} columns=${SUP_COL} other=${SUP_OTHER} bits=${SUP_BITS} maintain=${SUP_MAINTAIN} mark=${SERVICE_MARK}"
+  exit 1
+fi
+echo 'ok: service_role has no supplier table privileges and can still mark a reply'
+expect_fail 'service role supplier replied_at update' "set role service_role; update public.crm_supplier_inquiries set replied_at = '2999-01-01T00:00:00Z' where inquiry_id = '57575757-5757-4575-8575-575757575757';"
+if ! grep -q 'permission denied' /tmp/crm-crud-fail.log; then
+  echo 'FAIL: replied_at update was not denied by privilege'
+  exit 1
+fi
+expect_fail 'service role supplier select' "set role service_role; select count(*) from public.crm_supplier_inquiries;"
+if ! grep -q 'permission denied' /tmp/crm-crud-fail.log; then
+  echo 'FAIL: supplier select was not denied by privilege'
+  exit 1
+fi
+expect_fail 'service role supplier insert' "set role service_role; insert into public.crm_supplier_inquiries (inquiry_id, submitted_at, business_name, supply_type, contact_name, contact_email, contact_phone, county, consent_version, source_route, source_event) values ('79797979-7979-4797-8797-797979797979', now(), 'TEST ONLY Direct Farm', 'hemp_or_hemp_extract', 'Pat Grower', 'pat@farm.test', '+17165550100', 'Erie', 'v1:56b70a071c4714eb', '/card', 'nyc-2026');"
+if ! grep -q 'permission denied' /tmp/crm-crud-fail.log; then
+  echo 'FAIL: supplier insert was not denied by privilege'
+  exit 1
+fi
+echo 'ok: service_role cannot select or insert supplier rows'
+FAR_SUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('65656565-6565-4565-8565-656565656565'::uuid, '2099-01-01T00:00:00Z', 'TEST ONLY Future Farm', null, 'hemp_or_hemp_extract', null, 'Ivy Grower', null, 'ivy@farm.test', '(716) 555-0100', null, 'Erie', null, 'v1:56b70a071c4714eb', '/card', 'nyc-2026')::text;")
+FAR_AT=$(sudo -u postgres psql -d "$DB" -tA -c "select (submitted_at <= pg_catalog.now() + interval '5 minutes' and submitted_at < '2090-01-01'::timestamptz)::text from public.crm_supplier_inquiries where inquiry_id = '65656565-6565-4565-8565-656565656565';")
+FAR_MARK=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "set role service_role; select public.crm_mark_supplier_replied('65656565-6565-4565-8565-656565656565'::uuid)::text;" | tail -n 1)
+FAR_REPLY=$(sudo -u postgres psql -d "$DB" -tA -c "select (replied_at is not null and replied_at <= pg_catalog.now() + interval '5 minutes' and replied_at < '2100-01-01'::timestamptz)::text from public.crm_supplier_inquiries where inquiry_id = '65656565-6565-4565-8565-656565656565';")
+if [ "$FAR_SUP" != '{"ok": true, "duplicate": false}' ] || [ "$FAR_AT" != "true" ] || [ "$FAR_MARK" != '{"ok": true, "updated": true}' ] || [ "$FAR_REPLY" != "true" ]; then
+  echo "FAIL: far future supplier clock ${FAR_SUP} submitted=${FAR_AT} mark=${FAR_MARK} replied=${FAR_REPLY}"
+  exit 1
+fi
+echo 'ok: a far future submitted_at or replied_at cannot push supplier retention past the server clock'
+EPOCH_SUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('67676767-6767-4676-8676-676767676767'::uuid, '1970-01-01T00:00:00Z', 'TEST ONLY Epoch Farm', null, 'hemp_or_hemp_extract', null, 'Jan Grower', null, 'jan@farm.test', '(716) 555-0100', null, 'Erie', null, 'v1:56b70a071c4714eb', '/card', 'nyc-2026')::text;")
+INF_SUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('68686868-6868-4686-8686-686868686868'::uuid, '-infinity', 'TEST ONLY Ancient Farm', null, 'hemp_or_hemp_extract', null, 'Kay Grower', null, 'kay@farm.test', '(716) 555-0100', null, 'Erie', null, 'v1:56b70a071c4714eb', '/card', 'nyc-2026')::text;")
+LOW_AT=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_supplier_inquiries where inquiry_id in ('67676767-6767-4676-8676-676767676767', '68686868-6868-4686-8686-686868686868') and submitted_at > '1971-01-01'::timestamptz and submitted_at >= pg_catalog.now() - interval '2 days' - interval '1 minute' and submitted_at <= pg_catalog.now() - interval '2 days' + interval '1 minute';")
+SUP_DELETE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "set role service_role; select public.crm_delete_supplier_inquiry('67676767-6767-4676-8676-676767676767'::uuid)::text;" | tail -n 1)
+SUP_GONE=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_supplier_inquiries where inquiry_id = '67676767-6767-4676-8676-676767676767';")
+if [ "$EPOCH_SUP" != '{"ok": true, "duplicate": false}' ] || [ "$INF_SUP" != '{"ok": true, "duplicate": false}' ] || [ "$LOW_AT" != "2" ] || [ "$SUP_DELETE" != '{"ok": true, "deleted": true}' ] || [ "$SUP_GONE" != "0" ]; then
+  echo "FAIL: low supplier clock or delete ${EPOCH_SUP} ${INF_SUP} low=${LOW_AT} delete=${SUP_DELETE} gone=${SUP_GONE}"
+  exit 1
+fi
+echo 'ok: an ancient submitted_at is clamped and service_role can still delete through the function'
+expect_fail 'supplier email shape' "update public.crm_supplier_inquiries set contact_email = 'not-an-email' where inquiry_id = '57575757-5757-4575-8575-575757575757';"
 AGENT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10'::uuid, '2026-11-09T18:00:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"Agent Shop\",\"status\":\"prospect\",\"account_type\":\"adult_use_dispensary\",\"city\":\"Buffalo\",\"county\":\"Erie\",\"license_number\":\"AGENT-LIC-1\"},{\"op\":\"contact\",\"index\":1,\"name\":\"Agent Buyer\",\"email\":\"buyer@agent.test\",\"account_license\":\"AGENT-LIC-1\"},{\"op\":\"note\",\"index\":2,\"body\":\"Plain note\",\"account_license\":\"AGENT-LIC-1\"}]'::jsonb)::text;")
 AGENT_REPLAY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10'::uuid, '2026-11-09T18:00:00Z', '[]'::jsonb)->>'code';")
 AGENT_DUPE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa11'::uuid, '2026-11-09T18:05:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"Copy\",\"status\":\"prospect\",\"county\":\"Erie\",\"license_number\":\"agent-lic-1\"}]'::jsonb)::text;")
