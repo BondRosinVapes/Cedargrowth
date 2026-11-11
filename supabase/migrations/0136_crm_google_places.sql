@@ -49,6 +49,9 @@ create table if not exists public.crm_distribution_merges (
 comment on table public.crm_distribution_merges is 'Append-only audit of contacts attached to an account after a won deal. prior_accounts stores each contact id and the account id it had before the merge. reassigned_ids lists contacts skipped on undo because their account changed later. Rows are undone, never deleted or rewritten.';
 comment on column public.crm_distribution_merges.reassigned_ids is 'Contacts skipped on undo because their account changed after the merge.';
 
+alter table public.crm_distribution_merges
+  add column if not exists reassigned_ids uuid[] not null default '{}';
+
 create or replace function crm_private.guard_contact()
 returns trigger
 language plpgsql
@@ -233,7 +236,11 @@ begin
   loop
     v_contact := nullif(v_item->>'contactId', '')::uuid;
     v_prior := nullif(v_item->>'priorAccountId', '')::uuid;
-    select account_id into v_current from public.crm_contacts where id = v_contact and brand = 'cedargrowth';
+    v_current := null;
+    select account_id into v_current
+    from public.crm_contacts
+    where id = v_contact and brand = 'cedargrowth'
+    for update;
     if v_current is not null and v_current is distinct from v_row.account_id then
       v_reassigned := v_reassigned || v_contact;
     else
@@ -243,7 +250,7 @@ begin
       else
         update public.crm_contacts
         set account_id = v_prior, updated_by = btrim(p_actor)
-        where id = v_contact and brand = 'cedargrowth';
+        where id = v_contact and brand = 'cedargrowth' and account_id = v_row.account_id;
       end if;
     end if;
   end loop;
@@ -270,7 +277,7 @@ begin
 end;
 $$;
 
-comment on function public.crm_undo_distribution_merge(uuid, text, timestamptz) is 'One transaction. Restores each contact that is still on the won account. A contact whose account changed after the merge is skipped, listed in reassigned_ids, and left where it is. A missing or non CedarGrowth prior account is refused and reported. Any desk staff may call this. The audit row is marked undone once.';
+comment on function public.crm_undo_distribution_merge(uuid, text, timestamptz) is 'One transaction. Restores each contact that is still on the won account. A contact whose account changed after the merge is skipped, listed in reassigned_ids, and left where it is. A missing or non CedarGrowth prior account is refused and reported. Undo is currently any desk staff, pending Gary decision. The audit row is marked undone once.';
 
 revoke all on function public.crm_merge_won_distribution(uuid, text) from public, anon, authenticated;
 grant execute on function public.crm_merge_won_distribution(uuid, text) to service_role;

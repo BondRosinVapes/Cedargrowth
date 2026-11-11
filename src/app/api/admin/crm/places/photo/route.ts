@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { authorizePlacePhoto } from '@/lib/crm/engine';
-import { currentPhotoName, dnsPhotoLookup, photoResponseHeaders, pinnedPhotoRequest, placeQuery, readPlacePhoto, sharePhotoLoad } from '@/lib/crm/places';
+import { cachedPhotoName, currentPhotoName, dnsPhotoLookup, photoResponseHeaders, pinnedPhotoRequest, placeQuery, readPlacePhoto, sharePhotoLoad } from '@/lib/crm/places';
 import { resolveDeskAccess } from '@/lib/crm/salesSession';
 import { getCrmStore } from '@/lib/crm/store';
 
@@ -30,13 +30,16 @@ export async function GET(request: Request) {
     const account = await store.readAccount(auth.brand, accountId);
     const cache = await store.readPlaceCache(auth.brand, accountId);
     if (account.state !== 'ok' || !account.value || cache.state !== 'ok') return null;
+    const now = Date.now();
+    const known = cachedPhotoName({ sells: selling.value, cache: cache.value, now });
     const photoName = await currentPhotoName({
       sells: selling.value,
       cache: cache.value,
       query: placeQuery(account.value),
-      now: Date.now(),
+      now,
       key,
       fetchImpl: fetch,
+      photoName: known,
     });
     if (!photoName) return null;
     return readPlacePhoto(photoName, key, { lookup: dnsPhotoLookup, request: pinnedPhotoRequest });

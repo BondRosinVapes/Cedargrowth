@@ -98,7 +98,20 @@ export function parsePlaceDetail(body: DetailBody): PlaceCard {
 
 const PLACE_FIELD_MASK = 'places.id,places.displayName,places.rating,places.userRatingCount,places.regularOpeningHours,places.nationalPhoneNumber,places.websiteUri,places.googleMapsUri,places.photos';
 
-export async function lookupPlace(query: string, key: string, fetchImpl: typeof fetch): Promise<{ placeId: string; card: PlaceCard } | null> {
+const placeLoads = new Map<string, Promise<{ placeId: string; card: PlaceCard } | null>>();
+
+function sharePlaceLoad(key: string, load: () => Promise<{ placeId: string; card: PlaceCard } | null>): Promise<{ placeId: string; card: PlaceCard } | null> {
+  const current = placeLoads.get(key);
+  if (current) return current;
+  let flight: Promise<{ placeId: string; card: PlaceCard } | null>;
+  flight = Promise.resolve().then(load).finally(() => {
+    if (placeLoads.get(key) === flight) placeLoads.delete(key);
+  });
+  placeLoads.set(key, flight);
+  return flight;
+}
+
+async function lookupPlaceOnce(query: string, key: string, fetchImpl: typeof fetch, timeoutMs: number): Promise<{ placeId: string; card: PlaceCard } | null> {
   const search = await fetchImpl('https://places.googleapis.com/v1/places:searchText', {
     method: 'POST',
     headers: {
@@ -107,6 +120,7 @@ export async function lookupPlace(query: string, key: string, fetchImpl: typeof 
       'X-Goog-FieldMask': PLACE_FIELD_MASK,
     },
     body: JSON.stringify({ textQuery: query, pageSize: 1 }),
+    signal: photoTimeout(timeoutMs),
   });
   if (!search.ok) return null;
   const found = await search.json() as { places?: DetailBody[] };
@@ -115,9 +129,13 @@ export async function lookupPlace(query: string, key: string, fetchImpl: typeof 
   return { placeId: place.id, card: parsePlaceDetail(place) };
 }
 
+export async function lookupPlace(query: string, key: string, fetchImpl: typeof fetch, timeoutMs = PHOTO_TIMEOUT_MS): Promise<{ placeId: string; card: PlaceCard } | null> {
+  return sharePlaceLoad(`text:${query}`, () => lookupPlaceOnce(query, key, fetchImpl, timeoutMs));
+}
+
 const DETAIL_FIELD_MASK = 'id,displayName,rating,userRatingCount,regularOpeningHours,nationalPhoneNumber,websiteUri,googleMapsUri,photos';
 
-export async function lookupPlaceById(placeId: string, key: string, fetchImpl: typeof fetch): Promise<{ placeId: string; card: PlaceCard } | null> {
+async function lookupPlaceByIdOnce(placeId: string, key: string, fetchImpl: typeof fetch, timeoutMs: number): Promise<{ placeId: string; card: PlaceCard } | null> {
   const id = placeId.trim().replace(/^places\//, '');
   if (!id || /[^A-Za-z0-9_-]/.test(id)) return null;
   const response = await fetchImpl(`https://places.googleapis.com/v1/places/${encodeURIComponent(id)}`, {
@@ -125,11 +143,18 @@ export async function lookupPlaceById(placeId: string, key: string, fetchImpl: t
       'X-Goog-Api-Key': key,
       'X-Goog-FieldMask': DETAIL_FIELD_MASK,
     },
+    signal: photoTimeout(timeoutMs),
   });
   if (!response.ok) return null;
   const body = await response.json() as DetailBody;
   if (!body.id) return null;
   return { placeId: body.id, card: parsePlaceDetail(body) };
+}
+
+export async function lookupPlaceById(placeId: string, key: string, fetchImpl: typeof fetch, timeoutMs = PHOTO_TIMEOUT_MS): Promise<{ placeId: string; card: PlaceCard } | null> {
+  const id = placeId.trim().replace(/^places\//, '');
+  if (!id || /[^A-Za-z0-9_-]/.test(id)) return null;
+  return sharePlaceLoad(`id:${id}`, () => lookupPlaceByIdOnce(placeId, key, fetchImpl, timeoutMs));
 }
 
 export async function loadPlace(input: { placeId: string | null; query: string | null; key: string; fetchImpl: typeof fetch }): Promise<{ placeId: string; card: PlaceCard } | null> {
@@ -165,9 +190,10 @@ export function cachedPhotoName(input: { sells: boolean; cache: PlaceCache | nul
   return input.cache.fields?.photoName || null;
 }
 
-export async function currentPhotoName(input: { sells: boolean; cache: PlaceCache | null; query: string | null; now: number; key: string; fetchImpl: typeof fetch }): Promise<string | null> {
+export async function currentPhotoName(input: { sells: boolean; cache: PlaceCache | null; query: string | null; now: number; key: string; fetchImpl: typeof fetch; photoName?: string | null }): Promise<string | null> {
+  if (input.photoName && PHOTO_NAME_PATTERN.test(input.photoName)) return input.photoName;
   const cached = cachedPhotoName(input);
-  if (cached) return cached;
+  if (cached && PHOTO_NAME_PATTERN.test(cached)) return cached;
   const live = await loadPlace({ placeId: input.cache?.placeId ?? null, query: input.query, key: input.key, fetchImpl: input.fetchImpl });
   return live?.card.photoName ?? null;
 }

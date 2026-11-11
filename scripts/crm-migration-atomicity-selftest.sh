@@ -183,6 +183,23 @@ if [ "$KEPT" != "42.886000,-78.878000,test-only" ] || [ "$TRIGGERS" != "crm_acco
 fi
 echo 'ok: a coordinate-only update is kept and a latitude outside New York is rejected'
 
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-check-0136-rls.sql" >/tmp/crm-0136-rls.log
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "do \$\$ begin if not exists (select 1 from pg_roles where rolname = 'crm_0136_norls') then create role crm_0136_norls nologin nosuperuser nobypassrls; end if; end \$\$;" >/dev/null
+cat > /tmp/crm-0136-rls-deny.sql <<EOF
+set role crm_0136_norls;
+\\i ${ROOT}/scripts/crm-check-0136-rls.sql
+EOF
+set +e
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f /tmp/crm-0136-rls-deny.sql >/tmp/crm-0136-rls-deny.log 2>&1
+RLS_DENY=$?
+set -e
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop role if exists crm_0136_norls;" >/dev/null
+if [ "$RLS_DENY" -eq 0 ]; then
+  echo 'FAIL: a role without bypassrls was allowed to pass the 0136 check'
+  exit 1
+fi
+echo 'ok: 0136 pre-apply check requires the function owner to bypass forced row level security'
+
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-apply-0136.sql" >/tmp/crm-0136-second.log
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-apply-0136.sql" >/tmp/crm-0136-third.log
 GUARD=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(array_to_string(p.proconfig, '|'), '') || ',' || (position('pg_catalog.now()' in p.prosrc) > 0)::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'crm_private' and p.proname = 'guard_contact';")

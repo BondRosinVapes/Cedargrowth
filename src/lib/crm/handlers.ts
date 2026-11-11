@@ -746,7 +746,12 @@ export async function handleImport(ctx: CrmContext): Promise<CrmResult> {
     dealKeys.add(dealKey);
     if (!commit) { outcomes.push({ line, status: 'ready' }); continue; }
     const created = await ctx.store.createOpportunity(auth.brand, auth.actorId, { ...parsed.value, accountId, name: parsed.value.name, stage: parsed.value.stage });
-    outcomes.push(created.state === 'ok' ? { line, status: 'created' } : { line, status: 'error', reason: 'Storage did not accept this row.' });
+    if (created.state !== 'ok') { outcomes.push({ line, status: 'error', reason: 'Storage did not accept this row.' }); continue; }
+    if (parsed.value.stage !== 'won') {
+      const cleared = await ctx.store.clearPlaceDetailsIfNotSelling(auth.brand, accountId);
+      if (cleared.state !== 'ok') { outcomes.push({ line, status: 'error', reason: 'The deal was saved. Stored place details could not be cleared.' }); continue; }
+    }
+    outcomes.push({ line, status: 'created' });
   }
   if (commit && pendingRetailers.length) {
     const saved = await ctx.store.insertMarketRetailers(auth.brand, pendingRetailers, new Date().toISOString());

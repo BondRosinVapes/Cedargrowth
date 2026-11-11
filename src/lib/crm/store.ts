@@ -381,6 +381,7 @@ export interface CrmStore {
   savePlaceCache(brand: CrmBrand, accountId: string, cache: PlaceCache): Promise<StoreResult<PlaceCache>>;
   accountHasWonDeal(brand: CrmBrand, accountId: string): Promise<StoreResult<boolean>>;
   purgePlaceDetails(brand: CrmBrand, accountId: string): Promise<StoreResult<{ purged: true }>>;
+  clearPlaceDetailsIfNotSelling(brand: CrmBrand, accountId: string): Promise<StoreResult<{ cleared: boolean }>>;
   readOpenMerge(brand: CrmBrand, opportunityId: string): Promise<StoreResult<MergeRow | null>>;
   readAccountMerge(brand: CrmBrand, accountId: string): Promise<StoreResult<MergeRow | null>>;
   insertMerge(brand: CrmBrand, row: Omit<MergeRow, 'id'>): Promise<StoreResult<MergeRow>>;
@@ -1019,12 +1020,9 @@ class SupabaseCrmStore implements CrmStore {
         return failed;
       }
     }
-    if (saved.state === 'ok' && previousStage === 'won' && patch.stage !== undefined && patch.stage !== 'won') {
-      const still = await this.accountHasWonDeal(brand, saved.value.accountId);
-      if (still.state === 'ok' && shouldPurgePlaceDetails({ previousStage, nextStage: patch.stage, remainingWon: still.value })) {
-        const purged = await this.purgePlaceDetails(brand, saved.value.accountId);
-        if (purged.state !== 'ok') console.error('crm place detail purge failed', { accountId: saved.value.accountId, brand });
-      }
+    if (saved.state === 'ok' && shouldPurgePlaceDetails({ previousStage, nextStage: patch.stage, remainingWon: false })) {
+      const cleared = await this.clearPlaceDetailsIfNotSelling(brand, saved.value.accountId);
+      if (cleared.state !== 'ok') return cleared;
     }
     return saved;
   }
@@ -1096,6 +1094,16 @@ class SupabaseCrmStore implements CrmStore {
     if (failed) return { state: failed };
     if (error) return { state: 'unavailable' };
     return { state: 'ok', value: { purged: true } };
+  }
+
+  async clearPlaceDetailsIfNotSelling(brand: CrmBrand, accountId: string): Promise<StoreResult<{ cleared: boolean }>> {
+    if (brand !== 'cedargrowth') return { state: 'ok', value: { cleared: false } };
+    const still = await this.accountHasWonDeal(brand, accountId);
+    if (still.state !== 'ok') return still;
+    if (still.value) return { state: 'ok', value: { cleared: false } };
+    const purged = await this.purgePlaceDetails(brand, accountId);
+    if (purged.state !== 'ok') return purged;
+    return { state: 'ok', value: { cleared: true } };
   }
 
   async readOpenMerge(brand: CrmBrand, opportunityId: string): Promise<StoreResult<MergeRow | null>> {
@@ -1756,10 +1764,18 @@ class SupabaseCrmStore implements CrmStore {
   }
 
   async deleteBondInquiry(inquiryId: string) {
+    const prior = await this.db.from('crm_accounts').select('id,brand').eq('source_inquiry_id', inquiryId).maybeSingle();
+    if (classify(prior.error)) return { state: classify(prior.error) as 'absent' | 'unavailable' };
     const { data, error } = await this.db.rpc('crm_delete_bond_inquiry', { p_inquiry_id: inquiryId });
     if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
     const payload = data as { ok?: boolean; deleted?: boolean } | null;
     if (error || !payload || payload.ok !== true) return { state: 'unavailable' as const };
+    const accountId = prior.data && typeof prior.data.id === 'string' ? prior.data.id : null;
+    const accountBrand = prior.data && (prior.data.brand === 'cedargrowth' || prior.data.brand === 'bond') ? prior.data.brand : null;
+    if (accountId && accountBrand) {
+      const cleared = await this.clearPlaceDetailsIfNotSelling(accountBrand, accountId);
+      if (cleared.state !== 'ok') return cleared;
+    }
     return { state: 'ok' as const, value: { deleted: payload.deleted === true } };
   }
 
