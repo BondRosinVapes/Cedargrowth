@@ -2,18 +2,21 @@
 // Rows stay out of dispensary accounts. This module does not build HTML.
 
 import { parseUuid } from './engine';
-import { intakeTestMarker, signIntake, signaturesMatch, timestampFresh } from './intake';
+import { signIntake, signaturesMatch, timestampFresh } from './intake';
 import { parseCounty } from './nyRegions';
 
+export const SUPPLIER_CONSENT_VERSIONS = ['v1:56b70a071c4714eb'] as const;
 export const SUPPLIER_KEYS = [
   'inquiry_id',
   'submitted_at',
   'business_name',
+  'trade_name',
+  'supply_type',
+  'license_number',
   'contact_name',
+  'contact_role',
   'contact_email',
   'contact_phone',
-  'license_number',
-  'supply_type',
   'county',
   'message',
   'consent_version',
@@ -21,12 +24,18 @@ export const SUPPLIER_KEYS = [
   'source_event',
 ] as const;
 
-const SUPPLY_TYPES = ['fresh_frozen_biomass', 'other_biomass', 'other_input'] as const;
-const OPTIONAL = new Set(['license_number', 'message']);
+const SUPPLY_TYPES = [
+  'cannabis_nys_adult_use_cultivator',
+  'cannabis_nys_microbusiness_or_cooperative',
+  'hemp_or_hemp_extract',
+  'non_cannabis_inputs',
+] as const;
+const CANNABIS_SUPPLY = new Set(['cannabis_nys_adult_use_cultivator', 'cannabis_nys_microbusiness_or_cooperative']);
+const OPTIONAL = new Set(['trade_name', 'license_number', 'contact_role', 'contact_phone', 'message']);
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
-const CONSENT_RE = /^v1:[0-9a-f]{16}$/;
 const EVENT_RE = /^[a-z0-9-]{1,64}$/;
+const OCM_LICENSE_RE = /^OCM-[A-Z]{2,6}-[0-9]{2}-[0-9]{6}$/;
 
 export type SupplierSupplyType = (typeof SUPPLY_TYPES)[number];
 
@@ -34,14 +43,16 @@ export type SupplierLead = {
   inquiryId: string;
   submittedAt: string;
   businessName: string;
-  contactName: string;
-  contactEmail: string;
-  contactPhone: string;
-  licenseNumber: string | null;
+  tradeName: string | null;
   supplyType: SupplierSupplyType;
+  licenseNumber: string | null;
+  contactName: string;
+  contactRole: string | null;
+  contactEmail: string;
+  contactPhone: string | null;
   county: string;
   message: string | null;
-  consentVersion: string;
+  consentVersion: (typeof SUPPLIER_CONSENT_VERSIONS)[number];
   sourceRoute: '/card';
   sourceEvent: string;
 };
@@ -50,10 +61,6 @@ export function supplierSecrets(env: Record<string, string | undefined>): { prim
   const primary = env.CG_BOND_SUPPLIER_INTAKE_SECRET?.trim() || null;
   const next = env.CG_BOND_SUPPLIER_INTAKE_SECRET_NEXT?.trim() || null;
   return { primary, next: primary ? next : null };
-}
-
-export function supplierTestMarker(businessName: string, licenseNumber: string | null): boolean {
-  return intakeTestMarker(businessName, licenseNumber);
 }
 
 export function parseSupplierIntake(value: unknown): { ok: true; lead: SupplierLead } | { ok: false; fields: string[] } {
@@ -71,26 +78,31 @@ export function parseSupplierIntake(value: unknown): { ok: true; lead: SupplierL
   if (!submittedAt) fields.push('submitted_at');
   const businessName = text(record.business_name, 1, 160);
   if (!businessName) fields.push('business_name');
-  const contactName = text(record.contact_name, 1, 120);
-  if (!contactName) fields.push('contact_name');
-  const contactEmail = typeof record.contact_email === 'string' && record.contact_email.length <= 200 && EMAIL_RE.test(record.contact_email) ? record.contact_email : null;
-  if (!contactEmail) fields.push('contact_email');
-  const contactPhone = text(record.contact_phone, 1, 40);
-  if (!contactPhone) fields.push('contact_phone');
-  const licenseNumber = optionalText(record.license_number, 40);
-  if (licenseNumber === 'invalid') fields.push('license_number');
+  const tradeName = optionalText(record.trade_name, 160);
+  if (tradeName === 'invalid') fields.push('trade_name');
   const supplyType = SUPPLY_TYPES.find((item) => item === record.supply_type) || null;
   if (!supplyType) fields.push('supply_type');
+  const licenseNumber = optionalText(record.license_number, 40);
+  if (licenseNumber === 'invalid' || licenseNumber === 'ROD' || licenseNumber === 'ROND') fields.push('license_number');
+  else if (supplyType && CANNABIS_SUPPLY.has(supplyType) && (licenseNumber === null || !OCM_LICENSE_RE.test(licenseNumber))) fields.push('license_number');
+  const contactName = text(record.contact_name, 1, 120);
+  if (!contactName) fields.push('contact_name');
+  const contactRole = optionalText(record.contact_role, 80);
+  if (contactRole === 'invalid') fields.push('contact_role');
+  const contactEmail = typeof record.contact_email === 'string' && record.contact_email.length <= 200 && EMAIL_RE.test(record.contact_email) ? record.contact_email : null;
+  if (!contactEmail) fields.push('contact_email');
+  const contactPhone = optionalText(record.contact_phone, 40);
+  if (contactPhone === 'invalid') fields.push('contact_phone');
   const county = parseCounty(record.county);
   if (!county.ok || !county.county) fields.push('county');
   const message = optionalText(record.message, 500);
   if (message === 'invalid') fields.push('message');
-  const consentVersion = typeof record.consent_version === 'string' && CONSENT_RE.test(record.consent_version) ? record.consent_version : null;
+  const consentVersion = SUPPLIER_CONSENT_VERSIONS.find((item) => item === record.consent_version) || null;
   if (!consentVersion) fields.push('consent_version');
   if (record.source_route !== '/card') fields.push('source_route');
   const sourceEvent = typeof record.source_event === 'string' && EVENT_RE.test(record.source_event) ? record.source_event : null;
   if (!sourceEvent) fields.push('source_event');
-  if (fields.length || !inquiryId || !submittedAt || !businessName || !contactName || !contactEmail || !contactPhone || !supplyType || !county.ok || !county.county || !consentVersion || !sourceEvent) {
+  if (fields.length || !inquiryId || !submittedAt || !businessName || !contactName || !contactEmail || !supplyType || !county.ok || !county.county || !consentVersion || !sourceEvent) {
     return { ok: false, fields };
   }
   return {
@@ -99,11 +111,13 @@ export function parseSupplierIntake(value: unknown): { ok: true; lead: SupplierL
       inquiryId,
       submittedAt,
       businessName,
-      contactName,
-      contactEmail,
-      contactPhone,
-      licenseNumber: licenseNumber || null,
+      tradeName: tradeName || null,
       supplyType,
+      licenseNumber: licenseNumber || null,
+      contactName,
+      contactRole: contactRole || null,
+      contactEmail,
+      contactPhone: contactPhone || null,
       county: county.county,
       message: message || null,
       consentVersion,

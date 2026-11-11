@@ -256,12 +256,20 @@ grant execute on function public.crm_receive_bond_inquiry(uuid, timestamptz, tim
 
 create table if not exists public.crm_supplier_inquiries (
   inquiry_id uuid primary key,
+  submitted_at timestamptz not null,
   business_name text not null check (char_length(business_name) between 1 and 160),
+  trade_name text check (trade_name is null or char_length(trade_name) between 1 and 160),
+  supply_type text not null check (supply_type in (
+    'cannabis_nys_adult_use_cultivator',
+    'cannabis_nys_microbusiness_or_cooperative',
+    'hemp_or_hemp_extract',
+    'non_cannabis_inputs'
+  )),
+  license_number text,
   contact_name text not null check (char_length(contact_name) between 1 and 120),
+  contact_role text check (contact_role is null or char_length(contact_role) between 1 and 80),
   contact_email text not null check (char_length(contact_email) between 3 and 200),
-  contact_phone text not null check (char_length(contact_phone) between 1 and 40),
-  license_number text check (license_number is null or char_length(license_number) between 1 and 40),
-  supply_type text not null check (supply_type in ('fresh_frozen_biomass', 'other_biomass', 'other_input')),
+  contact_phone text check (contact_phone is null or char_length(contact_phone) between 1 and 40),
   county text not null check (county in (
     'Albany',
     'Allegany',
@@ -327,29 +335,35 @@ create table if not exists public.crm_supplier_inquiries (
     'Yates'
   )),
   message text check (message is null or char_length(message) <= 500),
-  consent_version text not null check (consent_version ~ '^v1:[0-9a-f]{16}$'),
-  consent_received_at timestamptz not null,
+  consent_version text not null check (consent_version = 'v1:56b70a071c4714eb'),
   source_route text not null check (source_route = '/card'),
   source_event text not null check (source_event ~ '^[a-z0-9-]{1,64}$'),
-  submitted_at timestamptz not null,
-  received_at timestamptz not null,
-  status text not null default 'received' check (status in ('received', 'qualified', 'declined')),
-  possible_duplicate boolean not null default false,
-  record_marker text check (record_marker is null or record_marker = 'test'),
-  created_at timestamptz not null default now()
+  replied_at timestamptz,
+  constraint crm_supplier_inquiries_license_check check (
+    (
+      supply_type in ('cannabis_nys_adult_use_cultivator', 'cannabis_nys_microbusiness_or_cooperative')
+      and license_number ~ '^OCM-[A-Z]{2,6}-[0-9]{2}-[0-9]{6}$'
+    )
+    or (
+      supply_type in ('hemp_or_hemp_extract', 'non_cannabis_inputs')
+      and (license_number is null or char_length(license_number) between 1 and 40)
+      and license_number is distinct from 'ROD'
+      and license_number is distinct from 'ROND'
+    )
+  )
 );
 
 comment on table public.crm_supplier_inquiries is
-  'Farmer and supplier intake from the trade show card. Not a retailer account. Not a Bond Haus member. Not seeded. license_number is stored as typed and does not certify a license.';
+  'Farmer and supplier intake from the trade show card. Not a retailer account. Not a Bond Haus member. Not seeded. license_number is a format check only and does not certify a license.';
 comment on column public.crm_supplier_inquiries.supply_type is
-  'What the supplier offered: fresh frozen biomass, other biomass, or other input material.';
-comment on column public.crm_supplier_inquiries.status is
-  'received is unqualified. qualified and declined are kept out of the 12 month purge.';
+  'cannabis_nys_adult_use_cultivator, cannabis_nys_microbusiness_or_cooperative, hemp_or_hemp_extract, or non_cannabis_inputs. ROD and ROND are not values.';
+comment on column public.crm_supplier_inquiries.consent_version is
+  'Supplier consent line v1:56b70a071c4714eb. Not the dispensary consent version.';
+comment on column public.crm_supplier_inquiries.replied_at is
+  'Last reply or qualification time. Null means never replied. The 12 month purge uses this, then submitted_at. Scheduling that purge needs Gary approval. No cron is created here.';
 
-create index if not exists crm_supplier_inquiries_received_idx
-  on public.crm_supplier_inquiries (status, received_at);
-create index if not exists crm_supplier_inquiries_email_idx
-  on public.crm_supplier_inquiries (lower(contact_email));
+create index if not exists crm_supplier_inquiries_retention_idx
+  on public.crm_supplier_inquiries ((coalesce(replied_at, submitted_at)));
 
 create table if not exists public.crm_supplier_intake_deletions (
   id uuid primary key default gen_random_uuid(),
@@ -370,22 +384,25 @@ alter table public.crm_supplier_intake_deletions enable row level security;
 alter table public.crm_supplier_intake_deletions force row level security;
 revoke all on table public.crm_supplier_intake_deletions from public, anon, authenticated, service_role;
 
+drop function if exists public.crm_receive_supplier_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean);
+drop function if exists public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text);
+
 create or replace function public.crm_receive_supplier_inquiry(
   p_inquiry_id uuid,
   p_submitted_at timestamptz,
-  p_received_at timestamptz,
   p_business_name text,
+  p_trade_name text,
+  p_supply_type text,
+  p_license_number text,
   p_contact_name text,
+  p_contact_role text,
   p_contact_email text,
   p_contact_phone text,
-  p_license_number text,
-  p_supply_type text,
   p_county text,
   p_message text,
   p_consent_version text,
   p_source_route text,
-  p_source_event text,
-  p_test boolean
+  p_source_event text
 ) returns jsonb
 language plpgsql
 security definer
@@ -393,9 +410,11 @@ set search_path = pg_catalog
 as $$
 declare
   v_license text;
+  v_phone text;
+  v_trade text;
+  v_role text;
   v_message text;
-  v_dup boolean := false;
-  v_name text;
+  v_cannabis boolean;
 begin
   if exists (select 1 from public.crm_supplier_inquiries where inquiry_id = p_inquiry_id) then
     return pg_catalog.jsonb_build_object('ok', true, 'duplicate', true);
@@ -406,68 +425,72 @@ begin
   if p_source_event is null or p_source_event !~ '^[a-z0-9-]{1,64}$' then
     raise exception 'source_event is required';
   end if;
+  if p_consent_version is distinct from 'v1:56b70a071c4714eb' then
+    raise exception 'consent_version is not the supplier consent line';
+  end if;
+  if p_supply_type not in (
+    'cannabis_nys_adult_use_cultivator',
+    'cannabis_nys_microbusiness_or_cooperative',
+    'hemp_or_hemp_extract',
+    'non_cannabis_inputs'
+  ) then
+    raise exception 'supply_type is not recognized';
+  end if;
 
   v_license := nullif(btrim(p_license_number), '');
+  v_phone := nullif(btrim(p_contact_phone), '');
+  v_trade := nullif(btrim(p_trade_name), '');
+  v_role := nullif(btrim(p_contact_role), '');
   v_message := nullif(btrim(p_message), '');
-  v_name := lower(btrim(regexp_replace(regexp_replace(coalesce(p_business_name, ''), '[^a-zA-Z0-9]+', ' ', 'g'), '[[:space:]]+', ' ', 'g')));
-
-  if exists (
-    select 1
-    from public.crm_supplier_inquiries s
-    where lower(s.contact_email) = lower(btrim(p_contact_email))
-       or (
-         v_name <> ''
-         and lower(btrim(regexp_replace(regexp_replace(s.business_name, '[^a-zA-Z0-9]+', ' ', 'g'), '[[:space:]]+', ' ', 'g'))) = v_name
-       )
-  ) then
-    v_dup := true;
+  v_cannabis := p_supply_type in ('cannabis_nys_adult_use_cultivator', 'cannabis_nys_microbusiness_or_cooperative');
+  if v_cannabis and (v_license is null or v_license !~ '^OCM-[A-Z]{2,6}-[0-9]{2}-[0-9]{6}$') then
+    raise exception 'license_number is required for this supply type';
+  end if;
+  if v_license in ('ROD', 'ROND') then
+    raise exception 'license_number is not recognized';
   end if;
 
   insert into public.crm_supplier_inquiries (
     inquiry_id,
+    submitted_at,
     business_name,
+    trade_name,
+    supply_type,
+    license_number,
     contact_name,
+    contact_role,
     contact_email,
     contact_phone,
-    license_number,
-    supply_type,
     county,
     message,
     consent_version,
-    consent_received_at,
     source_route,
     source_event,
-    submitted_at,
-    received_at,
-    status,
-    possible_duplicate,
-    record_marker
+    replied_at
   ) values (
     p_inquiry_id,
+    p_submitted_at,
     p_business_name,
-    p_contact_name,
-    p_contact_email,
-    p_contact_phone,
-    v_license,
+    v_trade,
     p_supply_type,
+    v_license,
+    p_contact_name,
+    v_role,
+    p_contact_email,
+    v_phone,
     p_county,
     v_message,
     p_consent_version,
-    p_received_at,
     '/card',
     p_source_event,
-    p_submitted_at,
-    p_received_at,
-    'received',
-    v_dup,
-    case when p_test then 'test' else null end
+    null
   );
-  return pg_catalog.jsonb_build_object('ok', true, 'duplicate', false, 'possible_duplicate', v_dup);
+  return pg_catalog.jsonb_build_object('ok', true, 'duplicate', false);
 end;
 $$;
 
-comment on function public.crm_receive_supplier_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean) is
-  'Stores a farmer or supplier inquiry in crm_supplier_inquiries. Does not write crm_accounts. Same inquiry_id is an idempotent replay. Does not call Metrc.';
+comment on function public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text) is
+  'Stores a farmer or supplier inquiry in crm_supplier_inquiries. Does not write crm_accounts. Same inquiry_id is an idempotent replay. License format is checked only. Does not call Metrc.';
 
 create or replace function public.crm_delete_supplier_inquiry(p_inquiry_id uuid)
 returns jsonb
@@ -496,8 +519,7 @@ declare
 begin
   with gone as (
     delete from public.crm_supplier_inquiries
-    where status = 'received'
-      and received_at <= p_now - interval '12 months'
+    where coalesce(replied_at, submitted_at) <= p_now - interval '12 months'
     returning inquiry_id
   )
   select pg_catalog.count(*) into purged from gone;
@@ -510,10 +532,10 @@ end;
 $$;
 
 comment on function public.crm_purge_supplier_inquiries(timestamptz) is
-  'Removes supplier inquiries still in status received when they are 12 months old or older. Qualified and declined rows are kept.';
+  'Removes supplier inquiries whose last reply or qualification, or submitted_at when never replied, is 12 months old or older. This function is not scheduled. Scheduling needs Gary approval.';
 
-revoke all on function public.crm_receive_supplier_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean) from public, anon, authenticated;
-grant execute on function public.crm_receive_supplier_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean) to service_role;
+revoke all on function public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text) from public, anon, authenticated;
+grant execute on function public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text) to service_role;
 revoke all on function public.crm_delete_supplier_inquiry(uuid) from public, anon, authenticated;
 grant execute on function public.crm_delete_supplier_inquiry(uuid) to service_role;
 revoke all on function public.crm_purge_supplier_inquiries(timestamptz) from public, anon, authenticated;

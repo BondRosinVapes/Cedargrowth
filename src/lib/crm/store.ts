@@ -26,7 +26,7 @@ import { sampleTaskTitle, type MediaKind, type VisitOutcome } from './field';
 import { confirmationFor, currentReleased, defaultExpiry, hashReorderToken, linkAccess, newReorderToken, parseReorderLines, reorderDeal, type ReleasedBatch, type ReorderLine } from './reorder';
 import { knownEmailEvent, type EmailEvent } from './emailStatus';
 import { intakeTestMarker, type IntakeLead } from './intake';
-import { supplierTestMarker, type SupplierLead } from './supplierIntake';
+import type { SupplierLead } from './supplierIntake';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
 import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
 import { wonMergeOnSave, type ContactPrior, type MergeRow } from './distributionMerge';
@@ -1793,23 +1793,23 @@ class SupabaseCrmStore implements CrmStore {
     return { state: 'ok' as const, value: { duplicate: payload.duplicate === true } };
   }
 
-  async receiveSupplierInquiry(lead: SupplierLead, receivedAt: string) {
+  async receiveSupplierInquiry(lead: SupplierLead, _receivedAt: string) {
     const { data, error } = await this.db.rpc('crm_receive_supplier_inquiry', {
       p_inquiry_id: lead.inquiryId,
       p_submitted_at: lead.submittedAt,
-      p_received_at: receivedAt,
       p_business_name: lead.businessName,
+      p_trade_name: lead.tradeName,
+      p_supply_type: lead.supplyType,
+      p_license_number: lead.licenseNumber,
       p_contact_name: lead.contactName,
+      p_contact_role: lead.contactRole,
       p_contact_email: lead.contactEmail,
       p_contact_phone: lead.contactPhone,
-      p_license_number: lead.licenseNumber,
-      p_supply_type: lead.supplyType,
       p_county: lead.county,
       p_message: lead.message,
       p_consent_version: lead.consentVersion,
       p_source_route: lead.sourceRoute,
       p_source_event: lead.sourceEvent,
-      p_test: supplierTestMarker(lead.businessName, lead.licenseNumber),
     });
     if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
     const payload = data as { ok?: boolean; duplicate?: boolean } | null;

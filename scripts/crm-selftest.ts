@@ -740,7 +740,7 @@ class MemoryCrm implements CrmStore {
     return { state: 'ok' as const, value: row };
   }
   intakeLogs: { inquiryId: string; receivedAt: string; result: 'created' | 'possible_duplicate'; sourceRoute: '/order' | '/card'; sourceEvent: string | null }[] = [];
-  supplierInquiries: { inquiryId: string; businessName: string; contactEmail: string; licenseNumber: string | null; supplyType: string; county: string; message: string | null; sourceRoute: '/card'; sourceEvent: string; status: 'received'; possibleDuplicate: boolean; recordMarker: 'test' | null; receivedAt: string }[] = [];
+  supplierInquiries: { inquiryId: string; submittedAt: string; businessName: string; tradeName: string | null; supplyType: string; licenseNumber: string | null; contactName: string; contactRole: string | null; contactEmail: string; contactPhone: string | null; county: string; message: string | null; consentVersion: string; sourceRoute: '/card'; sourceEvent: string; repliedAt: string | null }[] = [];
   intakeDeletions: { id: string; reason: 'named' | 'retention'; contactName: 'bond' }[] = [];
   async receiveBondInquiry(lead: IntakeLead, receivedAt: string) {
     if (this.intakeLogs.some((row) => row.inquiryId === lead.inquiryId)) return { state: 'ok' as const, value: { duplicate: true } };
@@ -768,12 +768,26 @@ class MemoryCrm implements CrmStore {
     this.intakeLogs.push({ inquiryId: lead.inquiryId, receivedAt, result: 'created', sourceRoute: lead.sourceRoute, sourceEvent: lead.sourceEvent });
     return { state: 'ok' as const, value: { duplicate: false } };
   }
-  async receiveSupplierInquiry(lead: import('../src/lib/crm/supplierIntake.ts').SupplierLead, receivedAt: string) {
+  async receiveSupplierInquiry(lead: import('../src/lib/crm/supplierIntake.ts').SupplierLead, _receivedAt: string) {
     if (this.supplierInquiries.some((row) => row.inquiryId === lead.inquiryId)) return { state: 'ok' as const, value: { duplicate: true } };
-    const name = normalizeBusinessName(lead.businessName);
-    const possibleDuplicate = this.supplierInquiries.some((row) => row.contactEmail.toLowerCase() === lead.contactEmail.toLowerCase() || (name !== '' && normalizeBusinessName(row.businessName) === name));
-    const marker = lead.businessName.toLowerCase().includes(INTAKE_TEST_MARKER.toLowerCase()) || (lead.licenseNumber || '').toLowerCase().includes(INTAKE_TEST_MARKER.toLowerCase());
-    this.supplierInquiries.push({ inquiryId: lead.inquiryId, businessName: lead.businessName, contactEmail: lead.contactEmail, licenseNumber: lead.licenseNumber, supplyType: lead.supplyType, county: lead.county, message: lead.message, sourceRoute: '/card', sourceEvent: lead.sourceEvent, status: 'received', possibleDuplicate, recordMarker: marker ? 'test' : null, receivedAt });
+    this.supplierInquiries.push({
+      inquiryId: lead.inquiryId,
+      submittedAt: lead.submittedAt,
+      businessName: lead.businessName,
+      tradeName: lead.tradeName,
+      supplyType: lead.supplyType,
+      licenseNumber: lead.licenseNumber,
+      contactName: lead.contactName,
+      contactRole: lead.contactRole,
+      contactEmail: lead.contactEmail,
+      contactPhone: lead.contactPhone,
+      county: lead.county,
+      message: lead.message,
+      consentVersion: lead.consentVersion,
+      sourceRoute: '/card',
+      sourceEvent: lead.sourceEvent,
+      repliedAt: null,
+    });
     return { state: 'ok' as const, value: { duplicate: false } };
   }
   async deleteBondInquiry(inquiryId: string) {
@@ -1414,7 +1428,17 @@ const cardMissing = await handleBondIntake(intakeStore, intakeRequest(intakePayl
 const orderEvent = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '23232323-2323-4232-8232-232323232323', business_name: 'Order Event', license_number: 'CARD-3', contact_email: 'order@event.test', source_route: '/order', source_event: 'nyc-2026' })), { nowMs: intakeNow, env: intakeEnv });
 const orderNull = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '24242424-2424-4242-8242-242424242424', business_name: 'Order Null', license_number: 'CARD-4', contact_email: 'null@event.test', source_event: null })), { nowMs: intakeNow, env: intakeEnv });
 const badEvent = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '25252525-2525-4252-8252-252525252525', business_name: 'Bad Event', license_number: 'CARD-5', contact_email: 'bad@event.test', source_route: '/card', source_event: 'NYC_Show' })), { nowMs: intakeNow, env: intakeEnv });
-assert(cardLead.status === 200 && cardAccount?.leadSource === 'bond_inquiry' && cardAccount.sourceEvent === 'nyc-2026' && cardLog?.sourceRoute === '/card' && cardLog.sourceEvent === 'nyc-2026' && rotatedAccount?.sourceEvent == null && cardMissing.status === 400 && orderEvent.status === 400 && orderNull.status === 200 && badEvent.status === 400 && intakeStore.accounts.every((row) => row.displayName !== 'No Event' && row.displayName !== 'Order Event' && row.displayName !== 'Bad Event'), 'a card lead stores its event, and an order lead cannot carry one');
+const visitorKeys = ['ip', 'user_agent', 'cookie_id', 'card_view'];
+const visitorRejected = [];
+for (const key of visitorKeys) {
+  const result = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '26262626-2626-4262-8262-262626262626', business_name: 'Visitor Shop', license_number: 'CARD-6', contact_email: 'visit@card.test', source_route: '/card', source_event: 'nyc-2026', [key]: 'hidden' })), { nowMs: intakeNow, env: intakeEnv });
+  visitorRejected.push(result.status === 400 && Array.isArray(result.body.fields) && result.body.fields.includes(key) && JSON.stringify(result.body).includes('hidden') === false);
+}
+const intakeHandler = readFileSync('src/lib/crm/handlers.ts', 'utf8');
+const bondIntakeBody = intakeHandler.slice(intakeHandler.indexOf('export async function handleBondIntake'), intakeHandler.indexOf('export async function handleSupplierIntake'));
+const intakeSql = readFileSync('supabase/migrations/0138_crm_card_and_supplier_intake.sql', 'utf8');
+const intakeLogInserts = intakeSql.split('insert into public.crm_intake_log').slice(1).join('\n');
+assert(cardLead.status === 200 && cardAccount?.leadSource === 'bond_inquiry' && cardAccount.sourceEvent === 'nyc-2026' && cardLog?.sourceRoute === '/card' && cardLog.sourceEvent === 'nyc-2026' && rotatedAccount?.sourceEvent == null && cardMissing.status === 400 && orderEvent.status === 400 && orderNull.status === 200 && badEvent.status === 400 && visitorRejected.every(Boolean) && intakeStore.accounts.every((row) => row.displayName !== 'No Event' && row.displayName !== 'Order Event' && row.displayName !== 'Bad Event' && row.displayName !== 'Visitor Shop') && bondIntakeBody.includes('user-agent') === false && bondIntakeBody.includes('x-forwarded-for') === false && intakeLogInserts.includes('user_agent') === false && intakeLogInserts.includes(' ip') === false, 'a card lead stores its event, and an order lead cannot carry one');
 clearIntakeRates();
 for (let hit = 0; hit < 30; hit += 1) takeIntakeRate('/order', intakeNow);
 const limited = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '20202020-2020-4202-8202-202020202020', business_name: 'Late Shop', license_number: 'LATE-1', contact_email: 'late@late.test' })), { nowMs: intakeNow, env: intakeEnv });
@@ -1426,10 +1450,10 @@ function supplierPayload(overrides: Record<string, unknown> = {}) {
     contact_name: 'Ada Grower',
     contact_email: 'ada@northfarm.test',
     contact_phone: '555-0100',
-    supply_type: 'fresh_frozen_biomass',
+    supply_type: 'hemp_or_hemp_extract',
     county: 'Erie',
     message: 'Frozen lot',
-    consent_version: 'v1:0123456789abcdef',
+    consent_version: 'v1:56b70a071c4714eb',
     source_route: '/card',
     source_event: 'nyc-2026',
     ...overrides,
@@ -1454,17 +1478,24 @@ const supplierStale = await handleSupplierIntake(intakeStore, supplierRequest(su
 const supplierOk = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload(), { secret: 'supplier-next' }), { nowMs: intakeNow, env: supplierEnv });
 const supplierReplay = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload(), { secret: 'supplier-next' }), { nowMs: intakeNow, env: supplierEnv });
 const supplierRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '31313131-3131-4131-8131-313131313131');
-const supplierUnknown = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '32323232-3232-4232-8232-323232323232', lead_type: 'supplier' })), { nowMs: intakeNow, env: supplierEnv });
+const removedKeys = ['street', 'date_of_birth', 'ssn', 'ein', 'tax_id', 'bank_account', 'upload', 'yield', 'price', 'quantity', 'personal_phone', 'personal_email', 'haus', 'consumer', 'lead_type'];
+const removedRejected = [];
+for (const key of removedKeys) {
+  const result = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '32323232-3232-4232-8232-323232323232', [key]: 'hidden' })), { nowMs: intakeNow, env: supplierEnv });
+  removedRejected.push(result.status === 400 && Array.isArray(result.body.fields) && result.body.fields.includes(key) && JSON.stringify(result.body).includes('hidden') === false);
+}
 const supplierCounty = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '33333333-3333-4333-8333-333333333333', county: 'Brooklyn' })), { nowMs: intakeNow, env: supplierEnv });
 const supplierRoute = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '34343434-3434-4434-8434-343434343434', source_route: '/order' })), { nowMs: intakeNow, env: supplierEnv });
 const supplierEvent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '35353535-3535-4535-8535-353535353535', source_event: null })), { nowMs: intakeNow, env: supplierEnv });
-const supplierType = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '36363636-3636-4636-8636-363636363636', supply_type: 'flower' })), { nowMs: intakeNow, env: supplierEnv });
-const supplierLong = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '37373737-3737-4737-8737-373737373737', message: 'm'.repeat(501) })), { nowMs: intakeNow, env: supplierEnv });
-const supplierDup = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '38383838-3838-4838-8838-383838383838', business_name: 'Other Farm', contact_email: 'ada@northfarm.test' })), { nowMs: intakeNow, env: supplierEnv });
-const supplierTest = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '39393939-3939-4939-8939-393939393939', business_name: 'TEST ONLY Farm', license_number: 'TEST ONLY', contact_email: 'qa@farm.test' })), { nowMs: intakeNow, env: supplierEnv });
-const supplierTestRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '39393939-3939-4939-8939-393939393939');
-const supplierDupRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '38383838-3838-4838-8838-383838383838');
-assert(supplierOff.status === 503 && supplierBad.status === 401 && supplierStale.status === 401 && supplierOk.status === 200 && supplierReplay.status === 200 && supplierReplay.body.duplicate === true && supplierRow?.supplyType === 'fresh_frozen_biomass' && supplierRow.sourceEvent === 'nyc-2026' && supplierRow.recordMarker === null && intakeStore.accounts.length === accountsBeforeSupplier && supplierUnknown.status === 400 && supplierCounty.status === 400 && supplierRoute.status === 400 && supplierEvent.status === 400 && supplierType.status === 400 && supplierLong.status === 400 && supplierDup.status === 200 && supplierDupRow?.possibleDuplicate === true && supplierTest.status === 200 && supplierTestRow?.recordMarker === 'test' && intakeStore.supplierInquiries.length === 3, 'supplier intake stays out of dispensary accounts and rejects a bad signature, county, or unknown key');
+const supplierRod = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '36363636-3636-4636-8636-363636363636', supply_type: 'ROD' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierRond = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '37373737-3737-4737-8737-373737373737', supply_type: 'ROND' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierNoLicense = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '40404040-4040-4040-8040-404040404040', supply_type: 'cannabis_nys_adult_use_cultivator' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierBadLicense = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '41414141-4141-4141-8141-414141414141', supply_type: 'cannabis_nys_microbusiness_or_cooperative', license_number: 'OCM-1' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierDispensaryConsent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '42424242-4242-4242-8242-424242424242', consent_version: 'v1:46652a17994f78d1' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierUnknownConsent = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '43434343-4343-4343-8343-434343434343', consent_version: 'v1:0123456789abcdef' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierCannabis = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '44444444-4444-4444-8444-444444444444', supply_type: 'cannabis_nys_adult_use_cultivator', license_number: 'OCM-AU-26-000123', trade_name: 'North Lot', contact_role: 'Grower' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierCannabisRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '44444444-4444-4444-8444-444444444444');
+assert(supplierOff.status === 503 && supplierBad.status === 401 && supplierStale.status === 401 && supplierOk.status === 200 && supplierReplay.status === 200 && supplierReplay.body.duplicate === true && supplierRow?.consentVersion === 'v1:56b70a071c4714eb' && supplierRow.supplyType === 'hemp_or_hemp_extract' && supplierRow.licenseNumber === null && supplierRow.sourceEvent === 'nyc-2026' && supplierRow.repliedAt === null && intakeStore.accounts.length === accountsBeforeSupplier && removedRejected.every(Boolean) && supplierCounty.status === 400 && supplierRoute.status === 400 && supplierEvent.status === 400 && supplierRod.status === 400 && supplierRond.status === 400 && supplierNoLicense.status === 400 && supplierBadLicense.status === 400 && supplierDispensaryConsent.status === 400 && supplierUnknownConsent.status === 400 && supplierCannabis.status === 200 && supplierCannabisRow?.licenseNumber === 'OCM-AU-26-000123' && supplierCannabisRow.consentVersion === 'v1:56b70a071c4714eb' && supplierCannabisRow.tradeName === 'North Lot', 'supplier intake stays out of dispensary accounts and rejects a bad signature, county, license, or consent version');
 assert(limited.status === 429 && (limited.retryAfter || 0) >= 1 && intakeStore.accounts.every((row) => row.displayName !== 'Late Shop'), 'the source rate limit returns retry after and stores nothing');
 assert(intakeLogs.every((line) => line.includes('test-secret') === false && line.includes('next-secret') === false && line.includes('ada@northstore.test') === false && line.includes('Hello plain') === false), 'secret and payload never logged');
 assert(parseIntake({ consumer: true }).ok === false && intakeExpired('2024-01-01T00:00:00Z', '2026-11-09T15:00:00Z') && intakeExpired('2026-10-01T00:00:00Z', '2026-11-09T15:00:00Z') === false, 'consumer fields are rejected and the retention window is twelve months');
