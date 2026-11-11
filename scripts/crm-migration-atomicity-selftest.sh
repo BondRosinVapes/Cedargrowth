@@ -49,7 +49,19 @@ if [ "$LEFT" != "0" ]; then
 fi
 echo 'ok: injected failure left no crm tables'
 
-sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-apply-bundle.sql" >/tmp/crm-atomicity-ok.log
+awk -v root="$ROOT" '
+  /^\\ir / {
+    orig = $0
+    sub(/^\\ir \.\.\//, "\\ir " root "/")
+    if (orig ~ /0138_crm_card_and_supplier_intake\.sql$/) {
+      print "alter default privileges for role postgres in schema public grant all on tables to service_role, anon, authenticated;"
+    }
+    print
+    next
+  }
+  { print }
+' "${ROOT}/scripts/crm-apply-bundle.sql" > /tmp/crm-bundle-with-defaults.sql
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f /tmp/crm-bundle-with-defaults.sql >/tmp/crm-atomicity-ok.log
 RLS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname like 'crm_%' and c.relkind='r' and c.relrowsecurity and c.relforcerowsecurity;")
 TABLES=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname like 'crm_%' and c.relkind='r';")
 if [ "$RLS" != "$TABLES" ] || [ "$TABLES" = "0" ]; then
@@ -209,6 +221,28 @@ if [ "$FUTURE" != '{"ok": true, "purged": 0}' ] || [ "$FUTURE_LEFT" != "2" ] || 
   exit 1
 fi
 echo 'ok: a future clock does not purge recent supplier rows'
+SUP_ACL=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(string_agg(e.privilege_type, ',' order by e.privilege_type), '') from pg_class c cross join lateral aclexplode(c.relacl) e join pg_roles r on r.oid = e.grantee where c.oid = 'public.crm_supplier_inquiries'::regclass and r.rolname = 'service_role';")
+SUP_COL=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(string_agg(a.attname, ',' order by a.attname), '') from pg_attribute a cross join lateral aclexplode(a.attacl) e join pg_roles r on r.oid = e.grantee where a.attrelid = 'public.crm_supplier_inquiries'::regclass and a.attnum > 0 and not a.attisdropped and r.rolname = 'service_role' and e.privilege_type = 'UPDATE';")
+SUP_OTHER=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from (select 1 from pg_class c cross join lateral aclexplode(c.relacl) e left join pg_roles r on r.oid = e.grantee where c.oid = 'public.crm_supplier_inquiries'::regclass and (e.grantee = 0 or r.rolname in ('anon', 'authenticated')) union all select 1 from pg_attribute a cross join lateral aclexplode(a.attacl) e left join pg_roles r on r.oid = e.grantee where a.attrelid = 'public.crm_supplier_inquiries'::regclass and a.attnum > 0 and not a.attisdropped and (e.grantee = 0 or r.rolname in ('anon', 'authenticated'))) s;")
+SUP_BITS=$(sudo -u postgres psql -d "$DB" -tA -c "select has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'update')::text || ',' || has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'delete')::text || ',' || has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'truncate')::text || ',' || has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'trigger')::text || ',' || has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'references')::text || ',' || has_column_privilege('service_role', 'public.crm_supplier_inquiries', 'submitted_at', 'update')::text || ',' || has_column_privilege('service_role', 'public.crm_supplier_inquiries', 'replied_at', 'update')::text;")
+PGNUM=$(sudo -u postgres psql -d "$DB" -tA -c "select current_setting('server_version_num');")
+if [ "$PGNUM" -ge 170000 ]; then
+  SUP_MAINTAIN=$(sudo -u postgres psql -d "$DB" -tA -c "select has_table_privilege('service_role', 'public.crm_supplier_inquiries', 'maintain')::text;")
+else
+  SUP_MAINTAIN=unsupported
+fi
+expect_fail 'service role supplier submitted_at update' "set role service_role; update public.crm_supplier_inquiries set submitted_at = submitted_at where inquiry_id = '57575757-5757-4575-8575-575757575757';"
+if ! grep -q 'permission denied' /tmp/crm-crud-fail.log; then
+  echo 'FAIL: submitted_at update was not denied by privilege'
+  exit 1
+fi
+SERVICE_MARK=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "set role service_role; select public.crm_mark_supplier_replied('57575757-5757-4575-8575-575757575757'::uuid)::text;" | tail -n 1)
+if [ "$SUP_ACL" != "INSERT,SELECT" ] || [ "$SUP_COL" != "replied_at" ] || [ "$SUP_OTHER" != "0" ] || [ "$SUP_BITS" != "false,false,false,false,false,false,true" ] || { [ "$PGNUM" -ge 170000 ] && [ "$SUP_MAINTAIN" != "false" ]; } || { [ "$PGNUM" -lt 170000 ] && [ "$SUP_MAINTAIN" != "unsupported" ]; } || [ "$SERVICE_MARK" != '{"ok": true, "updated": true}' ]; then
+  echo "FAIL: supplier privileges acl=${SUP_ACL} columns=${SUP_COL} other=${SUP_OTHER} bits=${SUP_BITS} maintain=${SUP_MAINTAIN} mark=${SERVICE_MARK}"
+  exit 1
+fi
+echo 'ok: service_role cannot update submitted_at and can still mark a reply'
+expect_fail 'supplier email shape' "update public.crm_supplier_inquiries set contact_email = 'not-an-email' where inquiry_id = '57575757-5757-4575-8575-575757575757';"
 AGENT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10'::uuid, '2026-11-09T18:00:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"Agent Shop\",\"status\":\"prospect\",\"account_type\":\"adult_use_dispensary\",\"city\":\"Buffalo\",\"county\":\"Erie\",\"license_number\":\"AGENT-LIC-1\"},{\"op\":\"contact\",\"index\":1,\"name\":\"Agent Buyer\",\"email\":\"buyer@agent.test\",\"account_license\":\"AGENT-LIC-1\"},{\"op\":\"note\",\"index\":2,\"body\":\"Plain note\",\"account_license\":\"AGENT-LIC-1\"}]'::jsonb)::text;")
 AGENT_REPLAY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10'::uuid, '2026-11-09T18:00:00Z', '[]'::jsonb)->>'code';")
 AGENT_DUPE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa11'::uuid, '2026-11-09T18:05:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"Copy\",\"status\":\"prospect\",\"county\":\"Erie\",\"license_number\":\"agent-lic-1\"}]'::jsonb)::text;")

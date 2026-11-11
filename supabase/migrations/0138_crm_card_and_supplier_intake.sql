@@ -271,7 +271,10 @@ create table if not exists public.crm_supplier_inquiries (
   license_number text,
   contact_name text not null check (char_length(contact_name) between 1 and 120),
   contact_role text check (contact_role is null or char_length(contact_role) between 1 and 80),
-  contact_email text not null check (char_length(contact_email) between 3 and 200),
+  contact_email text not null check (
+    char_length(contact_email) between 3 and 200
+    and contact_email ~ '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
+  ),
   contact_phone text not null check (contact_phone ~ '^\+1[0-9]{10}$'),
   contact_phone_ext text check (contact_phone_ext is null or contact_phone_ext ~ '^[0-9]{1,6}$'),
   county text not null check (county in (
@@ -397,6 +400,7 @@ comment on table public.crm_supplier_intake_deletions is
 alter table public.crm_supplier_inquiries enable row level security;
 alter table public.crm_supplier_inquiries force row level security;
 revoke all on table public.crm_supplier_inquiries from public, anon, authenticated;
+revoke all on table public.crm_supplier_inquiries from service_role;
 grant select, insert on table public.crm_supplier_inquiries to service_role;
 grant update (replied_at) on table public.crm_supplier_inquiries to service_role;
 revoke delete, truncate, references, trigger on table public.crm_supplier_inquiries from service_role, anon, authenticated, public;
@@ -621,7 +625,7 @@ end;
 $$;
 
 comment on function public.crm_mark_supplier_replied(uuid) is
-  'Records a reply or qualification time. The purge deletes rows 12 months after replied_at, or 12 months after submitted_at if never replied. Not scheduled.';
+  'Records a reply or qualification time. The purge deletes rows 12 months after replied_at, or 12 months after submitted_at if never replied. A qualified supplier is a separate record outside this table. Not scheduled.';
 
 revoke all on function public.crm_mark_supplier_replied(uuid) from public, anon, authenticated;
 grant execute on function public.crm_mark_supplier_replied(uuid) to service_role;
