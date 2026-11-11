@@ -44,6 +44,7 @@ import { coverageLabel, territoryTiles, TERRITORY_METRICS, type TerritoryMetric 
 import { coordinatesInRange, unmappedAccountCount, type MapPin } from './nyMap';
 import { nextBestActions, snoozeUntil } from './nextAction';
 import { INTAKE_MAX_BYTES, intakeSecrets, parseIntake, signIntake, signaturesMatch, takeIntakeRate, timestampFresh } from './intake';
+import { parseSupplierIntake, signSupplierIntake, supplierSecrets, supplierSignaturesMatch, supplierTimestampFresh } from './supplierIntake';
 import { AGENT_ACTOR, AGENT_MAX_BYTES, AGENT_ROW_LIMIT, agentReady, agentSecret, agentSignatureOk, agentTimestampFresh, parseAgentEnvelope, parseAgentRow, type AgentOp } from './agentIntake';
 import { readResendEvent, sendDigestEmail, sendReorderLink } from '@/lib/email';
 import { FIELD_BUCKET, READ_URL_SECONDS, isProductLine, isVisitOutcome, mediaPath, roundLocation, validateMediaUpload } from './field';
@@ -1670,6 +1671,46 @@ export async function handleBondIntake(store: CrmStore, request: Request, option
   if (!idempotency || idempotency !== lead.lead.inquiryId) return { status: 400, body: { ok: false, fields: ['Idempotency-Key'] } };
   try {
     const saved = await store.receiveBondInquiry(lead.lead, new Date(nowMs).toISOString());
+    if (saved.state === 'absent') return { status: 503, body: { ok: false } };
+    if (saved.state !== 'ok') return { status: 500, body: { ok: false } };
+    return saved.value.duplicate ? { status: 200, body: { ok: true, duplicate: true } } : { status: 200, body: { ok: true } };
+  } catch {
+    return { status: 500, body: { ok: false } };
+  }
+}
+
+export async function handleSupplierIntake(store: CrmStore, request: Request, options?: { nowMs?: number; env?: Record<string, string | undefined> }): Promise<IntakeHttpResult> {
+  const nowMs = options?.nowMs ?? Date.now();
+  const secrets = supplierSecrets(options?.env ?? process.env);
+  if (!secrets.primary) return { status: 503, body: { ok: false } };
+  const declared = Number(request.headers.get('content-length') || 0);
+  if (Number.isFinite(declared) && declared > INTAKE_MAX_BYTES) return { status: 413, body: { ok: false } };
+  const rawBuffer = await request.arrayBuffer();
+  if (rawBuffer.byteLength > INTAKE_MAX_BYTES) return { status: 413, body: { ok: false } };
+  const raw = new TextDecoder().decode(rawBuffer);
+  const stamp = request.headers.get('x-cg-timestamp');
+  const provided = request.headers.get('x-cg-signature') || '';
+  if (!supplierTimestampFresh(stamp, nowMs) || !stamp) return { status: 401, body: { ok: false } };
+  const primaryOk = supplierSignaturesMatch(signSupplierIntake(secrets.primary, stamp, raw), provided);
+  const nextOk = secrets.next ? supplierSignaturesMatch(signSupplierIntake(secrets.next, stamp, raw), provided) : false;
+  if (!primaryOk && !nextOk) return { status: 401, body: { ok: false } };
+  let parsed: unknown = null;
+  let parsedOk = false;
+  try {
+    parsed = JSON.parse(raw);
+    parsedOk = true;
+  } catch {
+    parsedOk = false;
+  }
+  const rate = takeIntakeRate('supplier', nowMs);
+  if (rate.limited) return { status: 429, body: { ok: false }, retryAfter: rate.retryAfter };
+  if (!parsedOk) return { status: 400, body: { ok: false, fields: ['payload'] } };
+  const lead = parseSupplierIntake(parsed);
+  if (!lead.ok) return { status: 400, body: { ok: false, fields: lead.fields } };
+  const idempotency = parseUuid(request.headers.get('idempotency-key'));
+  if (!idempotency || idempotency !== lead.lead.inquiryId) return { status: 400, body: { ok: false, fields: ['Idempotency-Key'] } };
+  try {
+    const saved = await store.receiveSupplierInquiry(lead.lead, new Date(nowMs).toISOString());
     if (saved.state === 'absent') return { status: 503, body: { ok: false } };
     if (saved.state !== 'ok') return { status: 500, body: { ok: false } };
     return saved.value.duplicate ? { status: 200, body: { ok: true, duplicate: true } } : { status: 200, body: { ok: true } };

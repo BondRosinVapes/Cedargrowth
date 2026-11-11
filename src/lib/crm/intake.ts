@@ -29,10 +29,12 @@ export const INTAKE_KEYS = [
   'message',
   'consent_version',
   'source_route',
+  'source_event',
 ] as const;
 
-const OPTIONAL = new Set(['contact_phone', 'license_number', 'county', 'message']);
+const OPTIONAL = new Set(['contact_phone', 'license_number', 'county', 'message', 'source_event']);
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const EVENT_RE = /^[a-z0-9-]{1,64}$/;
 const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 const CONSENT_RE = /^v1:[0-9a-f]{16}$/;
 
@@ -51,7 +53,8 @@ export type IntakeLead = {
   county: string | null;
   message: string | null;
   consentVersion: string;
-  sourceRoute: '/order';
+  sourceRoute: '/order' | '/card';
+  sourceEvent: string | null;
 };
 
 export function intakeSecrets(env: Record<string, string | undefined>): { primary: string | null; next: string | null } {
@@ -128,8 +131,18 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
   if (message === 'invalid') fields.push('message');
   const consentVersion = typeof record.consent_version === 'string' && CONSENT_RE.test(record.consent_version) ? record.consent_version : null;
   if (!consentVersion) fields.push('consent_version');
-  if (record.source_route !== '/order') fields.push('source_route');
-  if (fields.length || !inquiryId || !submittedAt || !businessName || !contactName || !contactEmail || !street || !city || !postalCode || !consentVersion || !county.ok) {
+  const sourceRoute = record.source_route === '/order' || record.source_route === '/card' ? record.source_route : null;
+  if (!sourceRoute) fields.push('source_route');
+  const eventKey = Object.prototype.hasOwnProperty.call(record, 'source_event');
+  const eventRaw = record.source_event;
+  let sourceEvent: string | null = null;
+  if (sourceRoute === '/card') {
+    sourceEvent = typeof eventRaw === 'string' && EVENT_RE.test(eventRaw) ? eventRaw : null;
+    if (!sourceEvent) fields.push('source_event');
+  } else if (sourceRoute === '/order' && eventKey && eventRaw !== null && eventRaw !== undefined) {
+    fields.push('source_event');
+  }
+  if (fields.length || !inquiryId || !submittedAt || !businessName || !contactName || !contactEmail || !street || !city || !postalCode || !consentVersion || !county.ok || !sourceRoute || (sourceRoute === '/card' && !sourceEvent)) {
     return { ok: false, fields };
   }
   return {
@@ -149,7 +162,8 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
       county: county.county,
       message: message ? intakeMessageText(message) : null,
       consentVersion,
-      sourceRoute: '/order',
+      sourceRoute,
+      sourceEvent,
     },
   };
 }

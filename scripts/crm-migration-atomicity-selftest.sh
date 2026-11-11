@@ -157,12 +157,31 @@ if [ "$OLD" != '{"ok": true, "duplicate": false}' ] || [ "$KEPT" != '{"ok": true
   exit 1
 fi
 echo 'ok: purge removes an unverified lead and keeps a verified one'
-EXEC=$(sudo -u postgres psql -d "$DB" -tA -c "select has_function_privilege('anon', 'public.crm_receive_bond_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean)', 'execute')::text || ',' || has_function_privilege('service_role', 'public.crm_receive_bond_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean)', 'execute')::text || ',' || has_table_privilege('service_role', 'public.crm_intake_log', 'insert')::text;")
+EXEC=$(sudo -u postgres psql -d "$DB" -tA -c "select has_function_privilege('anon', 'public.crm_receive_bond_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean, text, text)', 'execute')::text || ',' || has_function_privilege('service_role', 'public.crm_receive_bond_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean, text, text)', 'execute')::text || ',' || has_table_privilege('service_role', 'public.crm_intake_log', 'insert')::text;")
 if [ "$EXEC" != "false,true,false" ]; then
   echo "FAIL: intake grants ${EXEC}"
   exit 1
 fi
 echo 'ok: intake log is writable only through the service role function'
+CARD=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('55555555-5555-4555-8555-555555555555'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Card Shop', 'Eve Buyer', 'eve@card.test', null, 'CARD-1', '5 Main', 'Buffalo', '14201', 'Erie', null, 'v1:0123456789abcdef', false, '/card', 'nyc-2026')::text;")
+CARD_ROW=$(sudo -u postgres psql -d "$DB" -tA -c "select a.lead_source || '|' || a.source_event || '|' || l.source_route || '|' || l.source_event from public.crm_accounts a join public.crm_intake_log l on l.inquiry_id = a.source_inquiry_id where a.display_name = 'Card Shop';")
+set +e
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_inquiry('56565656-5656-4565-8565-565656565656'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Order Event', 'Fay Buyer', 'fay@order.test', null, 'ORD-9', '6 Main', 'Buffalo', '14201', 'Erie', null, 'v1:0123456789abcdef', false, '/order', 'nyc-2026');" >/tmp/crm-order-event.log 2>&1
+ORDER_EVENT=$?
+set -e
+SUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('57575757-5757-4575-8575-575757575757'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'North Farm', 'Ada Grower', 'ada@northfarm.test', '555-0100', null, 'fresh_frozen_biomass', 'Erie', 'Frozen lot', 'v1:0123456789abcdef', '/card', 'nyc-2026', false)::text;")
+SUP_REPLAY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('57575757-5757-4575-8575-575757575757'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'North Farm', 'Ada Grower', 'ada@northfarm.test', '555-0100', null, 'fresh_frozen_biomass', 'Erie', 'Frozen lot', 'v1:0123456789abcdef', '/card', 'nyc-2026', false)::text;")
+SUP_ROW=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_supplier_inquiries) || ',' || (select count(*) from public.crm_accounts where display_name = 'North Farm') || ',' || (select supply_type || '|' || source_event || '|' || status from public.crm_supplier_inquiries);")
+set +e
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('58585858-5858-4585-8585-585858585858'::uuid, '2026-11-09T15:00:00Z', '2026-11-09T15:00:00Z', 'Bad County Farm', 'Bea Grower', 'bea@farm.test', '555-0101', null, 'other_input', 'Brooklyn', null, 'v1:0123456789abcdef', '/card', 'nyc-2026', false);" >/tmp/crm-supplier-county.log 2>&1
+SUP_COUNTY=$?
+set -e
+SUP_GRANT=$(sudo -u postgres psql -d "$DB" -tA -c "select has_table_privilege('anon', 'public.crm_supplier_inquiries', 'select')::text || ',' || has_function_privilege('anon', 'public.crm_receive_supplier_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean)', 'execute')::text;")
+if [ "$CARD" != '{"ok": true, "duplicate": false}' ] || [ "$CARD_ROW" != "bond_inquiry|nyc-2026|/card|nyc-2026" ] || [ "$ORDER_EVENT" -eq 0 ] || [ "$SUP" != '{"ok": true, "duplicate": false, "possible_duplicate": false}' ] || [ "$SUP_REPLAY" != '{"ok": true, "duplicate": true}' ] || [ "$SUP_ROW" != "1,0,fresh_frozen_biomass|nyc-2026|received" ] || [ "$SUP_COUNTY" -eq 0 ] || [ "$SUP_GRANT" != "false,false" ]; then
+  echo "FAIL: card and supplier intake ${CARD} ${CARD_ROW} order=${ORDER_EVENT} ${SUP} ${SUP_REPLAY} ${SUP_ROW} county=${SUP_COUNTY} grant=${SUP_GRANT}"
+  exit 1
+fi
+echo 'ok: a card lead stores its event and a supplier lead stays out of accounts'
 AGENT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10'::uuid, '2026-11-09T18:00:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"Agent Shop\",\"status\":\"prospect\",\"account_type\":\"adult_use_dispensary\",\"city\":\"Buffalo\",\"county\":\"Erie\",\"license_number\":\"AGENT-LIC-1\"},{\"op\":\"contact\",\"index\":1,\"name\":\"Agent Buyer\",\"email\":\"buyer@agent.test\",\"account_license\":\"AGENT-LIC-1\"},{\"op\":\"note\",\"index\":2,\"body\":\"Plain note\",\"account_license\":\"AGENT-LIC-1\"}]'::jsonb)::text;")
 AGENT_REPLAY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10'::uuid, '2026-11-09T18:00:00Z', '[]'::jsonb)->>'code';")
 AGENT_DUPE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa11'::uuid, '2026-11-09T18:05:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"Copy\",\"status\":\"prospect\",\"county\":\"Erie\",\"license_number\":\"agent-lic-1\"}]'::jsonb)::text;")
