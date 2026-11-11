@@ -91,6 +91,10 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
     };
   }, [openCluster]);
 
+  function openDispensary(id: string) {
+    onOpenAccount(id);
+  }
+
   function showCluster(cluster: PinCluster, button: SVGRectElement) {
     clusterButton.current = button;
     setOpenCluster(cluster);
@@ -162,7 +166,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
             <ul>
               {clusterMembers(openCluster.pins).map((row) => (
                 <li key={row.id}>
-                  <button type="button" onClick={() => onOpenAccount(row.id)} className="flex min-h-[44px] w-full flex-col items-start justify-center px-3 py-2 text-left">
+                  <button type="button" onClick={() => openDispensary(row.id)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); openDispensary(row.id); } }} className="flex min-h-[44px] w-full flex-col items-start justify-center px-3 py-2 text-left">
                     <span className="text-body-m text-primary">{row.name}</span>
                     <span className="text-caption text-secondary">{row.place}</span>
                   </button>
@@ -250,8 +254,8 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
                   aria-label={pin.displayName}
                   onMouseEnter={() => setActiveId(pin.id)}
                   onFocus={() => setActiveId(pin.id)}
-                  onClick={() => onOpenAccount(pin.id)}
-                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpenAccount(pin.id); } }}
+                  onClick={() => openDispensary(pin.id)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDispensary(pin.id); } }}
                 />
                 <rect
                   x={pin.x - size / 2}
@@ -269,7 +273,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
         </svg>
       </div>
       <aside className="flex flex-col gap-3 border border-hairline bg-clinical p-3">
-        {active ? <PinCard pin={active} onOpen={() => onOpenAccount(active.id)} /> : <p className="text-body-m text-secondary">Hover or focus a dispensary to see its record. Select it to open the account.</p>}
+        {active ? <PinCard pin={active} onOpen={() => openDispensary(active.id)} /> : <p className="text-body-m text-secondary">Hover or focus a dispensary to see its record. Select it to open the account.</p>}
         <p className="text-caption text-tertiary">{unmapped} accounts not yet on the map.</p>
       </aside>
     </div>

@@ -1525,6 +1525,8 @@ assert(identical.clusters.length === 1 && identical.singles.length === 0 && iden
 assert(framed.w + 1e-9 >= minZoomWidth(opening.w) && Math.abs(framed.w - minZoomWidth(opening.w)) < 1e-6 && wideFrame.w <= opening.w + 1e-6 && wideFrame.w + 1e-9 >= minZoomWidth(opening.w), 'TEST ONLY: a chip frame is clamped to the deepest zoom and never past it');
 assert(wheelBlock.includes('setView') === false && wheelBlock.includes('preventDefault') && doubleClick.includes('setView') === false && doubleClick.includes('preventDefault') && escapeBlock.includes('setView') === false && escapeBlock.includes('setOpenCluster(null)'), 'TEST ONLY: the wheel, a double click, and Escape leave the map view unchanged');
 assert(narrowMark.visible === 8 && narrowMark.target === 24 && wideMark.visible === 1440 / 90 && wideMark.target === 24 && mergeGap(opening.w, 390) >= (24 * opening.w) / 390 && mergeGap(opening.w, 1440) >= (24 * opening.w) / 1440 && zoomPresses(opening.w) > 0 && zoomPresses(opening.w) <= 12, 'TEST ONLY: marks are at least 8px with a 24px target, and whole-state hit targets do not overlap');
+const openHandler = mapUi.slice(mapUi.indexOf('function openDispensary'), mapUi.indexOf('function showCluster'));
+assert(openHandler.includes('onOpenAccount(id)') && mapUi.includes('openDispensary(pin.id)') && mapUi.includes('openDispensary(row.id)') && mapUi.includes("event.key === 'Enter'") && mapUi.includes('openDispensary(row.id)'), 'TEST ONLY: a chip list entry opens the dispensary with the same handler as its pin');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);
 
