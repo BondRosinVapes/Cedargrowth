@@ -27,6 +27,7 @@ import {
   type PinCluster,
   type PlacedPin,
 } from '@/lib/crm/nyMap';
+import { mailtoHref, telHref } from '@/lib/crm/pinCard';
 
 const REGION_TONE = [0.06, 0.09, 0.12, 0.15, 0.18, 0.22, 0.26, 0.3, 0.34, 0.4];
 const WHOLE = wholeStateFrame();
@@ -131,15 +132,16 @@ export function NyDispensaryMap({ pins, unmapped, brand = 'cedargrowth', onOpenA
     setRecord(null);
     setRecordNote('');
     const headers = { 'x-cedargrowth-crm': '1' };
+    const accountUrl = `/api/admin/crm/accounts/${encodeURIComponent(cardId)}?brand=${encodeURIComponent(brand)}`;
+    const contactUrl = `/api/admin/crm/contacts?brand=${encodeURIComponent(brand)}&accountId=${encodeURIComponent(cardId)}&card=1`;
     Promise.all([
-      fetch(`/api/admin/crm/accounts?brand=${brand}`, { headers, credentials: 'same-origin' }).then((res) => res.json()),
-      fetch(`/api/admin/crm/contacts?brand=${brand}`, { headers, credentials: 'same-origin' }).then((res) => res.json()),
-    ]).then(([accountsBody, contactsBody]: [{ accounts?: AccountRow[] }, { contacts?: ContactRow[] }]) => {
+      fetch(accountUrl, { headers, credentials: 'same-origin' }).then((res) => res.json()),
+      fetch(contactUrl, { headers, credentials: 'same-origin' }).then((res) => res.json()),
+    ]).then(([accountBody, contactsBody]: [{ ok?: boolean; account?: AccountRow }, { ok?: boolean; contacts?: ContactRow[] }]) => {
       if (cancel) return;
-      const account = (accountsBody.accounts || []).find((row) => row.id === cardId);
-      if (!account) { setRecordNote('This dispensary could not be read.'); return; }
-      const people = (contactsBody.contacts || []).filter((row) => row.accountId === cardId);
-      setRecord(dispensaryCard(account, people));
+      if (accountBody.ok !== true || !accountBody.account) { setRecordNote('This dispensary could not be read.'); return; }
+      if (contactsBody.ok !== true) { setRecordNote('This dispensary could not be read.'); return; }
+      setRecord(dispensaryCard(accountBody.account, contactsBody.contacts || []));
     }).catch(() => { if (!cancel) setRecordNote('This dispensary could not be read.'); });
     return () => { cancel = true; };
   }, [cardId, cardToken, brand]);
@@ -491,14 +493,18 @@ export function DispensaryInfoCard({ model, onOpen }: { model: ReturnType<typeof
       <h3 className="font-display text-body-l text-primary">Contacts</h3>
       {model.contacts.length === 0 ? <p className="text-body-m text-secondary">No contacts yet</p> : (
         <ul className="flex flex-col gap-3">
-          {model.contacts.map((person) => (
-            <li key={person.id} className="flex flex-col gap-1">
-              <p className="text-body-m text-primary">{person.name}</p>
-              {person.title ? <p className="text-caption text-secondary">{person.title}</p> : null}
-              {person.email ? <a href={`mailto:${person.email}`} className="min-h-[44px] text-body-m text-primary underline">{person.email}</a> : null}
-              {person.phone ? <a href={`tel:${person.phone}`} className="min-h-[44px] text-body-m text-primary underline">{person.phone}</a> : null}
-            </li>
-          ))}
+          {model.contacts.map((person) => {
+            const mail = person.email ? mailtoHref(person.email) : null;
+            const phone = person.phone ? telHref(person.phone) : null;
+            return (
+              <li key={person.id} className="flex flex-col gap-1">
+                <p className="text-body-m text-primary">{person.name}</p>
+                {person.title ? <p className="text-caption text-secondary">{person.title}</p> : null}
+                {mail ? <a href={mail} className="min-h-[44px] text-body-m text-primary underline">{person.email}</a> : null}
+                {phone ? <a href={phone} className="min-h-[44px] text-body-m text-primary underline">{person.phone}</a> : (person.phone ? <p className="min-h-[44px] text-body-m text-primary">{person.phone}</p> : null)}
+              </li>
+            );
+          })}
         </ul>
       )}
       <button type="button" onClick={onOpen} className="min-h-[44px] border border-ink px-3 py-2 font-mono text-specimen uppercase text-primary">Open record</button>

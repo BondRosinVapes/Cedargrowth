@@ -18,6 +18,7 @@ import { buildDigest, hoodieSignals, nyWeek, renderDigestHtml, renderDigestText 
 import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, parseCounty, regionForCounty } from '../src/lib/crm/nyRegions.ts';
 import { coverageLabel } from '../src/lib/crm/territory.ts';
 import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, boundaryPins, boxesIntersect, cityChoices, CLOSEST_DISTINCT_PIN_UNITS, clusterFrame, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, dispensaryCard, framePoints, groupHitBox, hitAt, MAP_HEIGHT, MAP_WIDTH, markerPixels, markerUnits, mergeGap, minZoomWidth, nextZoomView, pinCard, placePins, projectNy, storefrontSeparation, unmappedAccountCount, wholeStateFrame, zoomPresses, zoomStops, type MapPin, type PlacedPin } from '../src/lib/crm/nyMap.ts';
+import { cardAccountFields, cardContactFields, mailtoHref, telHref } from '../src/lib/crm/pinCard.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
@@ -70,6 +71,7 @@ import {
 } from '../src/lib/crm/engine.ts';
 import {
   handleAccountCollection,
+  handleAccountRead,
   handleContactCollection,
   handleCounts,
   handleExport,
@@ -437,6 +439,9 @@ class MemoryCrm implements CrmStore {
   async listAccounts(brand: 'cedargrowth' | 'bond', filter: { q: string | null; status: Account['status'] | null }) {
     return { state: 'ok' as const, value: this.accounts.filter((row) => row.brand === brand && (!filter.status || row.status === filter.status) && (!filter.q || row.displayName.toLowerCase().includes(filter.q))) };
   }
+  async readAccount(brand: 'cedargrowth' | 'bond', id: string) {
+    return { state: 'ok' as const, value: this.accounts.find((row) => row.id === id && row.brand === brand) ?? null };
+  }
   async createAccount(brand: 'cedargrowth' | 'bond', actor: string, input: { displayName: string; status: Account['status']; city: string | null; county?: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: Account['accountType']; leadSource?: Account['leadSource']; distributor?: Account['distributor']; distributorAccountRef?: string | null }) {
     const row: Account = { id: this.id(), publicId: `test-only:${brand}:account`, brand, displayName: input.displayName, status: input.status, city: input.city, county: input.county ?? null, notes: input.notes, licenseRef: input.licenseRef ?? null, facilityRef: input.facilityRef ?? null, licenseJurisdiction: input.licenseJurisdiction ?? null, licenseExpiry: input.licenseExpiry ?? null, assignedRep: input.assignedRep ?? null, accountType: input.accountType ?? null, leadSource: input.leadSource ?? null, distributor: input.distributor ?? null, distributorAccountRef: input.distributorAccountRef ?? null, createdAt: 'test-only', updatedAt: 'test-only', createdBy: actor, updatedBy: actor };
     this.accounts.push(row);
@@ -452,7 +457,7 @@ class MemoryCrm implements CrmStore {
     return { state: 'ok' as const, value: row };
   }
   async updateAccount() { return { state: 'missing' as const }; }
-  async listContacts(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.contacts.filter((row) => row.brand === brand) }; }
+  async listContacts(brand: 'cedargrowth' | 'bond', accountId?: string | null) { return { state: 'ok' as const, value: this.contacts.filter((row) => row.brand === brand && (!accountId || row.accountId === accountId)) }; }
   async createContact(brand: 'cedargrowth' | 'bond', _actor: string, input: { accountId: string; name: string; preference?: Contact['preference']; email?: string | null; title?: string | null; phone?: string | null; notes?: string }) {
     const account = this.accounts.find((row) => row.id === input.accountId && row.brand === brand);
     if (!account) return { state: 'rejected' as const };
@@ -1488,6 +1493,57 @@ assert(card.some((row) => row.label === 'Rep' && row.value === 'No rep') && card
 const withContacts = dispensaryCard({ displayName: 'TEST ONLY Shop', licenseRef: 'TEST-ONLY-LIC', accountType: 'adult_use_dispensary', ocmStatus: 'verified', street: '1 Test St', city: 'Buffalo', postalCode: '14201', county: 'Erie', status: 'active', assignedRep: 'Ada' }, [{ id: 'c1', name: 'Ada Buyer', title: 'Buyer', email: 'ada@test.only', phone: '5550100' }]);
 const withoutContacts = dispensaryCard({ displayName: 'TEST ONLY Bare', licenseRef: ' ', accountType: null, ocmStatus: null, street: '', city: null, postalCode: null, county: null, status: null, assignedRep: ' ' }, []);
 assert(withContacts.name === 'TEST ONLY Shop' && withContacts.lines.map((row) => row.label).join(',') === 'License,Account type,OCM status,Street,City,ZIP,County,Status,Rep' && withContacts.contacts.length === 1 && withContacts.contacts[0].email === 'ada@test.only' && withContacts.contacts[0].phone === '5550100' && withoutContacts.contacts.length === 0 && withoutContacts.lines.length === 0 && withoutContacts.lines.some((row) => row.value === 'Not set') === false, 'TEST ONLY: a dispensary card keeps stored fields and contacts, and an empty card invents none');
+const olderId = '11111111-1111-4111-8111-111111111111';
+const newestHundred = Array.from({ length: 100 }, (_, index) => `new-${index}`);
+const olderAccount = {
+  id: olderId,
+  publicId: 'test-only:older',
+  brand: 'cedargrowth' as const,
+  displayName: 'TEST ONLY older shop',
+  status: 'active' as const,
+  city: 'Buffalo',
+  county: 'Erie',
+  notes: 'secret note',
+  licenseRef: 'TEST-ONLY-LIC',
+  facilityRef: null,
+  licenseJurisdiction: null,
+  licenseExpiry: null,
+  assignedRep: 'Ada',
+  accountType: 'adult_use_dispensary' as const,
+  leadSource: null,
+  street: '1 Test St',
+  postalCode: '14201',
+  consentVersion: 'v9',
+  consentReceivedAt: '2020-01-01',
+  ocmStatus: 'verified' as const,
+  distributor: null,
+  distributorAccountRef: null,
+  createdAt: 'test-only',
+  updatedAt: 'test-only',
+  createdBy: 'test-only',
+  updatedBy: 'test-only',
+};
+const olderContact = { id: 'c-old', publicId: 'test-only:contact', brand: 'cedargrowth' as const, accountId: olderId, name: 'Ada Buyer', title: 'Buyer', email: 'ada+buyer@test.only', phone: '(716) 555-0100', notes: 'secret contact note', preference: 'do_not_contact' as const, createdAt: 'test-only', updatedAt: 'test-only' };
+const storeOnlyContact = { ...olderContact, id: 'c-store', email: 'store@test.only', phone: '716.555.0100', preference: 'store_only' as const };
+let sawAccountList = false;
+const cardStore = {
+  async listAccounts() { sawAccountList = true; return { state: 'ok' as const, value: newestHundred.map((id) => ({ ...olderAccount, id, displayName: id })) }; },
+  async readAccount(brand: 'cedargrowth' | 'bond', id: string) {
+    if (brand !== 'cedargrowth' || id !== olderId) return { state: 'ok' as const, value: null };
+    return { state: 'ok' as const, value: olderAccount };
+  },
+  async listContacts(brand: 'cedargrowth' | 'bond', accountId: string | null) {
+    if (brand !== 'cedargrowth' || accountId !== olderId) return { state: 'ok' as const, value: [] };
+    return { state: 'ok' as const, value: [olderContact, storeOnlyContact] };
+  },
+};
+const olderRead = await handleAccountRead({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', `/api/admin/crm/accounts/${olderId}?brand=cedargrowth`), store: cardStore as unknown as typeof memory }, olderId);
+const olderAccountBody = olderRead.body.account as Record<string, unknown>;
+const olderContacts = await handleContactCollection({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', `/api/admin/crm/contacts?brand=cedargrowth&accountId=${olderId}&card=1`), store: cardStore as unknown as typeof memory }, 'GET');
+const olderPeople = (olderContacts.body.contacts as Record<string, unknown>[]) || [];
+const deniedCard = await handleAccountRead({ actorId: null, grants: owner, request: crmReq('GET', `/api/admin/crm/accounts/${olderId}?brand=cedargrowth`), store: cardStore as unknown as typeof memory }, olderId);
+assert(newestHundred.includes(olderId) === false && sawAccountList === false && olderRead.status === 200 && olderAccountBody.displayName === 'TEST ONLY older shop' && olderAccountBody.street === '1 Test St' && !('notes' in olderAccountBody) && !('consentVersion' in olderAccountBody) && !('consentReceivedAt' in olderAccountBody) && olderPeople.length === 2 && olderPeople.every((row) => !('notes' in row) && !('preference' in row) && typeof row.email === 'string') && deniedCard.status === 404, 'TEST ONLY: a pin card reads one account by id outside the newest 100 and omits notes, consent, and preference');
+assert(mailtoHref('ada+buyer@test.only') === 'mailto:ada%2Bbuyer%40test.only' && mailtoHref('store@test.only') === 'mailto:store%40test.only' && telHref('(716) 555-0100') === 'tel:(716) 555-0100' && telHref('+1 (716) 555-0100') === 'tel:+1 (716) 555-0100' && telHref('716.555.0100') === 'tel:716.555.0100' && telHref('555-0100 ext 12') === null && telHref('javascript:alert(1)') === null && cardContactFields(olderContact).email === 'ada+buyer@test.only' && cardContactFields(storeOnlyContact).phone === '716.555.0100' && cardAccountFields(olderAccount).notes === undefined, 'TEST ONLY: mailto encodes the email and tel keeps only digits and phone punctuation');
 assert(unmappedAccountCount([{ latitude: null, longitude: null }, { latitude: 42.8, longitude: -78.8 }, { latitude: 10, longitude: -78.8 }, { latitude: 10, longitude: -78.8, recordMarker: 'test' }]) === 2, 'accounts without a New York coordinate stay off the map');
 const menuPins = [testPin('north', 42.89, -78.88), { ...testPin('south', 40.75, -73.99), city: 'New York', county: 'New York' }];
 const cities = cityChoices(menuPins, '');
@@ -1615,7 +1671,7 @@ const back = nextZoomView(zoomCenter, -1, opening);
 centerHeld = centerHeld && Math.abs(back.x + back.w / 2 - zoomCx) < 1e-6 && Math.abs(back.y + back.h / 2 - zoomCy) < 1e-6;
 assert([390, 430, 768].every((svg) => rectsOverlap(hitRects(svg)) === false) && stopsClear && floorSplits && phoneFloorGap < storefrontSeparation() && Math.abs(minZoomWidth(opening.w) - 0.14059686581934208) < 1e-9 && zoomPresses(opening.w) === 12 && Math.abs(mergeGap(opening.w, 390) - Math.max(opening.w / 90 * 2.8, (44 / 390) * opening.w)) < 1e-6 && centerHeld, 'TEST ONLY: hit rects do not intersect at every zoom stop, the 11 m pair splits at the floor on 390, 430 and 768, and that stop takes 12 presses');
 assert(narrowMark.visible === 8 && narrowMark.target === 44 && phoneMark.target === 44 && tabletMark.target === 44 && wideMark.visible === 1440 / 90 && wideMark.target === 24 && zoomPresses(opening.w) === 12 && mapUi.includes("touchAction: zoomed ? 'none' : 'pan-y'") && mapUi.includes('aria-label="Close"') && mapUi.includes('grid-cols-2') && mapUi.includes('hitAt'), 'TEST ONLY: touch marks are at least 8px with a 44px target, and a click uses the nearest center');
-assert(mapUi.includes('openDispensary(pin.id)') && mapUi.includes('openDispensary(row.id)') && mapUi.includes('onOpenAccount(cardId)') && mapUi.includes('Open record') && mapUi.includes('No contacts yet') && mapUi.includes('mailto:') && mapUi.includes('tel:') && mapUi.includes('aria-label="Close"'), 'TEST ONLY: a pin and a chip row open the dispensary card, and Open record uses the account handler');
+assert(mapUi.includes('openDispensary(pin.id)') && mapUi.includes('openDispensary(row.id)') && mapUi.includes('onOpenAccount(cardId)') && mapUi.includes('Open record') && mapUi.includes('No contacts yet') && mapUi.includes('mailtoHref') && mapUi.includes('telHref') && mapUi.includes('accounts/${encodeURIComponent(cardId)}') && mapUi.includes('accountId=${encodeURIComponent(cardId)}') && mapUi.includes('card=1') && mapUi.includes('/api/admin/crm/accounts?brand=') === false && mapUi.includes('do_not_contact') === false && mapUi.includes('store_only') === false && mapUi.includes('aria-label="Close"'), 'TEST ONLY: a pin and a chip row open the dispensary card, and Open record uses the account handler');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);
 
