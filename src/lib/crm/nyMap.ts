@@ -157,9 +157,8 @@ export function storefrontSeparation(): number {
 export const CLOSEST_DISTINCT_PIN_UNITS = 0.08783995047322923;
 
 export function minZoomWidth(wholeWidth: number): number {
-  const separation = CLOSEST_DISTINCT_PIN_UNITS;
-  const touch = TOUCH_TARGET_PX / 390;
-  const coefficient = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, touch * Math.SQRT2);
+  const separation = storefrontSeparation();
+  const coefficient = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, TOUCH_TARGET_PX / 390);
   return Math.min(wholeWidth, (separation * 0.95) / coefficient);
 }
 

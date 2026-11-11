@@ -17,7 +17,7 @@ import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmat
 import { buildDigest, hoodieSignals, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
 import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, parseCounty, regionForCounty } from '../src/lib/crm/nyRegions.ts';
 import { coverageLabel } from '../src/lib/crm/territory.ts';
-import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, boundaryPins, boxesIntersect, cityChoices, CLOSEST_DISTINCT_PIN_UNITS, clusterFrame, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, dispensaryCard, framePoints, groupHitBox, hitAt, MAP_HEIGHT, MAP_WIDTH, markerPixels, markerUnits, mergeGap, minZoomWidth, nextZoomView, pinCard, placePins, projectNy, unmappedAccountCount, wholeStateFrame, zoomPresses, zoomStops, type MapPin, type PlacedPin } from '../src/lib/crm/nyMap.ts';
+import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, boundaryPins, boxesIntersect, cityChoices, CLOSEST_DISTINCT_PIN_UNITS, clusterFrame, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, dispensaryCard, framePoints, groupHitBox, hitAt, MAP_HEIGHT, MAP_WIDTH, markerPixels, markerUnits, mergeGap, minZoomWidth, nextZoomView, pinCard, placePins, projectNy, storefrontSeparation, unmappedAccountCount, wholeStateFrame, zoomPresses, zoomStops, type MapPin, type PlacedPin } from '../src/lib/crm/nyMap.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
@@ -1591,12 +1591,15 @@ const closestDiagonal = { ...cityA, id: 'closest-d', x: 20 + CLOSEST_DISTINCT_PI
 const stopsClear = mapStops.length > 0 && [390, 430, 768].every((svg) => mapStops.every((width) => rectsOverlap(hitRects(svg, width, realPins)) === false));
 const floorSplits = [390, 430, 768].every((svg) => {
   const screen = { viewWidth: floorWidth, svgClientWidth: svg };
-  const along = declutterPins([closestA, closestB], mergeGap(floorWidth, svg), screen);
-  const diagonal = declutterPins([closestA, closestDiagonal], mergeGap(floorWidth, svg), screen);
-  const same = declutterPins([closestA, { ...closestA, id: 'closest-same' }], mergeGap(floorWidth, svg), screen);
+  const gap = mergeGap(floorWidth, svg);
+  const shops = declutterPins([cityA, cityB], gap, screen);
+  const shopBoxes = shops.singles.map((pin) => groupHitBox(1, pin.x, pin.y, floorWidth, svg));
+  const along = declutterPins([closestA, closestB], gap, screen);
+  const diagonal = declutterPins([closestA, closestDiagonal], gap, screen);
+  const same = declutterPins([closestA, { ...closestA, id: 'closest-same' }], gap, screen);
   const alongBoxes = along.singles.map((pin) => groupHitBox(1, pin.x, pin.y, floorWidth, svg));
   const diagonalBoxes = diagonal.singles.map((pin) => groupHitBox(1, pin.x, pin.y, floorWidth, svg));
-  return along.singles.length === 2 && along.clusters.length === 0 && diagonal.singles.length === 2 && !boxesIntersect(alongBoxes[0], alongBoxes[1]) && !boxesIntersect(diagonalBoxes[0], diagonalBoxes[1]) && same.clusters.length === 1 && same.singles.length === 0;
+  return shops.singles.length === 2 && shops.clusters.length === 0 && shopBoxes.length === 2 && !boxesIntersect(shopBoxes[0], shopBoxes[1]) && along.singles.length === 2 && along.clusters.length === 0 && diagonal.singles.length === 2 && !boxesIntersect(alongBoxes[0], alongBoxes[1]) && !boxesIntersect(diagonalBoxes[0], diagonalBoxes[1]) && same.clusters.length === 1 && same.singles.length === 0;
 });
 let zoomCenter = { x: 120, y: 80, w: opening.w, h: opening.h };
 const zoomCx = zoomCenter.x + zoomCenter.w / 2;
@@ -1610,8 +1613,8 @@ for (let press = 0; press < zoomPresses(opening.w) + 2; press += 1) {
 }
 const back = nextZoomView(zoomCenter, -1, opening);
 centerHeld = centerHeld && Math.abs(back.x + back.w / 2 - zoomCx) < 1e-6 && Math.abs(back.y + back.h / 2 - zoomCy) < 1e-6;
-assert([390, 430, 768].every((svg) => rectsOverlap(hitRects(svg)) === false) && stopsClear && floorSplits && phoneFloorGap < CLOSEST_DISTINCT_PIN_UNITS && Math.abs(mergeGap(opening.w, 390) - Math.max(opening.w / 90 * 2.8, (44 / 390) * opening.w)) < 1e-6 && centerHeld, 'TEST ONLY: hit rects do not intersect at every zoom stop, and distinct pins at the closest measured distance stay separate at the floor');
-assert(narrowMark.visible === 8 && narrowMark.target === 44 && phoneMark.target === 44 && tabletMark.target === 44 && wideMark.visible === 1440 / 90 && wideMark.target === 24 && zoomPresses(opening.w) > 0 && zoomPresses(opening.w) <= 16 && mapUi.includes("touchAction: zoomed ? 'none' : 'pan-y'") && mapUi.includes('aria-label="Close"') && mapUi.includes('grid-cols-2') && mapUi.includes('hitAt'), 'TEST ONLY: touch marks are at least 8px with a 44px target, and a click uses the nearest center');
+assert([390, 430, 768].every((svg) => rectsOverlap(hitRects(svg)) === false) && stopsClear && floorSplits && phoneFloorGap < storefrontSeparation() && Math.abs(minZoomWidth(opening.w) - 0.14059686581934208) < 1e-9 && zoomPresses(opening.w) === 12 && Math.abs(mergeGap(opening.w, 390) - Math.max(opening.w / 90 * 2.8, (44 / 390) * opening.w)) < 1e-6 && centerHeld, 'TEST ONLY: hit rects do not intersect at every zoom stop, the 11 m pair splits at the floor on 390, 430 and 768, and that stop takes 12 presses');
+assert(narrowMark.visible === 8 && narrowMark.target === 44 && phoneMark.target === 44 && tabletMark.target === 44 && wideMark.visible === 1440 / 90 && wideMark.target === 24 && zoomPresses(opening.w) === 12 && mapUi.includes("touchAction: zoomed ? 'none' : 'pan-y'") && mapUi.includes('aria-label="Close"') && mapUi.includes('grid-cols-2') && mapUi.includes('hitAt'), 'TEST ONLY: touch marks are at least 8px with a 44px target, and a click uses the nearest center');
 assert(mapUi.includes('openDispensary(pin.id)') && mapUi.includes('openDispensary(row.id)') && mapUi.includes('onOpenAccount(cardId)') && mapUi.includes('Open record') && mapUi.includes('No contacts yet') && mapUi.includes('mailto:') && mapUi.includes('tel:') && mapUi.includes('aria-label="Close"'), 'TEST ONLY: a pin and a chip row open the dispensary card, and Open record uses the account handler');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);
