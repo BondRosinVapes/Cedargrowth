@@ -49,7 +49,6 @@ export type CardContact = {
   title: string | null;
   email: string | null;
   phone: string | null;
-  preference: 'unspecified' | 'store_only' | 'do_not_contact';
 };
 
 export function cardContactFields(contact: {
@@ -60,14 +59,12 @@ export function cardContactFields(contact: {
   phone: string | null;
   preference?: string | null;
 }): CardContact {
-  const preference = contact.preference === 'store_only' || contact.preference === 'do_not_contact' ? contact.preference : 'unspecified';
   return {
     id: contact.id,
     name: contact.name,
     title: contact.title,
     email: contact.email,
     phone: contact.phone,
-    preference,
   };
 }
 

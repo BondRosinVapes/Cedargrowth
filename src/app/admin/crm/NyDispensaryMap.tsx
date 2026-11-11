@@ -175,7 +175,7 @@ export function NyDispensaryMap({ pins, unmapped, brand = 'cedargrowth', onOpenA
 
   function showCluster(cluster: PinCluster) {
     setOpenCluster(cluster);
-    setView(clusterFrame(cluster.pins, WHOLE));
+    setView(clusterFrame(cluster.pins, WHOLE, svgWidth));
   }
 
   function closeList() {
@@ -185,7 +185,7 @@ export function NyDispensaryMap({ pins, unmapped, brand = 'cedargrowth', onOpenA
   }
 
   function zoomBy(direction: 1 | -1) {
-    setView((current) => nextZoomView(current, direction, WHOLE));
+    setView((current) => nextZoomView(current, direction, WHOLE, svgWidth));
   }
 
   return (
@@ -449,7 +449,7 @@ function MapMenu({ id, label, placeholder, options, onPick }: { id: string; labe
     <div ref={root} className="relative w-full md:w-auto">
       <button ref={button} type="button" aria-label={label} aria-haspopup="listbox" aria-expanded={open} aria-controls={`${id}-list`} onClick={() => (open ? hide() : show())} className="min-h-[44px] w-full border border-ink bg-clinical px-3 font-mono text-specimen uppercase text-primary md:w-auto">{label}</button>
       {open ? (
-        <div className="absolute left-0 z-10 mt-1 w-[min(18rem,calc(100vw-2rem))] border border-ink bg-clinical">
+        <div className="absolute left-0 z-10 mt-1 w-[min(18rem,calc(100vw-2rem))] border border-ink bg-clinical max-md:fixed max-md:inset-x-4 max-md:w-auto">
           <input
             ref={input}
             role="combobox"
@@ -500,8 +500,8 @@ export function DispensaryInfoCard({ model, onOpen }: { model: ReturnType<typeof
               <li key={person.id} className="flex flex-col gap-1">
                 <p className="text-body-m text-primary">{person.name}</p>
                 {person.title ? <p className="text-caption text-secondary">{person.title}</p> : null}
-                {person.email ? (mail ? <a href={mail} className="min-h-[44px] text-body-m text-primary underline">{person.email}</a> : <p className="min-h-[44px] text-body-m text-primary">{person.email}</p>) : null}
-                {person.phone ? (phone ? <a href={phone} className="min-h-[44px] text-body-m text-primary underline">{person.phone}</a> : <p className="min-h-[44px] text-body-m text-primary">{person.phone}</p>) : null}
+                {person.email ? (mail ? <a href={mail} className="min-h-[44px] break-all text-body-m text-primary underline">{person.email}</a> : <p className="min-h-[44px] break-all text-body-m text-primary">{person.email}</p>) : null}
+                {person.phone ? (phone ? <a href={phone} className="min-h-[44px] break-all text-body-m text-primary underline">{person.phone}</a> : <p className="min-h-[44px] break-all text-body-m text-primary">{person.phone}</p>) : null}
               </li>
             );
           })}

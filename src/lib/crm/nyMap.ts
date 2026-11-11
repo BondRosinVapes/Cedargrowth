@@ -156,40 +156,45 @@ export function storefrontSeparation(): number {
 // 1040 pinned accounts, and no two share a coordinate. The value is map units.
 export const CLOSEST_DISTINCT_PIN_UNITS = 0.08783995047322923;
 
-export function minZoomWidth(wholeWidth: number): number {
+const NARROW_SVG_PX = 284;
+
+export function minZoomWidth(wholeWidth: number, svgClientWidth = 0): number {
+  const rendered = svgClientWidth > 0 ? svgClientWidth : NARROW_SVG_PX;
   const separation = storefrontSeparation();
-  const coefficient = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, TOUCH_TARGET_PX / 390);
+  const hit = hitTargetPx(rendered) / rendered;
+  const coefficient = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, hit);
   return Math.min(wholeWidth, (separation * 0.95) / coefficient);
 }
 
-export function zoomInFactor(currentWidth: number, wholeWidth: number): number {
-  const ratio = currentWidth / minZoomWidth(wholeWidth);
+export function zoomInFactor(currentWidth: number, wholeWidth: number, svgClientWidth = 0): number {
+  const ratio = currentWidth / minZoomWidth(wholeWidth, svgClientWidth);
   if (ratio > 80) return 2;
   if (ratio > 12) return 2.5;
   return 3;
 }
 
-export function zoomStops(wholeWidth: number): number[] {
-  const floor = minZoomWidth(wholeWidth);
+export function zoomStops(wholeWidth: number, svgClientWidth = 0): number[] {
+  const floor = minZoomWidth(wholeWidth, svgClientWidth);
   const stops = [wholeWidth];
   let width = wholeWidth;
   while (width > floor + 1e-6 && stops.length < 40) {
-    width = Math.max(floor, width / zoomInFactor(width, wholeWidth));
+    width = Math.max(floor, width / zoomInFactor(width, wholeWidth, svgClientWidth));
     stops.push(width);
   }
   return stops;
 }
 
-export function zoomPresses(wholeWidth: number): number {
-  return Math.max(0, zoomStops(wholeWidth).length - 1);
+export function zoomPresses(wholeWidth: number, svgClientWidth = 0): number {
+  return Math.max(0, zoomStops(wholeWidth, svgClientWidth).length - 1);
 }
 
 export function nextZoomView(
   current: { x: number; y: number; w: number; h: number },
   direction: 1 | -1,
   whole: { w: number; h: number },
+  svgClientWidth = 0,
 ): { x: number; y: number; w: number; h: number } {
-  const stops = zoomStops(whole.w);
+  const stops = zoomStops(whole.w, svgClientWidth);
   let nearest = 0;
   let best = Infinity;
   stops.forEach((stop, index) => {
@@ -204,8 +209,8 @@ export function nextZoomView(
   return { x: cx - next / 2, y: cy - h / 2, w: next, h };
 }
 
-export function clusterFrame(points: readonly { x: number; y: number }[], whole: { x: number; y: number; w: number; h: number }): { x: number; y: number; w: number; h: number } {
-  const floor = minZoomWidth(whole.w);
+export function clusterFrame(points: readonly { x: number; y: number }[], whole: { x: number; y: number; w: number; h: number }, svgClientWidth = 0): { x: number; y: number; w: number; h: number } {
+  const floor = minZoomWidth(whole.w, svgClientWidth);
   const left = Math.min(...points.map((point) => point.x));
   const right = Math.max(...points.map((point) => point.x));
   const top = Math.min(...points.map((point) => point.y));

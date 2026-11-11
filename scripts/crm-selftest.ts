@@ -1546,7 +1546,18 @@ assert(newestHundred.includes(olderId) === false && sawAccountList === false && 
 const heldContact = cardContactFields(olderContact);
 const storeOnlyFields = cardContactFields(storeOnlyContact);
 const openContact = cardContactFields({ ...olderContact, id: 'c-open', preference: 'unspecified', email: 'ada+buyer@test.only', phone: '(716) 555-0100' });
-assert(mailtoHref('ada+buyer@test.only') === 'mailto:ada%2Bbuyer%40test.only' && telHref('(716) 555-0100') === 'tel:(716) 555-0100' && telHref('+1 (716) 555-0100') === 'tel:+1 (716) 555-0100' && telHref('716.555.0100') === 'tel:716.555.0100' && telHref('555-0100 ext 12') === null && telHref('javascript:alert(1)') === null && contactMailHref(openContact.email, openContact.preference) === 'mailto:ada%2Bbuyer%40test.only' && contactTelHref(openContact.phone, openContact.preference) === 'tel:(716) 555-0100' && heldContact.preference === 'do_not_contact' && contactMailHref(heldContact.email, heldContact.preference) === 'mailto:ada%2Bbuyer%40test.only' && contactTelHref(heldContact.phone, heldContact.preference) === 'tel:(716) 555-0100' && storeOnlyFields.preference === 'store_only' && contactMailHref(storeOnlyFields.email, storeOnlyFields.preference) === 'mailto:store%40test.only' && contactTelHref(storeOnlyFields.phone, storeOnlyFields.preference) === 'tel:716.555.0100' && cardAccountFields(olderAccount).notes === undefined, 'TEST ONLY: open, do not contact, and store only contacts all keep encoded mailto and sanitized tel');
+assert(mailtoHref('ada+buyer@test.only') === 'mailto:ada%2Bbuyer%40test.only' && telHref('(716) 555-0100') === 'tel:(716) 555-0100' && telHref('+1 (716) 555-0100') === 'tel:+1 (716) 555-0100' && telHref('716.555.0100') === 'tel:716.555.0100' && telHref('555-0100 ext 12') === null && telHref('javascript:alert(1)') === null && contactMailHref(openContact.email, openContact.preference) === 'mailto:ada%2Bbuyer%40test.only' && contactTelHref(openContact.phone, openContact.preference) === 'tel:(716) 555-0100' && !('preference' in heldContact) && contactMailHref(heldContact.email, 'do_not_contact') === 'mailto:ada%2Bbuyer%40test.only' && contactTelHref(heldContact.phone, 'do_not_contact') === 'tel:(716) 555-0100' && !('preference' in storeOnlyFields) && contactMailHref(storeOnlyFields.email, 'store_only') === 'mailto:store%40test.only' && contactTelHref(storeOnlyFields.phone, 'store_only') === 'tel:716.555.0100' && cardAccountFields(olderAccount).notes === undefined, 'TEST ONLY: open, do not contact, and store only contacts all keep encoded mailto and sanitized tel');
+const crowd = new MemoryCrm();
+const crowdShop = await crowd.createAccount('cedargrowth', 'gary@cedargrowthco.com', { displayName: 'TEST ONLY crowd', status: 'prospect', city: 'Buffalo', notes: '' });
+const crowdId = crowdShop.value?.id || '';
+for (let n = 0; n < 120; n += 1) await crowd.createContact('cedargrowth', 'gary@cedargrowthco.com', { accountId: crowdId, name: `Person ${n}`, email: `p${n}@test.only`, phone: '(716) 555-0100' });
+const otherShop = await crowd.createAccount('cedargrowth', 'gary@cedargrowthco.com', { displayName: 'TEST ONLY other crowd', status: 'prospect', city: 'Albany', notes: '' });
+await crowd.createContact('cedargrowth', 'gary@cedargrowthco.com', { accountId: otherShop.value?.id || '', name: 'Other person', email: 'other@test.only' });
+const crowdList = await handleContactCollection({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', `/api/admin/crm/contacts?brand=cedargrowth&accountId=${crowdId}&card=1`), store: crowd }, 'GET');
+const crowdPeople = (crowdList.body.contacts as Record<string, unknown>[]) || [];
+const contactSql = readFileSync('src/lib/crm/store.ts', 'utf8');
+const contactFn = contactSql.slice(contactSql.indexOf('listContacts(brand'), contactSql.indexOf('async createContact'));
+assert(crowdList.status === 200 && crowdPeople.length === 120 && crowdPeople.every((row) => !('preference' in row) && !('notes' in row) && typeof row.email === 'string') && contactMailHref(String(crowdPeople[0]?.email || ''), 'store_only') === `mailto:${encodeURIComponent(String(crowdPeople[0]?.email || ''))}` && contactFn.includes("if (accountId) query = query.eq('account_id', accountId)") && contactFn.includes('else query = query.limit(100)'), 'TEST ONLY: one account returns all 120 contacts, and the desk list stays at 100');
 assert(unmappedAccountCount([{ latitude: null, longitude: null }, { latitude: 42.8, longitude: -78.8 }, { latitude: 10, longitude: -78.8 }, { latitude: 10, longitude: -78.8, recordMarker: 'test' }]) === 2, 'accounts without a New York coordinate stay off the map');
 const menuPins = [testPin('north', 42.89, -78.88), { ...testPin('south', 40.75, -73.99), city: 'New York', county: 'New York' }];
 const cities = cityChoices(menuPins, '');
@@ -1630,8 +1641,8 @@ function rectsOverlap(rects: { x: number; y: number; w: number; h: number }[]) {
   }
   return false;
 }
-const phoneFloorGap = mergeGap(minZoomWidth(opening.w), 390);
-const mapStops = zoomStops(opening.w);
+const phoneFloorGap = mergeGap(minZoomWidth(opening.w, 390), 390);
+const mapStops = zoomStops(opening.w, 390);
 const floorWidth = mapStops[mapStops.length - 1];
 const shopRows = placePins([
   testPin('syracuse', 43.048, -76.147),
@@ -1672,8 +1683,18 @@ for (let press = 0; press < zoomPresses(opening.w) + 2; press += 1) {
 }
 const back = nextZoomView(zoomCenter, -1, opening);
 centerHeld = centerHeld && Math.abs(back.x + back.w / 2 - zoomCx) < 1e-6 && Math.abs(back.y + back.h / 2 - zoomCy) < 1e-6;
-assert([390, 430, 768].every((svg) => rectsOverlap(hitRects(svg)) === false) && stopsClear && floorSplits && phoneFloorGap < storefrontSeparation() && Math.abs(minZoomWidth(opening.w) - 0.14059686581934208) < 1e-9 && zoomPresses(opening.w) === 12 && Math.abs(mergeGap(opening.w, 390) - Math.max(opening.w / 90 * 2.8, (44 / 390) * opening.w)) < 1e-6 && centerHeld, 'TEST ONLY: hit rects do not intersect at every zoom stop, the 11 m pair splits at the floor on 390, 430 and 768, and that stop takes 12 presses');
-assert(narrowMark.visible === 8 && narrowMark.target === 44 && phoneMark.target === 44 && tabletMark.target === 44 && wideMark.visible === 1440 / 90 && wideMark.target === 24 && zoomPresses(opening.w) === 12 && mapUi.includes("touchAction: zoomed ? 'none' : 'pan-y'") && mapUi.includes('aria-label="Close"') && mapUi.includes('grid-cols-2') && mapUi.includes('hitAt'), 'TEST ONLY: touch marks are at least 8px with a 44px target, and a click uses the nearest center');
+const frameWidths = [284, 314, 354, 316, 580, 1400];
+const frameSplits = frameWidths.every((svg) => {
+  const stops = zoomStops(opening.w, svg);
+  const floor = stops[stops.length - 1];
+  const screen = { viewWidth: floor, svgClientWidth: svg };
+  const shops = declutterPins([cityA, cityB], mergeGap(floor, svg), screen);
+  const boxes = shops.singles.map((pin) => groupHitBox(1, pin.x, pin.y, floor, svg));
+  const clear = stops.every((width) => rectsOverlap(hitRects(svg, width, realPins)) === false);
+  return stops[0] === opening.w && Math.abs(floor - minZoomWidth(opening.w, svg)) < 1e-6 && shops.singles.length === 2 && shops.clusters.length === 0 && boxes.length === 2 && !boxesIntersect(boxes[0], boxes[1]) && clear;
+});
+assert([390, 430, 768].every((svg) => rectsOverlap(hitRects(svg)) === false) && stopsClear && floorSplits && frameSplits && phoneFloorGap < storefrontSeparation() && Math.abs(minZoomWidth(opening.w, 390) - 0.14059686581934208) < 1e-9 && zoomPresses(opening.w, 390) === 12 && Math.abs(mergeGap(opening.w, 390) - Math.max(opening.w / 90 * 2.8, (44 / 390) * opening.w)) < 1e-6 && centerHeld, 'TEST ONLY: hit rects do not intersect at every zoom stop, and the 11 m pair splits at the deepest stop for each rendered map width');
+assert(narrowMark.visible === 8 && narrowMark.target === 44 && phoneMark.target === 44 && tabletMark.target === 44 && wideMark.visible === 1440 / 90 && wideMark.target === 24 && zoomPresses(opening.w, 390) === 12 && mapUi.includes("touchAction: zoomed ? 'none' : 'pan-y'") && mapUi.includes('aria-label="Close"') && mapUi.includes('grid-cols-2') && mapUi.includes('hitAt') && mapUi.includes('max-md:fixed max-md:inset-x-4 max-md:w-auto') && mapUi.includes('break-all') && mapUi.includes('nextZoomView(current, direction, WHOLE, svgWidth)'), 'TEST ONLY: touch marks are at least 8px with a 44px target, and a click uses the nearest center');
 assert(mapUi.includes('openDispensary(pin.id)') && mapUi.includes('openDispensary(row.id)') && mapUi.includes('onOpenAccount(cardId)') && mapUi.includes('Open record') && mapUi.includes('No contacts yet') && mapUi.includes('contactMailHref') && mapUi.includes('contactTelHref') && mapUi.includes('accounts/${encodeURIComponent(cardId)}') && mapUi.includes('accountId=${encodeURIComponent(cardId)}') && mapUi.includes('card=1') && mapUi.includes('/api/admin/crm/accounts?brand=') === false && mapUi.includes('aria-label="Close"'), 'TEST ONLY: a pin and a chip row open the dispensary card, and Open record uses the account handler');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);

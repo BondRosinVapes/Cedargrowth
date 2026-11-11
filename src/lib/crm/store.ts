@@ -877,8 +877,9 @@ class SupabaseCrmStore implements CrmStore {
   }
 
   listContacts(brand: CrmBrand, accountId: string | null) {
-    let query = this.db.from('crm_contacts').select(CONTACT_COLS).eq('brand', brand).order('updated_at', { ascending: false }).limit(100);
+    let query = this.db.from('crm_contacts').select(CONTACT_COLS).eq('brand', brand).order('updated_at', { ascending: false });
     if (accountId) query = query.eq('account_id', accountId);
+    else query = query.limit(100);
     return this.rows(brand, query, mapContact);
   }
 
