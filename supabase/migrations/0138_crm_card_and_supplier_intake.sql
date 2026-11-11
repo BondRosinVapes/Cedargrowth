@@ -272,7 +272,8 @@ create table if not exists public.crm_supplier_inquiries (
   contact_name text not null check (char_length(contact_name) between 1 and 120),
   contact_role text check (contact_role is null or char_length(contact_role) between 1 and 80),
   contact_email text not null check (char_length(contact_email) between 3 and 200),
-  contact_phone text check (contact_phone is null or char_length(contact_phone) between 1 and 40),
+  contact_phone text not null check (contact_phone ~ '^\+1[0-9]{10}$'),
+  contact_phone_ext text check (contact_phone_ext is null or contact_phone_ext ~ '^[0-9]{1,6}$'),
   county text not null check (county in (
     'Albany',
     'Allegany',
@@ -370,6 +371,12 @@ comment on table public.crm_supplier_inquiries is
   'Farmer and supplier intake from the trade show card. Not a retailer account. Not a Bond Haus member. Not seeded. license_number is a format check only and does not certify a license.';
 comment on column public.crm_supplier_inquiries.supply_type is
   'cannabis_nys_adult_use_cultivator, cannabis_nys_microbusiness_or_cooperative, hemp_or_hemp_extract, or non_cannabis_inputs. ROD and ROND are not values.';
+comment on column public.crm_supplier_inquiries.contact_phone is
+  'Work phone, stored as +1 and 10 digits. Used only to reply to this inquiry. Not an SMS, OTP, or marketing number.';
+comment on column public.crm_supplier_inquiries.contact_email is
+  'Work email. Used only to reply to this inquiry. Not a marketing address.';
+comment on column public.crm_supplier_inquiries.contact_phone_ext is
+  'Optional work phone extension, digits only, at most 6. Null when the caller gave no extension.';
 comment on column public.crm_supplier_inquiries.consent_version is
   'Supplier consent line v1:56b70a071c4714eb. Not the dispensary consent version.';
 comment on column public.crm_supplier_inquiries.replied_at is
@@ -400,6 +407,7 @@ revoke all on table public.crm_supplier_intake_deletions from public, anon, auth
 
 drop function if exists public.crm_receive_supplier_inquiry(uuid, timestamptz, timestamptz, text, text, text, text, text, text, text, text, text, text, text, boolean);
 drop function if exists public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text);
+drop function if exists public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text, text);
 
 create or replace function public.crm_receive_supplier_inquiry(
   p_inquiry_id uuid,
@@ -412,6 +420,7 @@ create or replace function public.crm_receive_supplier_inquiry(
   p_contact_role text,
   p_contact_email text,
   p_contact_phone text,
+  p_contact_phone_ext text,
   p_county text,
   p_message text,
   p_consent_version text,
@@ -425,6 +434,9 @@ as $$
 declare
   v_license text;
   v_phone text;
+  v_phone_raw text;
+  v_digits text;
+  v_ext text;
   v_trade text;
   v_role text;
   v_message text;
@@ -452,7 +464,35 @@ begin
   end if;
 
   v_license := nullif(btrim(p_license_number), '');
-  v_phone := nullif(btrim(p_contact_phone), '');
+  v_phone_raw := btrim(coalesce(p_contact_phone, ''));
+  v_ext := nullif(btrim(coalesce(p_contact_phone_ext, '')), '');
+  if v_phone_raw ~* '(ext\.?|extension|x)\s*[0-9]{0,8}\s*$' then
+    v_digits := substring(v_phone_raw from '([0-9]{0,8})\s*$');
+    if v_digits is null or char_length(v_digits) < 1 or char_length(v_digits) > 6 then
+      raise exception 'contact_phone extension is not recognized';
+    end if;
+    if v_ext is not null and v_ext is distinct from v_digits then
+      raise exception 'contact_phone extension does not match';
+    end if;
+    v_ext := v_digits;
+    v_phone_raw := btrim(regexp_replace(v_phone_raw, '(ext\.?|extension|x)\s*[0-9]{0,8}\s*$', '', 'i'));
+  elsif v_phone_raw ~* '(ext|extension|\mx\M)' then
+    raise exception 'contact_phone extension is not recognized';
+  end if;
+  if v_ext is not null and v_ext !~ '^[0-9]{1,6}$' then
+    raise exception 'contact_phone extension is not recognized';
+  end if;
+  if v_phone_raw !~ '^[+0-9(). -]+$' then
+    raise exception 'contact_phone is not a US number';
+  end if;
+  v_digits := regexp_replace(v_phone_raw, '[^0-9]', '', 'g');
+  if char_length(v_digits) = 11 and left(v_digits, 1) = '1' then
+    v_digits := substring(v_digits from 2);
+  end if;
+  if char_length(v_digits) <> 10 then
+    raise exception 'contact_phone is not a US number';
+  end if;
+  v_phone := '+1' || v_digits;
   v_trade := nullif(btrim(p_trade_name), '');
   v_role := nullif(btrim(p_contact_role), '');
   v_message := nullif(btrim(p_message), '');
@@ -481,6 +521,7 @@ begin
     contact_role,
     contact_email,
     contact_phone,
+    contact_phone_ext,
     county,
     message,
     consent_version,
@@ -498,6 +539,7 @@ begin
     v_role,
     p_contact_email,
     v_phone,
+    v_ext,
     p_county,
     v_message,
     p_consent_version,
@@ -509,7 +551,7 @@ begin
 end;
 $$;
 
-comment on function public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text) is
+comment on function public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text, text) is
   'Stores a farmer or supplier inquiry in crm_supplier_inquiries. Does not write crm_accounts. Same inquiry_id is an idempotent replay. License format is checked only. Does not call Metrc.';
 
 create or replace function public.crm_delete_supplier_inquiry(p_inquiry_id uuid)
@@ -554,8 +596,8 @@ $$;
 comment on function public.crm_purge_supplier_inquiries(timestamptz) is
   'Removes supplier inquiries whose last reply or qualification, or submitted_at when never replied, is 12 months old or older. This function is not scheduled. Scheduling needs Gary approval.';
 
-revoke all on function public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text) from public, anon, authenticated;
-grant execute on function public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text) to service_role;
+revoke all on function public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text, text) from public, anon, authenticated;
+grant execute on function public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text, text) to service_role;
 revoke all on function public.crm_delete_supplier_inquiry(uuid) from public, anon, authenticated;
 grant execute on function public.crm_delete_supplier_inquiry(uuid) to service_role;
 revoke all on function public.crm_purge_supplier_inquiries(timestamptz) from public, anon, authenticated;

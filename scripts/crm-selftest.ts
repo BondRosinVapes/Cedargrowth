@@ -3,7 +3,7 @@
 // Run: node --experimental-strip-types scripts/crm-selftest.ts
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -740,7 +740,7 @@ class MemoryCrm implements CrmStore {
     return { state: 'ok' as const, value: row };
   }
   intakeLogs: { inquiryId: string; receivedAt: string; result: 'created' | 'possible_duplicate'; sourceRoute: '/order' | '/card'; sourceEvent: string | null }[] = [];
-  supplierInquiries: { inquiryId: string; submittedAt: string; businessName: string; tradeName: string | null; supplyType: string; licenseNumber: string | null; contactName: string; contactRole: string | null; contactEmail: string; contactPhone: string | null; county: string; message: string | null; consentVersion: string; sourceRoute: '/card'; sourceEvent: string; repliedAt: string | null }[] = [];
+  supplierInquiries: { inquiryId: string; submittedAt: string; businessName: string; tradeName: string | null; supplyType: string; licenseNumber: string | null; contactName: string; contactRole: string | null; contactEmail: string; contactPhone: string; contactPhoneExt: string | null; county: string; message: string | null; consentVersion: string; sourceRoute: '/card'; sourceEvent: string; repliedAt: string | null }[] = [];
   intakeDeletions: { id: string; reason: 'named' | 'retention'; contactName: 'bond' }[] = [];
   async receiveBondInquiry(lead: IntakeLead, receivedAt: string) {
     if (this.intakeLogs.some((row) => row.inquiryId === lead.inquiryId)) return { state: 'ok' as const, value: { duplicate: true } };
@@ -781,6 +781,7 @@ class MemoryCrm implements CrmStore {
       contactRole: lead.contactRole,
       contactEmail: lead.contactEmail,
       contactPhone: lead.contactPhone,
+      contactPhoneExt: lead.contactPhoneExt,
       county: lead.county,
       message: lead.message,
       consentVersion: lead.consentVersion,
@@ -1451,7 +1452,7 @@ function supplierPayload(overrides: Record<string, unknown> = {}) {
     business_name: 'TEST ONLY North Farm',
     contact_name: 'Ada Grower',
     contact_email: 'ada@northfarm.test',
-    contact_phone: '555-0100',
+    contact_phone: '(716) 555-0100',
     supply_type: 'hemp_or_hemp_extract',
     county: 'Erie',
     message: 'Frozen lot',
@@ -1498,6 +1499,26 @@ const supplierUnknownConsent = await handleSupplierIntake(intakeStore, supplierR
 const supplierCannabis = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '44444444-4444-4444-8444-444444444444', supply_type: 'cannabis_nys_adult_use_cultivator', license_number: 'OCM-AU-26-000123', trade_name: 'North Lot', contact_role: 'Grower' })), { nowMs: intakeNow, env: supplierEnv });
 const supplierCannabisRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '44444444-4444-4444-8444-444444444444');
 clearIntakeRates();
+const phoneRowsBefore = intakeStore.supplierInquiries.length;
+const missingPhone = supplierPayload({ inquiry_id: '65656565-6565-4565-8565-656565656565', business_name: 'TEST ONLY Missing Phone Farm', contact_email: 'miss@farm.test' });
+delete missingPhone.contact_phone;
+const supplierMissingPhone = await handleSupplierIntake(intakeStore, supplierRequest(missingPhone), { nowMs: intakeNow, env: supplierEnv });
+const supplierEmptyPhone = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '66666666-6666-4666-8666-666666666666', business_name: 'TEST ONLY Empty Phone Farm', contact_email: 'empty@farm.test', contact_phone: '' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierBadPhone = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '67676767-6767-4676-8676-676767676767', business_name: 'TEST ONLY Bad Phone Farm', contact_email: 'badphone@farm.test', contact_phone: '555-0100' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierExt = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '68686868-6868-4686-8686-686868686868', business_name: 'TEST ONLY Ext Farm', contact_email: 'ext@farm.test', contact_phone: '(716) 555-0100 ext 12' })), { nowMs: intakeNow, env: supplierEnv });
+const supplierExtRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '68686868-6868-4686-8686-686868686868');
+const supplierLongExt = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '69696969-6969-4696-8696-696969696969', business_name: 'TEST ONLY Long Ext Farm', contact_email: 'longext@farm.test', contact_phone_ext: '1234567' })), { nowMs: intakeNow, env: supplierEnv });
+function listTsFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : listTsFiles(path);
+    return entry.name.endsWith('.ts') || entry.name.endsWith('.tsx') ? [path] : [];
+  });
+}
+const supplierSendHits = listTsFiles('src').filter((path) => {
+  const text = readFileSync(path, 'utf8');
+  return /resend|twilio|\botp\b|\bsms\b|marketing/i.test(text) && /crm_supplier_inquiries|supplierInquiries/.test(text);
+});
 const supplierRodLicense = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '45454545-4545-4545-8545-454545454545', supply_type: 'cannabis_nys_adult_use_cultivator', license_number: 'OCM-ROD-25-000001' })), { nowMs: intakeNow, env: supplierEnv });
 const supplierRondLicense = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '46464646-4646-4646-8646-464646464646', supply_type: 'cannabis_nys_microbusiness_or_cooperative', license_number: 'OCM-ROND-25-000001' })), { nowMs: intakeNow, env: supplierEnv });
 const supplierLowerRod = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '47474747-4747-4747-8747-474747474747', license_number: 'rod' })), { nowMs: intakeNow, env: supplierEnv });
@@ -1512,7 +1533,7 @@ const supplierEmojiOk = await handleSupplierIntake(intakeStore, supplierRequest(
 const supplierEmojiLong = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload({ inquiry_id: '56565656-5656-4565-8565-565656565656', business_name: 'TEST ONLY Long Emoji Farm', contact_email: 'long@farm.test', message: '😀'.repeat(251) })), { nowMs: intakeNow, env: supplierEnv });
 const supplierHuge = await handleSupplierIntake(intakeStore, supplierRequest(supplierPayload(), { raw: 'x'.repeat(20 * 1024) }), { nowMs: intakeNow, env: supplierEnv });
 const supplierMessageRow = intakeStore.supplierInquiries.find((row) => row.inquiryId === '54545454-5454-4545-8545-545454545454');
-assert(supplierOff.status === 503 && supplierBad.status === 401 && supplierStale.status === 401 && supplierOk.status === 200 && supplierReplay.status === 200 && supplierReplay.body.duplicate === true && supplierRow?.businessName.startsWith('TEST ONLY ') && supplierRow.consentVersion === 'v1:56b70a071c4714eb' && supplierRow.supplyType === 'hemp_or_hemp_extract' && supplierRow.licenseNumber === null && supplierRow.sourceEvent === 'nyc-2026' && supplierRow.repliedAt === null && intakeStore.accounts.length === accountsBeforeSupplier && removedRejected.every(Boolean) && supplierCounty.status === 400 && supplierRoute.status === 400 && supplierEvent.status === 400 && supplierRod.status === 400 && supplierRond.status === 400 && supplierNoLicense.status === 400 && supplierBadLicense.status === 400 && supplierRodLicense.status === 400 && supplierRondLicense.status === 400 && supplierLowerRod.status === 400 && supplierEin.status === 400 && supplierInputsLicense.status === 400 && supplierDispensaryConsent.status === 400 && supplierUnknownConsent.status === 400 && supplierEmptyEvent.status === 400 && supplierLongEvent.status === 400 && supplierUnicodeEvent.status === 400 && supplierMetrc.status === 400 && supplierMessageOk.status === 200 && supplierMessageRow?.message?.length === 500 && supplierEmojiOk.status === 200 && supplierEmojiLong.status === 400 && supplierHuge.status === 413 && supplierCannabis.status === 200 && supplierCannabisRow?.licenseNumber === 'OCM-AU-26-000123' && supplierCannabisRow.consentVersion === 'v1:56b70a071c4714eb' && supplierCannabisRow.tradeName === 'North Lot', 'supplier intake stays out of dispensary accounts and rejects a bad signature, county, license, or consent version');
+assert(supplierOff.status === 503 && supplierBad.status === 401 && supplierStale.status === 401 && supplierOk.status === 200 && supplierReplay.status === 200 && supplierReplay.body.duplicate === true && supplierRow?.businessName.startsWith('TEST ONLY ') && supplierRow.contactPhone === '+17165550100' && supplierRow.consentVersion === 'v1:56b70a071c4714eb' && supplierRow.supplyType === 'hemp_or_hemp_extract' && supplierRow.licenseNumber === null && supplierRow.sourceEvent === 'nyc-2026' && supplierRow.repliedAt === null && intakeStore.accounts.length === accountsBeforeSupplier && removedRejected.every(Boolean) && supplierCounty.status === 400 && supplierRoute.status === 400 && supplierEvent.status === 400 && supplierRod.status === 400 && supplierRond.status === 400 && supplierNoLicense.status === 400 && supplierBadLicense.status === 400 && supplierRodLicense.status === 400 && supplierRondLicense.status === 400 && supplierLowerRod.status === 400 && supplierEin.status === 400 && supplierInputsLicense.status === 400 && supplierDispensaryConsent.status === 400 && supplierUnknownConsent.status === 400 && supplierEmptyEvent.status === 400 && supplierLongEvent.status === 400 && supplierUnicodeEvent.status === 400 && supplierMetrc.status === 400 && supplierMessageOk.status === 200 && supplierMessageRow?.message?.length === 500 && supplierEmojiOk.status === 200 && supplierEmojiLong.status === 400 && supplierHuge.status === 413 && supplierMissingPhone.status === 400 && supplierEmptyPhone.status === 400 && supplierBadPhone.status === 400 && intakeStore.supplierInquiries.every((row) => !row.businessName.includes('Missing Phone') && !row.businessName.includes('Empty Phone') && !row.businessName.includes('Bad Phone')) && supplierExt.status === 200 && supplierExtRow?.contactPhone === '+17165550100' && supplierExtRow.contactPhoneExt === '12' && supplierLongExt.status === 400 && supplierSendHits.length === 0 && phoneRowsBefore > 0 && supplierCannabis.status === 200 && supplierCannabisRow?.licenseNumber === 'OCM-AU-26-000123' && supplierCannabisRow.consentVersion === 'v1:56b70a071c4714eb' && supplierCannabisRow.tradeName === 'North Lot', 'supplier intake stays out of dispensary accounts and rejects a bad signature, county, license, or consent version');
 assert(limited.status === 429 && (limited.retryAfter || 0) >= 1 && intakeStore.accounts.every((row) => row.displayName !== 'Late Shop'), 'the source rate limit returns retry after and stores nothing');
 assert(intakeLogs.every((line) => line.includes('test-secret') === false && line.includes('next-secret') === false && line.includes('ada@northstore.test') === false && line.includes('Hello plain') === false), 'secret and payload never logged');
 assert(parseIntake({ consumer: true }).ok === false && intakeExpired('2024-01-01T00:00:00Z', '2026-11-09T15:00:00Z') && intakeExpired('2026-10-01T00:00:00Z', '2026-11-09T15:00:00Z') === false, 'consumer fields are rejected and the retention window is twelve months');

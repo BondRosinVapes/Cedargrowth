@@ -1805,6 +1805,7 @@ class SupabaseCrmStore implements CrmStore {
       p_contact_role: lead.contactRole,
       p_contact_email: lead.contactEmail,
       p_contact_phone: lead.contactPhone,
+      p_contact_phone_ext: lead.contactPhoneExt,
       p_county: lead.county,
       p_message: lead.message,
       p_consent_version: lead.consentVersion,

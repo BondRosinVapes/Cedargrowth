@@ -17,6 +17,7 @@ export const SUPPLIER_KEYS = [
   'contact_role',
   'contact_email',
   'contact_phone',
+  'contact_phone_ext',
   'county',
   'message',
   'consent_version',
@@ -31,7 +32,7 @@ const SUPPLY_TYPES = [
   'non_cannabis_inputs',
 ] as const;
 const CANNABIS_SUPPLY = new Set(['cannabis_nys_adult_use_cultivator', 'cannabis_nys_microbusiness_or_cooperative']);
-const OPTIONAL = new Set(['trade_name', 'license_number', 'contact_role', 'contact_phone', 'message']);
+const OPTIONAL = new Set(['trade_name', 'license_number', 'contact_role', 'contact_phone_ext', 'message']);
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 const EVENT_RE = /^[a-z0-9-]{1,64}$/;
@@ -52,13 +53,33 @@ export type SupplierLead = {
   contactName: string;
   contactRole: string | null;
   contactEmail: string;
-  contactPhone: string | null;
+  contactPhone: string;
+  contactPhoneExt: string | null;
   county: string;
   message: string | null;
   consentVersion: (typeof SUPPLIER_CONSENT_VERSIONS)[number];
   sourceRoute: '/card';
   sourceEvent: string;
 };
+
+// Work phone and work email are stored only so staff can reply to the inquiry.
+export function parseSupplierPhone(value: string): { phone: string; ext: string | null } | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const extMatch = trimmed.match(/(?:ext\.?|extension|(?:^|\s)x)\s*(\d{0,8})\s*$/i);
+  let numberPart = trimmed;
+  let ext: string | null = null;
+  if (extMatch) {
+    if (!extMatch[1] || extMatch[1].length > 6) return null;
+    ext = extMatch[1];
+    numberPart = trimmed.slice(0, extMatch.index).trim();
+  }
+  if (!numberPart || !/^[+0-9().\s-]+$/.test(numberPart)) return null;
+  let digits = numberPart.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
+  if (digits.length !== 10) return null;
+  return { phone: `+1${digits}`, ext };
+}
 
 export function supplierSecrets(env: Record<string, string | undefined>): { primary: string | null; next: string | null } {
   const primary = env.CG_BOND_SUPPLIER_INTAKE_SECRET?.trim() || null;
@@ -96,8 +117,14 @@ export function parseSupplierIntake(value: unknown): { ok: true; lead: SupplierL
   if (contactRole === 'invalid') fields.push('contact_role');
   const contactEmail = typeof record.contact_email === 'string' && record.contact_email.length <= 200 && EMAIL_RE.test(record.contact_email) ? record.contact_email : null;
   if (!contactEmail) fields.push('contact_email');
-  const contactPhone = optionalText(record.contact_phone, 40);
-  if (contactPhone === 'invalid') fields.push('contact_phone');
+  // Work phone is required and is used only to reply to this inquiry. It is not an SMS, OTP, or marketing number.
+  const parsedPhone = typeof record.contact_phone === 'string' ? parseSupplierPhone(record.contact_phone) : null;
+  const extField = optionalDigits(record.contact_phone_ext, 6);
+  if (!parsedPhone) fields.push('contact_phone');
+  if (extField === 'invalid') fields.push('contact_phone_ext');
+  let contactPhoneExt = extField && extField !== 'invalid' ? extField : null;
+  if (parsedPhone?.ext && contactPhoneExt && parsedPhone.ext !== contactPhoneExt) fields.push('contact_phone_ext');
+  else if (parsedPhone?.ext) contactPhoneExt = parsedPhone.ext;
   const county = parseCounty(record.county);
   if (!county.ok || !county.county) fields.push('county');
   const message = optionalText(record.message, 500);
@@ -107,7 +134,7 @@ export function parseSupplierIntake(value: unknown): { ok: true; lead: SupplierL
   if (record.source_route !== '/card') fields.push('source_route');
   const sourceEvent = typeof record.source_event === 'string' && EVENT_RE.test(record.source_event) ? record.source_event : null;
   if (!sourceEvent) fields.push('source_event');
-  if (fields.length || !inquiryId || !submittedAt || !businessName || !contactName || !contactEmail || !supplyType || !county.ok || !county.county || !consentVersion || !sourceEvent) {
+  if (fields.length || !inquiryId || !submittedAt || !businessName || !contactName || !contactEmail || !parsedPhone || !supplyType || !county.ok || !county.county || !consentVersion || !sourceEvent) {
     return { ok: false, fields };
   }
   return {
@@ -122,7 +149,8 @@ export function parseSupplierIntake(value: unknown): { ok: true; lead: SupplierL
       contactName,
       contactRole: contactRole || null,
       contactEmail,
-      contactPhone: contactPhone || null,
+      contactPhone: parsedPhone.phone,
+      contactPhoneExt,
       county: county.county,
       message: message || null,
       consentVersion,
@@ -139,6 +167,12 @@ function text(value: unknown, min: number, max: number): string | null {
   const trimmed = value.trim();
   if (trimmed.length < min || trimmed.length > max) return null;
   return trimmed;
+}
+
+function optionalDigits(value: unknown, max: number): string | null | 'invalid' {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || !new RegExp(`^[0-9]{1,${max}}$`).test(value)) return 'invalid';
+  return value;
 }
 
 function optionalText(value: unknown, max: number): string | null | 'invalid' {
