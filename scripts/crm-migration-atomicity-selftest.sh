@@ -69,6 +69,12 @@ if [ "$RLS" != "$TABLES" ] || [ "$TABLES" = "0" ]; then
   exit 1
 fi
 echo "ok: bundle committed ${TABLES} tables with forced row level security"
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-check-0138-rls.sql" >/tmp/crm-0138-rls.log 2>&1
+if ! grep -q 'can bypass forced row level security' /tmp/crm-0138-rls.log; then
+  echo 'FAIL: 0138 post-apply bypass check did not confirm the function owner'
+  exit 1
+fi
+echo 'ok: 0138 function owner still bypasses forced row level security'
 
 expect_fail() {
   label=$1
@@ -237,11 +243,25 @@ if ! grep -q 'permission denied' /tmp/crm-crud-fail.log; then
   exit 1
 fi
 SERVICE_MARK=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "set role service_role; select public.crm_mark_supplier_replied('57575757-5757-4575-8575-575757575757'::uuid)::text;" | tail -n 1)
-if [ "$SUP_ACL" != "INSERT,SELECT" ] || [ "$SUP_COL" != "replied_at" ] || [ "$SUP_OTHER" != "0" ] || [ "$SUP_BITS" != "false,false,false,false,false,false,true" ] || { [ "$PGNUM" -ge 170000 ] && [ "$SUP_MAINTAIN" != "false" ]; } || { [ "$PGNUM" -lt 170000 ] && [ "$SUP_MAINTAIN" != "unsupported" ]; } || [ "$SERVICE_MARK" != '{"ok": true, "updated": true}' ]; then
+if [ "$SUP_ACL" != "INSERT,SELECT" ] || [ "$SUP_COL" != "" ] || [ "$SUP_OTHER" != "0" ] || [ "$SUP_BITS" != "false,false,false,false,false,false,false" ] || { [ "$PGNUM" -ge 170000 ] && [ "$SUP_MAINTAIN" != "false" ]; } || { [ "$PGNUM" -lt 170000 ] && [ "$SUP_MAINTAIN" != "unsupported" ]; } || [ "$SERVICE_MARK" != '{"ok": true, "updated": true}' ]; then
   echo "FAIL: supplier privileges acl=${SUP_ACL} columns=${SUP_COL} other=${SUP_OTHER} bits=${SUP_BITS} maintain=${SUP_MAINTAIN} mark=${SERVICE_MARK}"
   exit 1
 fi
 echo 'ok: service_role cannot update submitted_at and can still mark a reply'
+expect_fail 'service role supplier replied_at update' "set role service_role; update public.crm_supplier_inquiries set replied_at = '2999-01-01T00:00:00Z' where inquiry_id = '57575757-5757-4575-8575-575757575757';"
+if ! grep -q 'permission denied' /tmp/crm-crud-fail.log; then
+  echo 'FAIL: replied_at update was not denied by privilege'
+  exit 1
+fi
+FAR_SUP=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_supplier_inquiry('65656565-6565-4565-8565-656565656565'::uuid, '2099-01-01T00:00:00Z', 'TEST ONLY Future Farm', null, 'hemp_or_hemp_extract', null, 'Ivy Grower', null, 'ivy@farm.test', '(716) 555-0100', null, 'Erie', null, 'v1:56b70a071c4714eb', '/card', 'nyc-2026')::text;")
+FAR_AT=$(sudo -u postgres psql -d "$DB" -tA -c "select (submitted_at <= pg_catalog.now() + interval '5 minutes' and submitted_at < '2090-01-01'::timestamptz)::text from public.crm_supplier_inquiries where inquiry_id = '65656565-6565-4565-8565-656565656565';")
+FAR_MARK=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "set role service_role; select public.crm_mark_supplier_replied('65656565-6565-4565-8565-656565656565'::uuid)::text;" | tail -n 1)
+FAR_REPLY=$(sudo -u postgres psql -d "$DB" -tA -c "select (replied_at is not null and replied_at <= pg_catalog.now() + interval '5 minutes' and replied_at < '2100-01-01'::timestamptz)::text from public.crm_supplier_inquiries where inquiry_id = '65656565-6565-4565-8565-656565656565';")
+if [ "$FAR_SUP" != '{"ok": true, "duplicate": false}' ] || [ "$FAR_AT" != "true" ] || [ "$FAR_MARK" != '{"ok": true, "updated": true}' ] || [ "$FAR_REPLY" != "true" ]; then
+  echo "FAIL: far future supplier clock ${FAR_SUP} submitted=${FAR_AT} mark=${FAR_MARK} replied=${FAR_REPLY}"
+  exit 1
+fi
+echo 'ok: a far future submitted_at or replied_at cannot push supplier retention past the server clock'
 expect_fail 'supplier email shape' "update public.crm_supplier_inquiries set contact_email = 'not-an-email' where inquiry_id = '57575757-5757-4575-8575-575757575757';"
 AGENT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10'::uuid, '2026-11-09T18:00:00Z', '[{\"op\":\"account\",\"index\":0,\"display_name\":\"Agent Shop\",\"status\":\"prospect\",\"account_type\":\"adult_use_dispensary\",\"city\":\"Buffalo\",\"county\":\"Erie\",\"license_number\":\"AGENT-LIC-1\"},{\"op\":\"contact\",\"index\":1,\"name\":\"Agent Buyer\",\"email\":\"buyer@agent.test\",\"account_license\":\"AGENT-LIC-1\"},{\"op\":\"note\",\"index\":2,\"body\":\"Plain note\",\"account_license\":\"AGENT-LIC-1\"}]'::jsonb)::text;")
 AGENT_REPLAY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_agent_records('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa10'::uuid, '2026-11-09T18:00:00Z', '[]'::jsonb)->>'code';")

@@ -402,8 +402,7 @@ alter table public.crm_supplier_inquiries force row level security;
 revoke all on table public.crm_supplier_inquiries from public, anon, authenticated;
 revoke all on table public.crm_supplier_inquiries from service_role;
 grant select, insert on table public.crm_supplier_inquiries to service_role;
-grant update (replied_at) on table public.crm_supplier_inquiries to service_role;
-revoke delete, truncate, references, trigger on table public.crm_supplier_inquiries from service_role, anon, authenticated, public;
+revoke update, delete, truncate, references, trigger on table public.crm_supplier_inquiries from service_role, anon, authenticated, public;
 
 alter table public.crm_supplier_intake_deletions enable row level security;
 alter table public.crm_supplier_intake_deletions force row level security;
@@ -534,7 +533,7 @@ begin
     replied_at
   ) values (
     p_inquiry_id,
-    p_submitted_at,
+    least(p_submitted_at, pg_catalog.now() + interval '5 minutes'),
     p_business_name,
     v_trade,
     p_supply_type,
@@ -615,9 +614,10 @@ set search_path = pg_catalog
 as $$
 declare
   v_count integer;
+  v_replied timestamptz := least(pg_catalog.now(), pg_catalog.now() + interval '5 minutes');
 begin
   update public.crm_supplier_inquiries
-  set replied_at = pg_catalog.now()
+  set replied_at = v_replied
   where inquiry_id = p_inquiry_id;
   get diagnostics v_count = row_count;
   return pg_catalog.jsonb_build_object('ok', true, 'updated', v_count > 0);
