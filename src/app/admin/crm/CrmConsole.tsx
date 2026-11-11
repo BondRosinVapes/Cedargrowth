@@ -5,6 +5,7 @@ import Link from 'next/link';
 import {
   ACCOUNT_TYPE_LABELS,
   ACCOUNT_TYPES,
+  isDispensaryAccount,
   brandLabel,
   parseBrand,
   LEAD_SOURCE_LABELS,
@@ -23,6 +24,8 @@ import { DISTRIBUTOR_LABELS } from '@/lib/crm/distributor';
 import { VISIT_OUTCOME_LABELS, type VisitOutcome } from '@/lib/crm/field';
 import { NY_COUNTIES, regionForCounty } from '@/lib/crm/nyRegions';
 import { DashboardWing } from './DashboardWing';
+import { GooglePlaceCard } from './GooglePlaceCard';
+import { WON_MERGE_FAILED } from '@/lib/crm/distributionMerge';
 import { BatchesWing } from './BatchesWing';
 
 type Wing = 'dashboard' | 'accounts' | 'batches' | 'pipeline' | 'tasks' | 'activity' | 'reports' | 'health' | 'signals' | 'canix';
@@ -107,6 +110,30 @@ async function crmFetch(path: string, init?: RequestInit): Promise<{ status: num
   const res = await fetch(path, { ...init, headers, credentials: 'same-origin' });
   const body = await res.json().catch(() => ({}));
   return { status: res.status, body: body as Record<string, unknown> };
+}
+
+function WonMergeLine({ accountId, canUndo, onChanged }: { accountId: string; canUndo: boolean; onChanged: (refused: number) => void }) {
+  const [merge, setMerge] = useState<{ id: string; contactIds: string[] } | null>(null);
+  useEffect(() => {
+    let cancel = false;
+    crmFetch(`/api/admin/crm/distribution-merge?brand=cedargrowth&accountId=${encodeURIComponent(accountId)}`).then((res) => {
+      if (cancel) return;
+      const row = res.body.merge as { id?: string; contactIds?: string[]; undoneAt?: string | null } | null;
+      setMerge(row && row.id && !row.undoneAt ? { id: row.id, contactIds: row.contactIds || [] } : null);
+    }).catch(() => { if (!cancel) setMerge(null); });
+    return () => { cancel = true; };
+  }, [accountId]);
+  if (!merge) return null;
+  const count = merge.contactIds.length;
+  return (
+    <div className="flex flex-col gap-2 border border-hairline bg-clinical p-3">
+      <p className="text-body-m text-primary">{count === 0 ? 'Won merge. No contacts moved.' : `Won merge. ${count} contact${count === 1 ? '' : 's'} moved onto this account.`}</p>
+      {canUndo ? <button type="button" onClick={async () => {
+        const res = await crmFetch('/api/admin/crm/distribution-merge', { method: 'POST', body: JSON.stringify({ brand: 'cedargrowth', mergeId: merge.id }) });
+        if (res.body.ok) onChanged(Array.isArray(res.body.refused) ? res.body.refused.length : 0);
+      }} className="min-h-[44px] self-start border border-ink px-3 py-2 font-mono text-specimen uppercase text-primary">Undo</button> : null}
+    </div>
+  );
 }
 
 function ReorderLinks({ brand, accountId, accountName }: { brand: CrmBrand; accountId: string; accountName: string }) {
@@ -211,6 +238,7 @@ export function CrmConsole({
   const [desk, setDesk] = useState<DeskEvaluation | null>(null);
   const [canixLabel, setCanixLabel] = useState('Canix not connected');
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [refresh, setRefresh] = useState(0);
 
@@ -345,7 +373,7 @@ export function CrmConsole({
         notes: String(form.get('notes') || ''),
       }),
     });
-    setNotice(res.body.ok ? 'Opportunity saved. The amount is a forecast, not invoiced or paid revenue.' : String(res.body.reason || 'Opportunity was not saved.'));
+    setNotice(res.body.mergeFailed ? WON_MERGE_FAILED : (res.body.ok ? 'Opportunity saved. The amount is a forecast, not invoiced or paid revenue.' : String(res.body.reason || 'Opportunity was not saved.')));
     if (res.body.ok) setRefresh((value) => value + 1);
   }
 
@@ -411,6 +439,8 @@ export function CrmConsole({
   }
 
   const selected = accounts.find((row) => row.id === selectedAccountId) ?? null;
+  const selectedContact = contacts.find((row) => row.id === selectedContactId) ?? null;
+  const contactAccount = selectedContact ? accounts.find((row) => row.id === selectedContact.accountId) ?? null : null;
   const accountContacts = selected ? contacts.filter((row) => row.accountId === selected.id) : [];
   const label = brandLabel(brand);
   const lines = desk ? signalLines(desk) : [];
@@ -536,14 +566,27 @@ export function CrmConsole({
                   <FieldMedia key={row.id} brand={brand} id={row.id} kind={row.kind} />
                 ))}
               </ul>
+              {brand === 'cedargrowth' && isDispensaryAccount(selected.accountType) ? <GooglePlaceCard accountId={selected.id} /> : null}
+              {brand === 'cedargrowth' && isDispensaryAccount(selected.accountType) ? <WonMergeLine accountId={selected.id} canUndo={roleLabel !== 'Sales'} onChanged={(refused) => { setNotice(refused > 0 ? `Undo left ${refused} contact${refused === 1 ? '' : 's'} on this account. The previous account is gone.` : 'Undo restored the contacts to their previous accounts.'); setRefresh((value) => value + 1); }} /> : null}
+              <h3 className="font-display text-body-l text-primary">Contacts</h3>
               <ul className="flex flex-col gap-2">
                 {accountContacts.length === 0 ? <li className="text-caption text-tertiary">No contacts on this account.</li> : accountContacts.map((row) => (
-                  <li key={row.id} className="text-body-m text-primary">{row.name}. {row.email || 'No email'}. Preference: {row.preference || 'unspecified'}.</li>
+                  <li key={row.id}>
+                    <button type="button" onClick={() => setSelectedContactId(row.id)} className="min-h-[44px] w-full border border-hairline px-3 py-2 text-left text-body-m text-primary">{row.name}</button>
+                  </li>
                 ))}
               </ul>
             </article>
           ) : null}
-          <RecordList rows={contacts.map((row) => ({ id: row.id, title: row.name, meta: row.email || 'No email' }))} />
+          <RecordList rows={contacts.map((row) => ({ id: row.id, title: row.name, meta: row.email || 'No email' }))} onSelect={setSelectedContactId} />
+          {selectedContact ? (
+            <article className="flex w-full max-w-editorial flex-col gap-2 border border-hairline bg-clinical p-4">
+              <h2 className="font-display text-heading-s text-primary">{selectedContact.name}</h2>
+              {contactAccount ? (
+                <button type="button" onClick={() => setSelectedAccountId(contactAccount.id)} className="min-h-[44px] border border-ink px-3 py-2 text-left text-body-m text-primary">Account: {contactAccount.displayName}</button>
+              ) : <p className="text-caption text-tertiary">No linked account.</p>}
+            </article>
+          ) : null}
           <AddPanel label="Add contact">
             <form onSubmit={(event) => { event.preventDefault(); createContact(new FormData(event.currentTarget)); }} className="grid grid-cols-1 gap-3 border-t border-hairline p-4">
               <label className="flex flex-col gap-1 text-caption text-tertiary">Account

@@ -38,6 +38,11 @@ export type TaskStatus = 'open' | 'done';
 
 export const ACCOUNT_TYPES = ['adult_use_dispensary', 'microbusiness', 'distributor', 'registered_organization', 'processor', 'cultivator', 'other'] as const;
 export type AccountType = (typeof ACCOUNT_TYPES)[number];
+export const DISPENSARY_ACCOUNT_TYPES = ['adult_use_dispensary', 'microbusiness', 'registered_organization'] as const;
+
+export function isDispensaryAccount(type: string | null | undefined): boolean {
+  return (DISPENSARY_ACCOUNT_TYPES as readonly string[]).includes(type || '');
+}
 export const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
   adult_use_dispensary: 'Adult-use dispensary',
   microbusiness: 'Microbusiness',
@@ -166,6 +171,29 @@ export function authorizeCrmRequest(input: {
   const grant = input.grants.find((item) => item.brand === brand);
   if (!grant) return { ok: false, status: 403, reason: 'This brand is not assigned.' };
   return { ok: true, actorId: input.actorId, brand, role: grant.role };
+}
+
+// An img request cannot send the CRM header. Current Chrome, Safari, and Firefox
+// send Sec-Fetch-Site: same-origin and omit Origin. A photo GET with neither header fails closed.
+export function authorizePlacePhoto(input: {
+  actorId: string | null;
+  grants: readonly DeskGrant[];
+  requestOrigin: string;
+  headerOrigin: string | null;
+  headerFetchSite: string | null;
+  brandRaw: string | null;
+}): Authz {
+  if (!input.headerFetchSite && !input.headerOrigin) return { ok: false, status: 403, reason: 'Request was rejected.' };
+  return authorizeCrmRequest({
+    actorId: input.actorId,
+    grants: input.grants,
+    method: 'GET',
+    requestOrigin: input.requestOrigin,
+    headerOrigin: input.headerOrigin,
+    headerMarker: '1',
+    headerFetchSite: input.headerFetchSite,
+    brandRaw: input.brandRaw,
+  });
 }
 
 export function canExport(role: DeskRole): boolean {

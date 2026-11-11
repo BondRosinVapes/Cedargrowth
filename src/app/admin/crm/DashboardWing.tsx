@@ -13,6 +13,7 @@ import {
   type RepRow,
 } from '@/lib/crm/dashboard';
 import { sectionFromSearch, type DashboardSection } from '@/lib/crm/dashboardSections';
+import { WON_MERGE_FAILED } from '@/lib/crm/distributionMerge';
 import { QuickAdd, SpreadsheetUpload } from './DataIntake';
 import { DashboardSectionHost, DashboardTabs } from './DashboardTabs';
 import { DigestPanel } from './DigestPanel';
@@ -328,8 +329,8 @@ function DistributorSection({ brand, data, onChanged }: { brand: CrmBrand; data:
       credentials: 'same-origin',
       body: JSON.stringify({ brand, ...body }),
     });
-    const json = await res.json().catch(() => ({})) as { ok?: boolean; reason?: string };
-    setMessage(json.ok ? 'Saved.' : String(json.reason || 'That change was not saved.'));
+    const json = await res.json().catch(() => ({})) as { ok?: boolean; reason?: string; mergeFailed?: boolean };
+    setMessage(json.mergeFailed ? WON_MERGE_FAILED : (json.ok ? 'Saved.' : String(json.reason || 'That change was not saved.')));
     if (json.ok) onChanged();
   }
   const tiles = [

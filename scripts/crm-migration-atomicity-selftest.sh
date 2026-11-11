@@ -7,6 +7,27 @@ DB=crm_suite_atomicity
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database if exists ${DB};" >/dev/null
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "create database ${DB};" >/dev/null
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "do \$\$ begin if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if; if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if; if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if; end \$\$;" >/dev/null
+# Local stand-in for the Supabase storage schema. 0136 inserts the photo bucket into it.
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 <<'SQL' >/dev/null
+create schema if not exists storage;
+create table if not exists storage.buckets (
+  id text primary key,
+  name text not null unique,
+  public boolean not null default false,
+  file_size_limit bigint,
+  allowed_mime_types text[]
+);
+create table if not exists storage.objects (
+  id uuid primary key default gen_random_uuid(),
+  bucket_id text not null references storage.buckets (id),
+  name text not null
+);
+alter table storage.objects enable row level security;
+alter table storage.objects force row level security;
+grant usage on schema storage to anon, authenticated, service_role;
+grant select on table storage.objects to anon, authenticated, service_role;
+revoke insert, update, delete, truncate on table storage.objects from anon, authenticated;
+SQL
 
 # Failure after the first file must not leave tables.
 cat > /tmp/crm-bundle-fail.sql <<EOF
@@ -182,6 +203,52 @@ if [ "$KEPT" != "42.886000,-78.878000,test-only" ] || [ "$TRIGGERS" != "crm_acco
   exit 1
 fi
 echo 'ok: a coordinate-only update is kept and a latitude outside New York is rejected'
+
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-check-0136-rls.sql" >/tmp/crm-0136-rls.log
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "do \$\$ begin if not exists (select 1 from pg_roles where rolname = 'crm_0136_norls') then create role crm_0136_norls nologin nosuperuser nobypassrls; end if; end \$\$;" >/dev/null
+cat > /tmp/crm-0136-rls-deny.sql <<EOF
+set role crm_0136_norls;
+\\i ${ROOT}/scripts/crm-check-0136-rls.sql
+EOF
+set +e
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f /tmp/crm-0136-rls-deny.sql >/tmp/crm-0136-rls-deny.log 2>&1
+RLS_DENY=$?
+set -e
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop role if exists crm_0136_norls;" >/dev/null
+if [ "$RLS_DENY" -eq 0 ]; then
+  echo 'FAIL: a role without bypassrls was allowed to pass the 0136 check'
+  exit 1
+fi
+echo 'ok: 0136 pre-apply check requires the function owner to bypass forced row level security'
+
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-apply-0136.sql" >/tmp/crm-0136-second.log
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-apply-0136.sql" >/tmp/crm-0136-third.log
+GUARD=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(array_to_string(p.proconfig, '|'), '') || ',' || (position('pg_catalog.now()' in p.prosrc) > 0)::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'crm_private' and p.proname = 'guard_contact';")
+TRIG=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_trigger where tgrelid = 'public.crm_distribution_merges'::regclass and tgname = 'crm_distribution_merges_append_only' and not tgisinternal;")
+if [ "$GUARD" != "search_path=pg_catalog,true" ] || [ "$TRIG" != "1" ]; then
+  echo "FAIL: 0136 reapply guard=${GUARD} triggers=${TRIG}"
+  exit 1
+fi
+echo 'ok: 0136 applies twice and guard_contact pins search_path to pg_catalog'
+
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update storage.buckets set public = true, name = 'renamed-photo-bucket', file_size_limit = 1, allowed_mime_types = array['image/gif']::text[] where id = 'crm-place-photos'; insert into storage.objects (id, bucket_id, name) values ('00000000-0000-4000-8000-0000000000aa', 'crm-place-photos', 'ChIJtest/abc.jpg');" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-apply-0136.sql" >/tmp/crm-0136-bucket.log
+BUCKET=$(sudo -u postgres psql -d "$DB" -tA -c "select public::text || '|' || file_size_limit::text || '|' || allowed_mime_types::text || '|' || name || '|' || (select count(*)::text from storage.buckets where id = 'crm-place-photos') || '|' || (select count(*)::text from pg_policy pol join pg_class cls on cls.oid = pol.polrelid join pg_namespace ns on ns.oid = cls.relnamespace where ns.nspname = 'storage') from storage.buckets where id = 'crm-place-photos';")
+ANON_SEEN=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "set role anon; select count(*)::text from storage.objects where bucket_id = 'crm-place-photos';" | tail -n 1)
+AUTH_SEEN=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "set role authenticated; select count(*)::text from storage.objects where bucket_id = 'crm-place-photos';" | tail -n 1)
+SERVICE_SEEN=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "set role service_role; select count(*)::text from storage.objects where bucket_id = 'crm-place-photos';" | tail -n 1)
+if [ "$BUCKET" != "false|5242880|{image/jpeg,image/png,image/webp}|crm-place-photos|1|0" ] || [ "$ANON_SEEN" != "0" ] || [ "$AUTH_SEEN" != "0" ] || [ "$SERVICE_SEEN" != "1" ]; then
+  echo "FAIL: photo bucket ${BUCKET} anon=${ANON_SEEN} auth=${AUTH_SEEN} service=${SERVICE_SEEN}"
+  exit 1
+fi
+echo 'ok: the photo bucket stays private and anon and authenticated cannot select its objects'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-rollback-0136.sql" >/tmp/crm-0136-rollback.log
+KEPT_BUCKET=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from storage.buckets where id = 'crm-place-photos' and public = false) || ',' || (select count(*) from storage.objects where bucket_id = 'crm-place-photos') || ',' || (select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relname = 'crm_google_places');")
+if [ "$KEPT_BUCKET" != "1,1,0" ]; then
+  echo "FAIL: rollback changed the photo bucket ${KEPT_BUCKET}"
+  exit 1
+fi
+echo 'ok: rollback leaves the photo bucket and its objects in place'
 
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${DB};" >/dev/null
 
