@@ -120,6 +120,26 @@ export function placePins(pins: readonly MapPin[]): { placed: PlacedPin[]; rejec
   return { placed, rejected };
 }
 
+// Marker size is a fraction of the view, so each zoom step shrinks the chip and the merge gap.
+// A constant floor kept the gap at 11.2 map units and stopped close pins from splitting.
+const MARKER_FRACTION = 1 / 90;
+const MERGE_MULTIPLE = 2.8;
+// Pins 0.001 degrees apart in the city are about 0.21 map units apart.
+const CLOSE_PIN_UNITS = 0.2;
+
+export function markerSpan(viewWidth: number): number {
+  return viewWidth * MARKER_FRACTION;
+}
+
+export function mergeGap(viewWidth: number): number {
+  return markerSpan(viewWidth) * MERGE_MULTIPLE;
+}
+
+export function minZoomWidth(wholeWidth: number): number {
+  const widthAtSeparation = CLOSE_PIN_UNITS / (MARKER_FRACTION * MERGE_MULTIPLE);
+  return Math.min(wholeWidth, widthAtSeparation / 1.4);
+}
+
 // Chips that would draw on top of each other share one count at their centroid.
 // The pins keep the coordinates placePins stored.
 export function declutterPins(pins: readonly PlacedPin[], gap: number): { singles: PlacedPin[]; clusters: PinCluster[] } {

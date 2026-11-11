@@ -11,6 +11,9 @@ import {
   framePoints,
   CITY_MENU_LABEL,
   COUNTY_MENU_LABEL,
+  markerSpan,
+  mergeGap,
+  minZoomWidth,
   nycFrame,
   pinCard,
   placePins,
@@ -31,8 +34,8 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   const drag = useRef<{ x: number; y: number; viewX: number; viewY: number; pointer: number } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const placed = useMemo(() => placePins(pins).placed, [pins]);
-  const mark = Math.max(view.w / 90, 4);
-  const grouped = useMemo(() => declutterPins(placed, mark * 2.8), [placed, mark]);
+  const mark = markerSpan(view.w);
+  const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w)), [placed, view.w]);
   const active = placed.find((pin) => pin.id === activeId) ?? null;
   const zoomed = view.w < WHOLE.w - 0.5;
 
@@ -53,9 +56,20 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
     };
   }, []);
 
+  function frameCluster(members: PlacedPin[]) {
+    const left = Math.min(...members.map((pin) => pin.x));
+    const right = Math.max(...members.map((pin) => pin.x));
+    const top = Math.min(...members.map((pin) => pin.y));
+    const bottom = Math.max(...members.map((pin) => pin.y));
+    const span = Math.max(right - left, bottom - top);
+    const w = Math.min(WHOLE.w, Math.max(span * 1.8, minZoomWidth(WHOLE.w)));
+    const h = w * (WHOLE.h / WHOLE.w);
+    setView({ x: (left + right) / 2 - w / 2, y: (top + bottom) / 2 - h / 2, w, h });
+  }
+
   function zoomAt(factor: number) {
     setView((current) => {
-      const nextW = Math.min(WHOLE.w, Math.max(WHOLE.w / 14, current.w / factor));
+      const nextW = Math.min(WHOLE.w, Math.max(minZoomWidth(WHOLE.w), current.w / factor));
       if (nextW >= WHOLE.w - 0.5) return WHOLE;
       const nextH = nextW * (WHOLE.h / WHOLE.w);
       const cx = current.x + current.w / 2;
@@ -68,8 +82,8 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="min-w-0 border border-hairline bg-parchment">
         <div className="flex flex-wrap gap-2 p-2">
-          <button type="button" onClick={() => zoomAt(1.4)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">+</button>
-          <button type="button" onClick={() => zoomAt(1 / 1.4)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">-</button>
+          <button type="button" aria-label="Zoom in" onClick={() => zoomAt(1.4)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">+</button>
+          <button type="button" aria-label="Zoom out" onClick={() => zoomAt(1 / 1.4)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">-</button>
           <MapMenu
             id="city-menu"
             label={CITY_MENU_LABEL}
@@ -143,8 +157,21 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
             const chipW = Math.max(mark * 1.8, label.length * textSize * 0.65 + textSize * 0.5);
             const chipH = textSize * 1.8;
             return (
-              <g key={`${cluster.x}-${cluster.y}`} aria-label={`${cluster.count} dispensaries`}>
-                <rect x={cluster.x - chipW / 2} y={cluster.y - chipH / 2} width={chipW} height={chipH} fill="rgb(var(--surface-ink))" />
+              <g key={`${cluster.x}-${cluster.y}`}>
+                <rect
+                  data-pin="cluster"
+                  x={cluster.x - chipW / 2}
+                  y={cluster.y - chipH / 2}
+                  width={chipW}
+                  height={chipH}
+                  fill="rgb(var(--surface-ink))"
+                  className="cursor-pointer"
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`${cluster.count} dispensaries`}
+                  onClick={() => frameCluster(cluster.pins)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); frameCluster(cluster.pins); } }}
+                />
                 <text x={cluster.x} y={cluster.y} textAnchor="middle" dominantBaseline="central" fill="rgb(var(--text-inverse))" fontSize={textSize} className="pointer-events-none font-mono">{label}</text>
               </g>
             );

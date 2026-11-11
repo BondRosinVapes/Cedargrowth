@@ -17,7 +17,7 @@ import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmat
 import { buildDigest, hoodieSignals, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
 import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, parseCounty, regionForCounty } from '../src/lib/crm/nyRegions.ts';
 import { coverageLabel } from '../src/lib/crm/territory.ts';
-import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, cityChoices, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, framePoints, MAP_HEIGHT, MAP_WIDTH, pinCard, placePins, projectNy, unmappedAccountCount, wholeStateFrame, type MapPin } from '../src/lib/crm/nyMap.ts';
+import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, cityChoices, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, framePoints, MAP_HEIGHT, MAP_WIDTH, mergeGap, minZoomWidth, pinCard, placePins, projectNy, unmappedAccountCount, wholeStateFrame, type MapPin } from '../src/lib/crm/nyMap.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
@@ -1499,7 +1499,7 @@ const cityFrame = framePoints(placePins(menuPins.filter((pin) => pin.city === 'B
 assert(!!erieFrame && buffalo.x >= erieFrame.x && buffalo.x <= erieFrame.x + erieFrame.w && buffalo.y >= erieFrame.y && buffalo.y <= erieFrame.y + erieFrame.h && !!cityFrame && cityFrame.w < 1000, 'a county frame contains the county and a city frame fits its pins');
 const opening = wholeStateFrame();
 const mapUi = readFileSync('src/app/admin/crm/NyDispensaryMap.tsx', 'utf8');
-assert(CITY_MENU_LABEL === 'Search cities' && COUNTY_MENU_LABEL === 'Search counties' && opening.w > (erieFrame?.w ?? opening.w) && opening.h > (erieFrame?.h ?? opening.h) && opening.x <= 0 && opening.y <= 0 && opening.x + opening.w >= MAP_WIDTH && opening.y + opening.h >= MAP_HEIGHT && mapUi.includes('label={CITY_MENU_LABEL}') && mapUi.includes('label={COUNTY_MENU_LABEL}') && mapUi.includes('const WHOLE = wholeStateFrame()') && mapUi.includes('useState(WHOLE)') && mapUi.includes('preserveAspectRatio="xMidYMid meet"') && mapUi.includes('aspectRatio') && mapUi.includes('onWheel') === false && mapUi.includes('gesturestart') && mapUi.includes('declutterPins'), 'TEST ONLY: the map opens on the whole state, the menus stay labeled Search cities and Search counties, and zoom is not on the wheel');
+assert(CITY_MENU_LABEL === 'Search cities' && COUNTY_MENU_LABEL === 'Search counties' && opening.w > (erieFrame?.w ?? opening.w) && opening.h > (erieFrame?.h ?? opening.h) && opening.x <= 0 && opening.y <= 0 && opening.x + opening.w >= MAP_WIDTH && opening.y + opening.h >= MAP_HEIGHT && mapUi.includes('label={CITY_MENU_LABEL}') && mapUi.includes('label={COUNTY_MENU_LABEL}') && mapUi.includes('const WHOLE = wholeStateFrame()') && mapUi.includes('useState(WHOLE)') && mapUi.includes('preserveAspectRatio="xMidYMid meet"') && mapUi.includes('aspectRatio') && mapUi.includes('onWheel') === false && mapUi.includes('gesturestart') && mapUi.includes('declutterPins') && mapUi.includes('aria-label="Zoom in"') && mapUi.includes('aria-label="Zoom out"') && mapUi.includes('minZoomWidth') && mapUi.includes('Math.max(view.w / 90, 4)') === false, 'TEST ONLY: the map opens on the whole state, the menus stay labeled Search cities and Search counties, and zoom is not on the wheel');
 const closePins = placePins([testPin('near-a', 40.75, -73.99), testPin('near-b', 40.751, -73.989)]).placed;
 const farPins = placePins([testPin('west', 42.89, -78.88), testPin('east', 44.7, -73.45)]).placed;
 const merged = declutterPins(closePins, 40);
@@ -1507,6 +1507,12 @@ const split = declutterPins(closePins, 0.01);
 const apart = declutterPins(farPins, 40);
 const members = merged.clusters[0]?.pins ?? [];
 assert(merged.clusters.length === 1 && members.length === 2 && members[0].latitude === closePins[0].latitude && members[0].x === closePins[0].x && members[1].x === closePins[1].x && Math.abs((merged.clusters[0]?.x ?? 0) - (closePins[0].x + closePins[1].x) / 2) < 0.001 && split.singles.length === 2 && apart.singles.length === 2, 'TEST ONLY: overlapping pins share a centroid chip and keep their coordinates');
+const cityA = placePins([testPin('city-a', 40.75, -73.99)]).placed[0];
+const cityB = placePins([testPin('city-b', 40.751, -73.989)]).placed[0];
+const tightGap = mergeGap(minZoomWidth(opening.w));
+const tight = declutterPins([cityA, cityB], tightGap);
+const alone = declutterPins([cityA], tightGap);
+assert(tight.clusters.length === 0 && tight.singles.length === 2 && tight.singles[0].x === cityA.x && tight.singles[0].latitude === 40.75 && tight.singles[1].x === cityB.x && tight.singles[1].longitude === -73.989 && alone.clusters.length === 0 && alone.singles.length === 1 && tightGap < mergeGap(opening.w), 'TEST ONLY: two pins 0.001 degrees apart are separate markers at maximum zoom');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);
 
