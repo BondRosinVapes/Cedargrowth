@@ -173,6 +173,28 @@ export function authorizeCrmRequest(input: {
   return { ok: true, actorId: input.actorId, brand, role: grant.role };
 }
 
+// An img request cannot send the CRM header. The photo GET still requires a
+// signed-in CedarGrowth desk and the same same-origin checks as other reads.
+export function authorizePlacePhoto(input: {
+  actorId: string | null;
+  grants: readonly DeskGrant[];
+  requestOrigin: string;
+  headerOrigin: string | null;
+  headerFetchSite: string | null;
+  brandRaw: string | null;
+}): Authz {
+  return authorizeCrmRequest({
+    actorId: input.actorId,
+    grants: input.grants,
+    method: 'GET',
+    requestOrigin: input.requestOrigin,
+    headerOrigin: input.headerOrigin,
+    headerMarker: '1',
+    headerFetchSite: input.headerFetchSite,
+    brandRaw: input.brandRaw,
+  });
+}
+
 export function canExport(role: DeskRole): boolean {
   return role === 'owner' || role === 'administrator';
 }

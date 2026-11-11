@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { browserLink } from '@/lib/crm/placeLinks';
 
 type Card = {
   name: string;
@@ -36,6 +37,9 @@ export function GooglePlaceCard({ accountId }: { accountId: string }) {
     return () => { cancel = true; };
   }, [accountId]);
 
+  const website = browserLink(card?.website);
+  const mapsUrl = browserLink(card?.mapsUrl);
+
   return (
     <section className="flex w-full flex-col gap-3 border border-hairline bg-clinical p-3">
       <h3 className="font-display text-body-l text-primary">Google</h3>
@@ -48,14 +52,14 @@ export function GooglePlaceCard({ accountId }: { accountId: string }) {
           <p className="font-mono text-specimen text-primary">{card.rating === null ? 'No rating' : `${card.rating} from ${card.reviewCount ?? 0} reviews`}</p>
           {card.hours.length ? <ul className="flex flex-col gap-1">{card.hours.map((line) => <li key={line} className="text-caption text-secondary">{line}</li>)}</ul> : <p className="text-caption text-tertiary">Hours not provided.</p>}
           <p className="text-body-m text-primary">{card.phone || 'No phone'}</p>
-          {card.website ? <a href={card.website} className="min-h-[44px] text-body-m text-primary underline">Website</a> : <p className="text-caption text-tertiary">No website</p>}
+          {website ? <a href={website} className="min-h-[44px] text-body-m text-primary underline">Website</a> : <p className="text-caption text-tertiary">No website</p>}
           {card.photoUrl ? (
             // The photo is proxied by our server. The Google key never reaches the browser.
             // eslint-disable-next-line @next/next/no-img-element
             <img src={card.photoUrl} alt="" className="max-h-48 w-full" />
           ) : null}
           {card.photoCredits.length ? <p className="text-caption text-tertiary">Photo: {card.photoCredits.join(', ')}</p> : null}
-          {card.mapsUrl ? <a href={card.mapsUrl} className="inline-flex min-h-[44px] items-center text-body-m text-primary underline">View on Google Maps</a> : null}
+          {mapsUrl ? <a href={mapsUrl} className="inline-flex min-h-[44px] items-center text-body-m text-primary underline">View on Google Maps</a> : null}
           <p className="font-mono text-specimen uppercase tracking-specimen text-tertiary">Data from Google</p>
         </div>
       ) : null}

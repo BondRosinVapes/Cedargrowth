@@ -6,7 +6,8 @@ import { readFileSync } from 'node:fs';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { assertDashboardTabs } from './crm-dashboard-tabs-selftest.ts';
 import { allowedPhotoUrl, fetchAllowedPhoto, lookupPlace, photoAddressAllowed, photoMediaUrl, PLACE_TTL_MS, placeCacheFresh, placeQuery, placeReadPlan, readPlacePhoto, type PhotoLookup, type PlaceCache } from '../src/lib/crm/places.ts';
-import { applyWonMerge, undoWonMerge, type LicenseWorld } from '../src/lib/crm/distributionMerge.ts';
+import { browserLink } from '../src/lib/crm/placeLinks.ts';
+import { applyWonMerge, undoWonMerge, wonMergeOnSave, type LicenseWorld } from '../src/lib/crm/distributionMerge.ts';
 import { isDispensaryAccount } from '../src/lib/crm/engine.ts';
 import { assertProductionForecast } from './crm-production-forecast-selftest.ts';
 import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, parseDate, parseMoney, skipRepeatedImportRows } from '../src/lib/crm/importer.ts';
@@ -33,6 +34,7 @@ import {
   alertDedupeKey,
   assertPersistable,
   authorizeCrmRequest,
+  authorizePlacePhoto,
   canExport,
   decideDeskAccess,
   CANIX_NOT_CONNECTED,
@@ -152,6 +154,19 @@ assert(authorizeCrmRequest({
 assert(authorizeCrmRequest({
   actorId: 'owner', grants: ownerGrants, method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: null,
 }).status === 400, 'missing brand is rejected');
+const imgDenied = authorizeCrmRequest({
+  actorId: 'owner', grants: salesGrant, method: 'GET', requestOrigin: origin, headerOrigin: null, headerMarker: null, headerFetchSite: 'same-origin', brandRaw: 'cedargrowth',
+});
+const imgAllowed = authorizePlacePhoto({
+  actorId: 'owner', grants: salesGrant, requestOrigin: origin, headerOrigin: null, headerFetchSite: 'same-origin', brandRaw: 'cedargrowth',
+});
+const imgCross = authorizePlacePhoto({
+  actorId: 'owner', grants: salesGrant, requestOrigin: origin, headerOrigin: 'https://evil.example', headerFetchSite: 'cross-site', brandRaw: 'cedargrowth',
+});
+const imgNoGrant = authorizePlacePhoto({
+  actorId: 'owner', grants: [], requestOrigin: origin, headerOrigin: null, headerFetchSite: 'same-origin', brandRaw: 'cedargrowth',
+});
+assert(imgDenied.ok === false && imgDenied.status === 403 && imgAllowed.ok === true && imgAllowed.brand === 'cedargrowth' && imgCross.ok === false && imgNoGrant.ok === false, 'TEST ONLY: a photo image request has no CRM header, and still requires a same-origin CedarGrowth desk');
 const bondOk = authorizeCrmRequest({
   actorId: 'owner', grants: ownerGrants, method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: 'bond',
 });
@@ -1584,7 +1599,47 @@ const followed = await fetchAllowedPhoto('https://lh3.googleusercontent.com/a', 
   },
 });
 assert(blockedPhoto === null && metadataPhoto === null && httpPhoto === null && localPhoto === null && metaPhoto === null && metaV6 === null && badName === null && goodName === 'https://places.googleapis.com/v1/places/ChIJtest/photos/abc/media?maxHeightPx=400&skipHttpRedirect=true' && redirected === null && photoCalls.some((href) => href.includes('169.254')) === false && photoCalls.some((href) => href.includes('127.0.0.1')) === false, 'TEST ONLY: a photo name and a photo URL stay on Google hosts');
-assert(keptPrivate.every((row) => row === null) && mixedDns === null && pinned.join(',') === '142.250.190.78' && photoAddressAllowed('8.8.8.8') && photoAddressAllowed('2001:4860:4802:32::78') && privateHop === null && hopCalls[0] === '142.250.190.78 https://lh3.googleusercontent.com/a' && hopCalls[1] === '142.250.190.78' && hopCalls[2] === '142.250.190.79' && (await followed?.text()) === 'img', 'TEST ONLY: a photo connects only to a checked public address, including each redirect hop');
+const specialUse = ['100.64.1.1', '100.127.255.255', '0.1.2.3', '192.0.0.1', '192.0.2.1', '192.88.99.1', '192.31.196.1', '192.52.193.1', '198.18.0.1', '198.51.100.1', '203.0.113.1', '224.0.0.1', '240.0.0.1', '255.255.255.255', '64:ff9b::8.8.8.8', '2002:0808:0808::', '2001:0:4136:e378:8000:63bf:3fff:fdd2', '::8.8.8.8', '::ffff:8.8.8.8'];
+const specialBlocked = await Promise.all(specialUse.map((address) => privatePhoto(address)));
+const photoRoute = readFileSync('src/app/api/admin/crm/places/photo/route.ts', 'utf8');
+const photoCallsForImage: string[] = [];
+const jpeg = await readPlacePhoto('places/ok/photos/pic', 'server-key', {
+  lookup: publicLookup,
+  request: async (url) => {
+    photoCallsForImage.push(url);
+    if (url.includes('places.googleapis.com')) return new Response(JSON.stringify({ photoUri: 'https://lh3.googleusercontent.com/a' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/jpeg' } });
+  },
+});
+const htmlPhoto = await readPlacePhoto('places/ok/photos/pic', 'server-key', {
+  lookup: publicLookup,
+  request: async (url) => url.includes('places.googleapis.com')
+    ? new Response(JSON.stringify({ photoUri: 'https://lh3.googleusercontent.com/a' }), { status: 200, headers: { 'content-type': 'application/json' } })
+    : new Response('<html>', { status: 200, headers: { 'content-type': 'text/html' } }),
+});
+const hugePhoto = await readPlacePhoto('places/ok/photos/pic', 'server-key', {
+  lookup: publicLookup,
+  request: async (url) => url.includes('places.googleapis.com')
+    ? new Response(JSON.stringify({ photoUri: 'https://lh3.googleusercontent.com/a' }), { status: 200, headers: { 'content-type': 'application/json' } })
+    : new Response(new Uint8Array([1]), { status: 200, headers: { 'content-type': 'image/jpeg', 'content-length': '99999999' } }),
+});
+const cappedPhoto = await readPlacePhoto('places/ok/photos/pic', 'server-key', {
+  lookup: publicLookup,
+  maxBytes: 4,
+  request: async (url) => url.includes('places.googleapis.com')
+    ? new Response(JSON.stringify({ photoUri: 'https://lh3.googleusercontent.com/a' }), { status: 200, headers: { 'content-type': 'application/json' } })
+    : new Response(new Uint8Array(8), { status: 200, headers: { 'content-type': 'image/png' } }),
+});
+const slowPhoto = await readPlacePhoto('places/ok/photos/pic', 'server-key', {
+  lookup: publicLookup,
+  timeoutMs: 20,
+  request: (_url, _address, init) => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+  }),
+});
+assert(keptPrivate.every((row) => row === null) && specialBlocked.every((row) => row === null) && specialUse.every((address) => photoAddressAllowed(address) === false) && mixedDns === null && pinned.join(',') === '142.250.190.78' && photoAddressAllowed('8.8.8.8') && photoAddressAllowed('100.63.255.255') && photoAddressAllowed('2001:4860:4802:32::78') && privateHop === null && hopCalls[0] === '142.250.190.78 https://lh3.googleusercontent.com/a' && hopCalls[1] === '142.250.190.78' && hopCalls[2] === '142.250.190.79' && (await followed?.text()) === 'img', 'TEST ONLY: a photo connects only to a checked public address, including each redirect hop');
+assert(jpeg?.contentType === 'image/jpeg' && jpeg.bytes.byteLength === 3 && photoCallsForImage.length === 2 && photoCallsForImage.every((url) => url.includes('searchText') === false) && htmlPhoto === null && hugePhoto === null && cappedPhoto === null && slowPhoto === null && photoRoute.includes('authorizePlacePhoto') && photoRoute.includes('readPlaceCache') && photoRoute.includes('lookupPlace') === false && photoRoute.includes('searchText') === false, 'TEST ONLY: a photo view uses the cached name, times out, stays under the byte cap, and accepts only an image');
+assert(browserLink('https://maps.google.com/a') === 'https://maps.google.com/a' && browserLink('http://shop.test') === 'http://shop.test/' && browserLink('javascript:alert(1)') === null && browserLink('data:text/html,hi') === null && browserLink('ftp://files.test') === null, 'TEST ONLY: a Google card link is only http or https');
 const world: LicenseWorld = {
   accounts: [
     { id: 'won', brand: 'cedargrowth', accountType: 'adult_use_dispensary', licenseRef: ' OCM-123 ' },
@@ -1625,7 +1680,7 @@ const mergeSql = readFileSync('supabase/migrations/0136_crm_google_places.sql', 
 const createOpp = storeSrc.slice(storeSrc.indexOf('async createOpportunity'), storeSrc.indexOf('async updateOpportunity'));
 const updateOpp = storeSrc.slice(storeSrc.indexOf('async updateOpportunity'), storeSrc.indexOf('private async mergeWonContacts'));
 const orderWon = storeSrc.slice(storeSrc.indexOf('async markDealWonFromOrder'), storeSrc.indexOf('async listStageEvents'));
-assert(createOpp.includes("input.stage === 'won'") && createOpp.includes('mergeWonContacts') && updateOpp.includes("patch.stage === 'won'") && updateOpp.includes('mergeWonContacts') && orderWon.includes("stage: 'won'") && storeSrc.includes('crm_merge_won_distribution') && isDispensaryAccount('adult_use_dispensary') && isDispensaryAccount('microbusiness') && isDispensaryAccount('registered_organization') && isDispensaryAccount('distributor') === false, 'TEST ONLY: creating at Won, saving as Won, and marking won from an order run the same merge');
+assert(createOpp.includes('wonMergeOnSave') && createOpp.includes('mergeWonContacts') && updateOpp.includes('previousStage') && updateOpp.includes('wonMergeOnSave') && orderWon.includes("stage: 'won'") && storeSrc.includes("console.error('crm won merge failed'") && storeSrc.includes('mergeFailed') && storeSrc.includes('crm_merge_won_distribution') && wonMergeOnSave({ brand: 'cedargrowth', creating: true, nextStage: 'won', previousStage: null }) && wonMergeOnSave({ brand: 'cedargrowth', creating: false, nextStage: 'won', previousStage: 'proposal' }) && wonMergeOnSave({ brand: 'cedargrowth', creating: false, nextStage: 'won', previousStage: 'won' }) === false && wonMergeOnSave({ brand: 'bond', creating: true, nextStage: 'won', previousStage: null }) === false && isDispensaryAccount('adult_use_dispensary') && isDispensaryAccount('microbusiness') && isDispensaryAccount('registered_organization') && isDispensaryAccount('distributor') === false, 'TEST ONLY: a new Won merges, a failed merge is reported, and resending Won after Undo does not merge again');
 assert(mergeSql.includes("lower(btrim(a.license_ref)) = v_key") && mergeSql.includes("v_key <> ''") && mergeSql.includes("a.brand = 'cedargrowth'") && mergeSql.includes("a.account_type in ('adult_use_dispensary', 'microbusiness', 'registered_organization')") && mergeSql.includes('for update') && mergeSql.includes('crm_notes') === false && mergeSql.includes('crm_tasks') === false && mergeSql.includes('crm_distributor_orders') === false, 'TEST ONLY: the migration matches a dispensary source license by trim and lowercase in one transaction and does not move notes, tasks, or orders');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);

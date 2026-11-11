@@ -25,6 +25,7 @@ import { VISIT_OUTCOME_LABELS, type VisitOutcome } from '@/lib/crm/field';
 import { NY_COUNTIES, regionForCounty } from '@/lib/crm/nyRegions';
 import { DashboardWing } from './DashboardWing';
 import { GooglePlaceCard } from './GooglePlaceCard';
+import { WON_MERGE_FAILED } from '@/lib/crm/distributionMerge';
 import { BatchesWing } from './BatchesWing';
 
 type Wing = 'dashboard' | 'accounts' | 'batches' | 'pipeline' | 'tasks' | 'activity' | 'reports' | 'health' | 'signals' | 'canix';
@@ -372,7 +373,7 @@ export function CrmConsole({
         notes: String(form.get('notes') || ''),
       }),
     });
-    setNotice(res.body.ok ? 'Opportunity saved. The amount is a forecast, not invoiced or paid revenue.' : String(res.body.reason || 'Opportunity was not saved.'));
+    setNotice(res.body.mergeFailed ? WON_MERGE_FAILED : (res.body.ok ? 'Opportunity saved. The amount is a forecast, not invoiced or paid revenue.' : String(res.body.reason || 'Opportunity was not saved.')));
     if (res.body.ok) setRefresh((value) => value + 1);
   }
 

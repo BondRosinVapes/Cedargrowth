@@ -31,6 +31,7 @@ import {
   type InsightSnapshot,
   type TaskStatus,
 } from './engine';
+import { WON_MERGE_FAILED } from './distributionMerge';
 import type { CrmStore } from './store';
 import { buildDashboard, parseDashboardFilter } from './dashboard';
 import { matchDistributorAccount, nabisHealthLine, type DistributorOrderDraft } from './distributor';
@@ -281,7 +282,7 @@ export async function handleOpportunityCollection(ctx: CrmContext, method: 'GET'
   });
   if (created.state === 'rejected') return { status: 400, body: { ok: false, reason: 'The related record is not in this brand.' } };
   if (created.state !== 'ok') return storageBody(auth.brand, created.state === 'missing' ? 'unavailable' : created.state);
-  return { status: 201, body: { ok: true, configured: true, brand: auth.brand, opportunity: withForecast(created.value) } };
+  return { status: 201, body: { ok: true, configured: true, brand: auth.brand, opportunity: withForecast(created.value), ...(created.mergeFailed ? { mergeFailed: true, reason: WON_MERGE_FAILED } : {}) } };
 }
 
 function withForecast<T extends { forecastCents: number | null }>(row: T) {
@@ -301,7 +302,7 @@ export async function handleOpportunityUpdate(ctx: CrmContext, id: string): Prom
   if (updated.state === 'missing') return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
   if (updated.state === 'rejected') return { status: 400, body: { ok: false, reason: 'The related record is not in this brand.' } };
   if (updated.state !== 'ok') return storageBody(auth.brand, updated.state);
-  return { status: 200, body: { ok: true, configured: true, brand: auth.brand, opportunity: withForecast(updated.value) } };
+  return { status: 200, body: { ok: true, configured: true, brand: auth.brand, opportunity: withForecast(updated.value), ...(updated.mergeFailed ? { mergeFailed: true, reason: WON_MERGE_FAILED } : {}) } };
 }
 
 export async function handleTaskCollection(ctx: CrmContext, method: 'GET' | 'POST'): Promise<CrmResult> {
@@ -1036,7 +1037,7 @@ export async function handleDistributorOrders(ctx: CrmContext, method: 'GET' | '
     const won = await ctx.store.markDealWonFromOrder(auth.brand, auth.actorId, orderId, opportunityId);
     if (won.state === 'rejected' || won.state === 'missing') return { status: 400, body: { ok: false, reason: 'The deal was not marked won. It must be an open deal on the matched account.' } };
     if (won.state !== 'ok') return storageBody(auth.brand, won.state);
-    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, order: won.value.order, stage: won.value.stage } };
+    return { status: 200, body: { ok: true, configured: true, brand: auth.brand, order: won.value.order, stage: won.value.stage, ...(won.mergeFailed ? { mergeFailed: true, reason: WON_MERGE_FAILED } : {}) } };
   }
   return { status: 400, body: { ok: false, reason: 'Order action is not recognized.' } };
 }

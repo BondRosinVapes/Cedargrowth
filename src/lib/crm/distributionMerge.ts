@@ -32,6 +32,19 @@ export type LicenseWorld = {
   notes: { id: string; accountId: string }[];
 };
 
+export const WON_MERGE_FAILED = 'The deal is saved as Won. The contact merge failed, so there is no audit row.';
+
+export function wonMergeOnSave(input: {
+  brand: string;
+  creating: boolean;
+  nextStage: string | null | undefined;
+  previousStage: string | null;
+}): boolean {
+  if (input.brand !== 'cedargrowth' || input.nextStage !== 'won') return false;
+  if (input.creating) return true;
+  return input.previousStage !== 'won';
+}
+
 export function licenseKey(value: string | null | undefined): string | null {
   const key = (value ?? '').trim().toLowerCase();
   return key.length ? key : null;

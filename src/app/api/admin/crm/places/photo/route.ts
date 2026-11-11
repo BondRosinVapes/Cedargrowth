@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { authorizeCrmRequest } from '@/lib/crm/engine';
+import { authorizePlacePhoto } from '@/lib/crm/engine';
 import { dnsPhotoLookup, pinnedPhotoRequest, readPlacePhoto } from '@/lib/crm/places';
 import { resolveDeskAccess } from '@/lib/crm/salesSession';
 import { getCrmStore } from '@/lib/crm/store';
@@ -11,13 +11,11 @@ export const revalidate = 0;
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const access = await resolveDeskAccess();
-  const auth = authorizeCrmRequest({
+  const auth = authorizePlacePhoto({
     actorId: access.actorId,
     grants: access.grants,
-    method: 'GET',
     requestOrigin: url.origin,
     headerOrigin: request.headers.get('origin'),
-    headerMarker: request.headers.get('x-cedargrowth-crm'),
     headerFetchSite: request.headers.get('sec-fetch-site'),
     brandRaw: url.searchParams.get('brand'),
   });

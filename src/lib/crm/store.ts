@@ -28,11 +28,11 @@ import { knownEmailEvent, type EmailEvent } from './emailStatus';
 import { intakeTestMarker, type IntakeLead } from './intake';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
 import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
-import { type ContactPrior, type MergeRow } from './distributionMerge';
+import { wonMergeOnSave, type ContactPrior, type MergeRow } from './distributionMerge';
 import type { PlaceCache, PlaceCard } from './places';
 
 export type StoreResult<T> =
-  | { state: 'ok'; value: T }
+  | { state: 'ok'; value: T; mergeFailed?: boolean }
   | { state: 'absent' }
   | { state: 'unavailable' }
   | { state: 'rejected' }
@@ -967,11 +967,24 @@ class SupabaseCrmStore implements CrmStore {
       updated_by: actor,
     }).select(OPP_COLS).maybeSingle();
     const saved = this.one(brand, data as Record<string, unknown> | null, error, mapOpportunity);
-    if (saved.state === 'ok' && input.stage === 'won' && brand === 'cedargrowth') await this.mergeWonContacts(brand, actor, saved.value);
+    if (saved.state === 'ok' && wonMergeOnSave({ brand, creating: true, nextStage: input.stage, previousStage: null })) {
+      const merged = await this.mergeWonContacts(brand, actor, saved.value);
+      if (!merged) {
+        const failed: StoreResult<Opportunity> = { state: 'ok', value: saved.value, mergeFailed: true };
+        return failed;
+      }
+    }
     return saved;
   }
 
   async updateOpportunity(brand: CrmBrand, actor: string, id: string, patch: OpportunityWrite) {
+    let previousStage: string | null = null;
+    if (patch.stage === 'won' && brand === 'cedargrowth') {
+      const prior = await this.db.from('crm_opportunities').select('stage').eq('id', id).eq('brand', brand).maybeSingle();
+      const priorFailed = classify(prior.error);
+      if (priorFailed) return { state: priorFailed };
+      previousStage = prior.data && typeof prior.data.stage === 'string' ? prior.data.stage : null;
+    }
     const row: Record<string, unknown> = { updated_by: actor };
     if (patch.name !== undefined) row.name = patch.name;
     if (patch.stage !== undefined) row.stage = patch.stage;
@@ -985,14 +998,24 @@ class SupabaseCrmStore implements CrmStore {
     if (patch.quantityUnits !== undefined) row.quantity_units = patch.quantityUnits;
     const { data, error } = await this.db.from('crm_opportunities').update(row).eq('id', id).eq('brand', brand).select(OPP_COLS).maybeSingle();
     const saved = this.one(brand, data as Record<string, unknown> | null, error, mapOpportunity);
-    if (saved.state === 'ok' && patch.stage === 'won' && brand === 'cedargrowth') await this.mergeWonContacts(brand, actor, saved.value);
+    if (saved.state === 'ok' && wonMergeOnSave({ brand, creating: false, nextStage: patch.stage, previousStage })) {
+      const merged = await this.mergeWonContacts(brand, actor, saved.value);
+      if (!merged) {
+        const failed: StoreResult<Opportunity> = { state: 'ok', value: saved.value, mergeFailed: true };
+        return failed;
+      }
+    }
     return saved;
   }
 
-  private async mergeWonContacts(brand: CrmBrand, actor: string, opportunity: Opportunity) {
-    if (brand !== 'cedargrowth') return;
+  private async mergeWonContacts(brand: CrmBrand, actor: string, opportunity: Opportunity): Promise<boolean> {
+    if (brand !== 'cedargrowth') return true;
     const { error } = await this.db.rpc('crm_merge_won_distribution', { p_opportunity_id: opportunity.id, p_actor: actor });
-    if (classify(error) || error) return;
+    if (classify(error) || error) {
+      console.error('crm won merge failed', { opportunityId: opportunity.id, brand });
+      return false;
+    }
+    return true;
   }
 
   async readAccount(brand: CrmBrand, id: string): Promise<StoreResult<Account | null>> {
@@ -1283,7 +1306,7 @@ class SupabaseCrmStore implements CrmStore {
     const { data, error } = await this.db.from('crm_distributor_orders').update({ opportunity_id: opportunityId }).eq('id', orderId).eq('brand', brand).select(ORDER_COLS).maybeSingle();
     const saved = this.one(brand, data as Record<string, unknown> | null, error, mapDistributorOrder);
     if (saved.state !== 'ok') return saved;
-    return { state: 'ok', value: { order: saved.value, stage: 'won' } };
+    return { state: 'ok', value: { order: saved.value, stage: 'won' }, mergeFailed: won.mergeFailed === true };
   }
 
   // Digest week counts and territory quiet-deal checks. Oldest 5000 only, so

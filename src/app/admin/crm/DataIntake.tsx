@@ -13,6 +13,7 @@ import {
   type CrmBrand,
 } from '@/lib/crm/engine';
 import { STAGE_LABELS } from '@/lib/crm/dashboard';
+import { WON_MERGE_FAILED } from '@/lib/crm/distributionMerge';
 import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, skipRepeatedImportRows, TEMPLATES, type ImportKind, type ImportRow } from '@/lib/crm/importer';
 
 type Outcome = { line: number; status: 'ready' | 'created' | 'updated' | 'unmatched' | 'skipped' | 'error'; reason?: string; orderId?: string };
@@ -77,7 +78,7 @@ export function QuickAdd({ brand, onSaved }: { brand: CrmBrand; onSaved: () => v
         lossReason: String(data.get('lossReason') || '') || null,
       }),
     });
-    setMessage(res.body.ok ? 'Deal added.' : String(res.body.reason || 'Deal was not saved.'));
+    setMessage(res.body.mergeFailed ? WON_MERGE_FAILED : (res.body.ok ? 'Deal added.' : String(res.body.reason || 'Deal was not saved.')));
     if (res.body.ok) { form.reset(); setStage('lead'); onSaved(); }
   }
 
