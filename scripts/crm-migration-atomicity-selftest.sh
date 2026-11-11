@@ -183,6 +183,16 @@ if [ "$KEPT" != "42.886000,-78.878000,test-only" ] || [ "$TRIGGERS" != "crm_acco
 fi
 echo 'ok: a coordinate-only update is kept and a latitude outside New York is rejected'
 
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-apply-0136.sql" >/tmp/crm-0136-second.log
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-apply-0136.sql" >/tmp/crm-0136-third.log
+GUARD=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(array_to_string(p.proconfig, '|'), '') || ',' || (position('pg_catalog.now()' in p.prosrc) > 0)::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'crm_private' and p.proname = 'guard_contact';")
+TRIG=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_trigger where tgrelid = 'public.crm_distribution_merges'::regclass and tgname = 'crm_distribution_merges_append_only' and not tgisinternal;")
+if [ "$GUARD" != "search_path=pg_catalog,true" ] || [ "$TRIG" != "1" ]; then
+  echo "FAIL: 0136 reapply guard=${GUARD} triggers=${TRIG}"
+  exit 1
+fi
+echo 'ok: 0136 applies twice and guard_contact pins search_path to pg_catalog'
+
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${DB};" >/dev/null
 
 UP=crm_suite_upgrade

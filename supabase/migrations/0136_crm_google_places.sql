@@ -3,7 +3,8 @@
 -- Supported upgrade after 0120 through 0135 have committed:
 --   psql --single-transaction -v ON_ERROR_STOP=1 -f scripts/crm-apply-0136.sql
 -- Do not apply this file with autocommit. This repository does not run it.
--- No seed rows. No grants beyond service_role. Nothing in this file is deleted.
+-- No seed rows. No grants beyond service_role. No rows are deleted.
+-- The append-only trigger is dropped and created again so a second apply succeeds.
 
 do $$
 begin
@@ -51,7 +52,7 @@ comment on column public.crm_distribution_merges.reassigned_ids is 'Contacts ski
 create or replace function crm_private.guard_contact()
 returns trigger
 language plpgsql
-set search_path = public
+set search_path = pg_catalog
 as $$
 declare
   parent text;
@@ -72,7 +73,7 @@ begin
        and new.account_id is not distinct from old.account_id then
       return old;
     end if;
-    new.updated_at := now();
+    new.updated_at := pg_catalog.now();
   end if;
   return new;
 end;
@@ -123,6 +124,7 @@ comment on function public.crm_guard_distribution_merge() is 'The merge audit ac
 
 revoke all on function public.crm_guard_distribution_merge() from public, anon, authenticated, service_role;
 
+drop trigger if exists crm_distribution_merges_append_only on public.crm_distribution_merges;
 create trigger crm_distribution_merges_append_only
   before update or delete on public.crm_distribution_merges
   for each row execute function public.crm_guard_distribution_merge();
