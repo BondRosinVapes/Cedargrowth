@@ -14,6 +14,7 @@ import {
   type TaskStatus,
   type TaskWrite,
   ACCOUNT_TYPES,
+  isDispensaryAccount,
   LEAD_SOURCES,
   OPEN_STAGES,
   type AccountType,
@@ -28,7 +29,7 @@ import { knownEmailEvent, type EmailEvent } from './emailStatus';
 import { intakeTestMarker, type IntakeLead } from './intake';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
 import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
-import { planDistributionMerge, type MergeRow } from './distributionMerge';
+import { dispensaryContacts, planDistributionMerge, undoAssignments, type ContactPrior, type MergeRow } from './distributionMerge';
 import type { PlaceCache, PlaceCard } from './places';
 
 export type StoreResult<T> =
@@ -401,15 +402,30 @@ export function getCrmStore(): CrmStore {
   return new SupabaseCrmStore(client);
 }
 
+const MERGE_COLS = 'id,account_id,opportunity_id,actor,contact_ids,prior_accounts,created_at,undone_at,undone_by';
+
+function mapPriors(value: unknown): ContactPrior[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((row) => {
+    if (!row || typeof row !== 'object') return [];
+    const contactId = (row as { contactId?: unknown }).contactId;
+    const priorAccountId = (row as { priorAccountId?: unknown }).priorAccountId;
+    if (typeof contactId !== 'string' || typeof priorAccountId !== 'string') return [];
+    return [{ contactId, priorAccountId }];
+  });
+}
+
 function mapMerge(row: Record<string, unknown>): MergeRow | null {
   if (typeof row.id !== 'string' || typeof row.account_id !== 'string' || typeof row.opportunity_id !== 'string') return null;
   const ids = Array.isArray(row.contact_ids) ? row.contact_ids.filter((id): id is string => typeof id === 'string') : [];
+  const priors = mapPriors(row.prior_accounts);
   return {
     id: row.id,
     accountId: row.account_id,
     opportunityId: row.opportunity_id,
     actor: typeof row.actor === 'string' ? row.actor : '',
-    contactIds: ids,
+    contactIds: ids.length ? ids : priors.map((item) => item.contactId),
+    priors,
     createdAt: String(row.created_at || ''),
     undoneAt: typeof row.undone_at === 'string' ? row.undone_at : null,
     undoneBy: typeof row.undone_by === 'string' ? row.undone_by : null,
@@ -951,7 +967,9 @@ class SupabaseCrmStore implements CrmStore {
       created_by: actor,
       updated_by: actor,
     }).select(OPP_COLS).maybeSingle();
-    return this.one(brand, data as Record<string, unknown> | null, error, mapOpportunity);
+    const saved = this.one(brand, data as Record<string, unknown> | null, error, mapOpportunity);
+    if (saved.state === 'ok' && input.stage === 'won' && brand === 'cedargrowth') await this.mergeWonContacts(brand, actor, saved.value);
+    return saved;
   }
 
   async updateOpportunity(brand: CrmBrand, actor: string, id: string, patch: OpportunityWrite) {
@@ -973,9 +991,13 @@ class SupabaseCrmStore implements CrmStore {
   }
 
   private async mergeWonContacts(brand: CrmBrand, actor: string, opportunity: Opportunity) {
-    const contacts = await this.db.from('crm_contacts').select('id').eq('brand', brand).eq('account_id', opportunity.accountId);
+    const account = await this.readAccount(brand, opportunity.accountId);
+    if (account.state !== 'ok' || !account.value || !isDispensaryAccount(account.value.accountType)) return;
+    const contacts = await this.db.from('crm_contacts').select('id,account_id').eq('brand', brand).eq('account_id', opportunity.accountId);
     if (classify(contacts.error)) return;
-    const contactIds = ((contacts.data || []) as { id?: string }[]).map((row) => row.id).filter((id): id is string => typeof id === 'string');
+    const priors = dispensaryContacts(((contacts.data || []) as { id?: string; account_id?: string }[]).flatMap((row) => (
+      typeof row.id === 'string' && typeof row.account_id === 'string' ? [{ id: row.id, accountId: row.account_id }] : []
+    )), opportunity.accountId);
     const open = await this.readOpenMerge(brand, opportunity.id);
     if (open.state !== 'ok') return;
     const plan = planDistributionMerge({
@@ -983,10 +1005,14 @@ class SupabaseCrmStore implements CrmStore {
       opportunityId: opportunity.id,
       accountId: opportunity.accountId,
       actor,
-      contactIds,
+      priors,
       now: new Date().toISOString(),
     });
     if (plan.action === 'skip') return;
+    for (const assignment of plan.assignments) {
+      const moved = await this.db.from('crm_contacts').update({ account_id: assignment.accountId, updated_by: actor }).eq('id', assignment.contactId).eq('brand', brand);
+      if (classify(moved.error) || moved.error) return;
+    }
     await this.insertMerge(brand, plan.row);
   }
 
@@ -1033,7 +1059,7 @@ class SupabaseCrmStore implements CrmStore {
   }
 
   async readOpenMerge(brand: CrmBrand, opportunityId: string): Promise<StoreResult<MergeRow | null>> {
-    const { data, error } = await this.db.from('crm_distribution_merges').select('id,account_id,opportunity_id,actor,contact_ids,created_at,undone_at,undone_by').eq('brand', brand).eq('opportunity_id', opportunityId).is('undone_at', null).maybeSingle();
+    const { data, error } = await this.db.from('crm_distribution_merges').select(MERGE_COLS).eq('brand', brand).eq('opportunity_id', opportunityId).is('undone_at', null).maybeSingle();
     const failed = classify(error);
     if (failed) return { state: failed };
     if (!data) return { state: 'ok', value: null };
@@ -1041,7 +1067,7 @@ class SupabaseCrmStore implements CrmStore {
   }
 
   async readAccountMerge(brand: CrmBrand, accountId: string): Promise<StoreResult<MergeRow | null>> {
-    const { data, error } = await this.db.from('crm_distribution_merges').select('id,account_id,opportunity_id,actor,contact_ids,created_at,undone_at,undone_by').eq('brand', brand).eq('account_id', accountId).is('undone_at', null).order('created_at', { ascending: false }).limit(1).maybeSingle();
+    const { data, error } = await this.db.from('crm_distribution_merges').select(MERGE_COLS).eq('brand', brand).eq('account_id', accountId).is('undone_at', null).order('created_at', { ascending: false }).limit(1).maybeSingle();
     const failed = classify(error);
     if (failed) return { state: failed };
     if (!data) return { state: 'ok', value: null };
@@ -1055,8 +1081,9 @@ class SupabaseCrmStore implements CrmStore {
       opportunity_id: row.opportunityId,
       actor: row.actor,
       contact_ids: row.contactIds,
+      prior_accounts: row.priors,
       created_at: row.createdAt,
-    }).select('id,account_id,opportunity_id,actor,contact_ids,created_at,undone_at,undone_by').maybeSingle();
+    }).select(MERGE_COLS).maybeSingle();
     const failed = classify(error);
     if (failed) return { state: failed };
     const mapped = data ? mapMerge(data as Record<string, unknown>) : null;
@@ -1065,7 +1092,16 @@ class SupabaseCrmStore implements CrmStore {
   }
 
   async undoMerge(brand: CrmBrand, mergeId: string, actor: string, now: string): Promise<StoreResult<MergeRow>> {
-    const { data, error } = await this.db.from('crm_distribution_merges').update({ undone_at: now, undone_by: actor }).eq('id', mergeId).eq('brand', brand).is('undone_at', null).select('id,account_id,opportunity_id,actor,contact_ids,created_at,undone_at,undone_by').maybeSingle();
+    const current = await this.db.from('crm_distribution_merges').select(MERGE_COLS).eq('id', mergeId).eq('brand', brand).is('undone_at', null).maybeSingle();
+    const currentFailed = classify(current.error);
+    if (currentFailed) return { state: currentFailed };
+    const open = current.data ? mapMerge(current.data as Record<string, unknown>) : null;
+    if (current.error || !open) return { state: 'rejected' };
+    for (const assignment of undoAssignments(open.priors)) {
+      const restored = await this.db.from('crm_contacts').update({ account_id: assignment.accountId, updated_by: actor }).eq('id', assignment.contactId).eq('brand', brand);
+      if (classify(restored.error) || restored.error) return { state: 'unavailable' };
+    }
+    const { data, error } = await this.db.from('crm_distribution_merges').update({ undone_at: now, undone_by: actor }).eq('id', mergeId).eq('brand', brand).is('undone_at', null).select(MERGE_COLS).maybeSingle();
     const failed = classify(error);
     if (failed) return { state: failed };
     const mapped = data ? mapMerge(data as Record<string, unknown>) : null;

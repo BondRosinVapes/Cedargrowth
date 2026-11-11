@@ -1,4 +1,4 @@
-import { authorizeCrmRequest } from './engine';
+import { authorizeCrmRequest, isDispensaryAccount } from './engine';
 import type { CrmContext, CrmResult } from './handlers';
 import { lookupPlace, placeQuery, placeReadPlan, type PlaceCard } from './places';
 
@@ -25,6 +25,7 @@ export async function handleGooglePlace(ctx: CrmContext, now = Date.now()): Prom
   const account = await ctx.store.readAccount(auth.brand, accountId);
   if (account.state !== 'ok') return denied(503, 'CRM storage could not be read.');
   if (!account.value) return denied(404, 'Not found.');
+  if (!isDispensaryAccount(account.value.accountType)) return { status: 200, body: { ok: true, state: 'not_dispensary' } };
   const cacheResult = await ctx.store.readPlaceCache(auth.brand, accountId);
   if (cacheResult.state !== 'ok') return denied(503, 'CRM storage could not be read.');
   const key = process.env.GOOGLE_PLACES_API_KEY?.trim() || '';

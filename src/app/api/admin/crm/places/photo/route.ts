@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { authorizeCrmRequest } from '@/lib/crm/engine';
+import { readPlacePhoto } from '@/lib/crm/places';
 import { resolveDeskAccess } from '@/lib/crm/salesSession';
 import { getCrmStore } from '@/lib/crm/store';
 
@@ -27,18 +28,12 @@ export async function GET(request: Request) {
   const cache = await getCrmStore().readPlaceCache(auth.brand, accountId);
   const photoName = cache.state === 'ok' ? cache.value?.fields?.photoName : null;
   if (!photoName) return new NextResponse(null, { status: 404 });
-  const meta = await fetch(`https://places.googleapis.com/v1/${photoName}/media?maxHeightPx=400&skipHttpRedirect=true`, {
-    headers: { 'X-Goog-Api-Key': key },
-  });
-  if (!meta.ok) return new NextResponse(null, { status: 404 });
-  const body = await meta.json().catch(() => ({})) as { photoUri?: string };
-  if (!body.photoUri) return new NextResponse(null, { status: 404 });
-  const image = await fetch(body.photoUri);
-  if (!image.ok) return new NextResponse(null, { status: 404 });
-  return new NextResponse(image.body, {
+  const photo = await readPlacePhoto(photoName, key, fetch);
+  if (!photo) return new NextResponse(null, { status: 404 });
+  return new NextResponse(photo.bytes, {
     status: 200,
     headers: {
-      'content-type': image.headers.get('content-type') || 'image/jpeg',
+      'content-type': photo.contentType,
       'cache-control': 'private, max-age=3600',
       'x-content-type-options': 'nosniff',
     },

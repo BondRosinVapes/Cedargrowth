@@ -38,6 +38,11 @@ export type TaskStatus = 'open' | 'done';
 
 export const ACCOUNT_TYPES = ['adult_use_dispensary', 'microbusiness', 'distributor', 'registered_organization', 'processor', 'cultivator', 'other'] as const;
 export type AccountType = (typeof ACCOUNT_TYPES)[number];
+export const DISPENSARY_ACCOUNT_TYPES = ['adult_use_dispensary', 'microbusiness', 'registered_organization'] as const;
+
+export function isDispensaryAccount(type: string | null | undefined): boolean {
+  return (DISPENSARY_ACCOUNT_TYPES as readonly string[]).includes(type || '');
+}
 export const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
   adult_use_dispensary: 'Adult-use dispensary',
   microbusiness: 'Microbusiness',

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import {
   ACCOUNT_TYPE_LABELS,
   ACCOUNT_TYPES,
+  isDispensaryAccount,
   brandLabel,
   parseBrand,
   LEAD_SOURCE_LABELS,
@@ -540,7 +541,7 @@ export function CrmConsole({
                   <FieldMedia key={row.id} brand={brand} id={row.id} kind={row.kind} />
                 ))}
               </ul>
-              {brand === 'cedargrowth' ? <GooglePlaceCard accountId={selected.id} /> : null}
+              {brand === 'cedargrowth' && isDispensaryAccount(selected.accountType) ? <GooglePlaceCard accountId={selected.id} /> : null}
               <h3 className="font-display text-body-l text-primary">Contacts</h3>
               <ul className="flex flex-col gap-2">
                 {accountContacts.length === 0 ? <li className="text-caption text-tertiary">No contacts on this account.</li> : accountContacts.map((row) => (
@@ -556,10 +557,7 @@ export function CrmConsole({
             <article className="flex w-full max-w-editorial flex-col gap-2 border border-hairline bg-clinical p-4">
               <h2 className="font-display text-heading-s text-primary">{selectedContact.name}</h2>
               {contactAccount ? (
-                <div className="flex flex-col gap-2">
-                  <button type="button" onClick={() => setSelectedAccountId(contactAccount.id)} className="min-h-[44px] border border-ink px-3 py-2 text-left text-body-m text-primary">Dispensary: {contactAccount.displayName}</button>
-                  <button type="button" onClick={() => setSelectedAccountId(contactAccount.id)} className="min-h-[44px] border border-ink px-3 py-2 text-left text-body-m text-primary">Account: {contactAccount.displayName}</button>
-                </div>
+                <button type="button" onClick={() => setSelectedAccountId(contactAccount.id)} className="min-h-[44px] border border-ink px-3 py-2 text-left text-body-m text-primary">Account: {contactAccount.displayName}</button>
               ) : <p className="text-caption text-tertiary">No linked account.</p>}
             </article>
           ) : null}

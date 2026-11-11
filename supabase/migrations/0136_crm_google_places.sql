@@ -36,13 +36,46 @@ create table if not exists public.crm_distribution_merges (
   opportunity_id uuid not null references public.crm_opportunities (id),
   actor text not null check (char_length(actor) between 3 and 200),
   contact_ids uuid[] not null,
+  prior_accounts jsonb not null default '[]'::jsonb check (jsonb_typeof(prior_accounts) = 'array'),
   created_at timestamptz not null default now(),
   undone_at timestamptz,
   undone_by text check (undone_by is null or char_length(undone_by) between 3 and 200),
   check ((undone_at is null and undone_by is null) or (undone_at is not null and undone_by is not null))
 );
 
-comment on table public.crm_distribution_merges is 'Audit of contacts shown with an account after a won deal. Rows are undone, never deleted.';
+comment on table public.crm_distribution_merges is 'Audit of contacts attached to an account after a won deal. prior_accounts stores each contact id and the account id it had before the merge. Rows are undone, never deleted.';
+
+create or replace function crm_private.guard_contact()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  parent text;
+begin
+  select brand into parent from public.crm_accounts where id = new.account_id;
+  if parent is null or parent is distinct from new.brand then
+    raise exception 'brand does not match account';
+  end if;
+  if tg_op = 'UPDATE' and new.brand is distinct from old.brand then
+    raise exception 'brand is immutable';
+  end if;
+  if tg_op = 'UPDATE' then
+    if new.name is not distinct from old.name
+       and new.title is not distinct from old.title
+       and new.email is not distinct from old.email
+       and new.phone is not distinct from old.phone
+       and new.notes is not distinct from old.notes
+       and new.account_id is not distinct from old.account_id then
+      return old;
+    end if;
+    new.updated_at := now();
+  end if;
+  return new;
+end;
+$$;
+
+comment on function crm_private.guard_contact() is 'Brand stays fixed. account_id may move to another account of the same brand so a won deal can attach contacts. An unchanged update is ignored.';
 
 create unique index if not exists crm_distribution_merges_open_idx
   on public.crm_distribution_merges (opportunity_id)
