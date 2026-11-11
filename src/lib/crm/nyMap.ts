@@ -236,14 +236,43 @@ export function clusterMembers(pins: readonly MapPin[]): { id: string; name: str
   }));
 }
 
-// A chip includes only pins inside the gap of its seed. Neighbors of a member that sit farther from the seed stay out.
+export type HitBox = { x: number; y: number; w: number; h: number };
+
+export function boxesIntersect(a: HitBox, b: HitBox): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+export function groupHitBox(count: number, x: number, y: number, viewWidth: number, svgClientWidth: number): HitBox {
+  const units = markerUnits(viewWidth, svgClientWidth);
+  if (count <= 1) {
+    const hit = Math.max(units.visible, units.target);
+    return { x: x - hit / 2, y: y - hit / 2, w: hit, h: hit };
+  }
+  const label = String(count);
+  const textSize = units.visible * 0.5;
+  const chipW = Math.max(units.visible * 1.8, label.length * textSize * 0.65 + textSize * 0.5);
+  const chipH = Math.max(textSize * 1.8, units.visible);
+  const hitW = Math.max(chipW, units.target);
+  const hitH = Math.max(chipH, units.target);
+  return { x: x - hitW / 2, y: y - hitH / 2, w: hitW, h: hitH };
+}
+
+type PinGroup = { pins: PlacedPin[]; x: number; y: number };
+
+function centroidOf(pins: readonly PlacedPin[]): { x: number; y: number } {
+  return {
+    x: pins.reduce((sum, pin) => sum + pin.x, 0) / pins.length,
+    y: pins.reduce((sum, pin) => sum + pin.y, 0) / pins.length,
+  };
+}
+
+// A chip starts with pins inside the gap of its seed. Groups whose hit rectangles still meet are joined until none overlap.
 // The pins keep the coordinates placePins stored. The chip is drawn at their centroid.
-export function declutterPins(pins: readonly PlacedPin[], gap: number): { singles: PlacedPin[]; clusters: PinCluster[] } {
+export function declutterPins(pins: readonly PlacedPin[], gap: number, screen?: { viewWidth: number; svgClientWidth: number }): { singles: PlacedPin[]; clusters: PinCluster[] } {
   const span = Math.max(gap, 0);
   const spanSq = span * span;
   const pending = [...pins];
-  const singles: PlacedPin[] = [];
-  const clusters: PinCluster[] = [];
+  const groups: PinGroup[] = [];
   while (pending.length) {
     const seed = pending[0];
     const members: PlacedPin[] = [];
@@ -256,14 +285,65 @@ export function declutterPins(pins: readonly PlacedPin[], gap: number): { single
     }
     pending.length = 0;
     pending.push(...rest);
-    if (members.length === 1) singles.push(members[0]);
-    else {
-      const x = members.reduce((sum, pin) => sum + pin.x, 0) / members.length;
-      const y = members.reduce((sum, pin) => sum + pin.y, 0) / members.length;
-      clusters.push({ x, y, count: members.length, pins: members });
+    const center = centroidOf(members);
+    groups.push({ pins: members, x: center.x, y: center.y });
+  }
+  if (screen && screen.svgClientWidth > 0 && screen.viewWidth > 0) {
+    let changed = true;
+    let guard = 0;
+    while (changed && guard <= pins.length) {
+      changed = false;
+      guard += 1;
+      for (let i = 0; i < groups.length && !changed; i += 1) {
+        for (let j = i + 1; j < groups.length; j += 1) {
+          const left = groupHitBox(groups[i].pins.length, groups[i].x, groups[i].y, screen.viewWidth, screen.svgClientWidth);
+          const right = groupHitBox(groups[j].pins.length, groups[j].x, groups[j].y, screen.viewWidth, screen.svgClientWidth);
+          if (!boxesIntersect(left, right)) continue;
+          const members = groups[i].pins.concat(groups[j].pins);
+          const center = centroidOf(members);
+          groups.splice(j, 1);
+          groups.splice(i, 1, { pins: members, x: center.x, y: center.y });
+          changed = true;
+          break;
+        }
+      }
     }
   }
+  const singles: PlacedPin[] = [];
+  const clusters: PinCluster[] = [];
+  for (const group of groups) {
+    if (group.pins.length === 1) singles.push(group.pins[0]);
+    else clusters.push({ x: group.x, y: group.y, count: group.pins.length, pins: group.pins });
+  }
   return { singles, clusters };
+}
+
+export function boundaryPins(): PlacedPin[] {
+  const pins: PlacedPin[] = [];
+  for (const county of file.counties) {
+    for (const ring of county.rings) {
+      for (const [lon, lat] of ring) {
+        const point = projectNy(lon, lat);
+        pins.push({
+          id: `bound-${pins.length}`,
+          displayName: county.name,
+          licenseRef: null,
+          licenseExpiry: null,
+          ocmStatus: null,
+          city: null,
+          county: county.name,
+          assignedRep: null,
+          distributor: null,
+          contactCount: 0,
+          latitude: lat,
+          longitude: lon,
+          x: point.x,
+          y: point.y,
+        });
+      }
+    }
+  }
+  return pins;
 }
 
 export type HitMarker = { id: string; x: number; y: number; halfW: number; halfH: number };

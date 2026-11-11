@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NY_REGIONS, type NyRegion } from '@/lib/crm/nyRegions';
 import {
   cityChoices,
@@ -38,12 +38,11 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   const drag = useRef<{ x: number; y: number; viewX: number; viewY: number; pointer: number } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const returnIds = useRef<string[] | null>(null);
   const [svgWidth, setSvgWidth] = useState(0);
   const [openCluster, setOpenCluster] = useState<PinCluster | null>(null);
   const placed = useMemo(() => placePins(pins).placed, [pins]);
   const units = markerUnits(view.w, svgWidth);
-  const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w, svgWidth)), [placed, view.w, svgWidth]);
+  const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w, svgWidth), svgWidth > 0 ? { viewWidth: view.w, svgClientWidth: svgWidth } : undefined), [placed, view.w, svgWidth]);
   const active = placed.find((pin) => pin.id === activeId) ?? null;
   const zoomed = view.w < WHOLE.w - 0.5;
 
@@ -69,6 +68,20 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
     };
   }, []);
 
+  const queueReturn = useCallback((ids: string[]) => {
+    window.setTimeout(() => {
+      const node = svgRef.current;
+      if (!node || !ids.length) return;
+      const wanted = new Set(ids);
+      const chip = grouped.clusters.find((cluster) => cluster.pins.length === ids.length && cluster.pins.every((pin) => wanted.has(pin.id)));
+      const chipKey = chip ? chip.pins.map((pin) => pin.id).join(':') : null;
+      const markers = [...node.querySelectorAll<SVGRectElement>('[data-hit]')];
+      const chipMarker = chipKey ? markers.find((marker) => marker.getAttribute('data-hit') === chipKey) : undefined;
+      const memberMarker = ids.map((id) => markers.find((marker) => marker.getAttribute('data-hit') === id)).find((marker) => marker);
+      (chipMarker ?? memberMarker)?.focus({ preventScroll: true });
+    }, 0);
+  }, [grouped]);
+
   useEffect(() => {
     if (!openCluster) return;
     listRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
@@ -76,39 +89,23 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
     function onKey(event: KeyboardEvent) {
       if (event.key !== 'Escape') return;
       event.preventDefault();
-      returnIds.current = ids;
       setOpenCluster(null);
+      queueReturn(ids);
     }
     function onDown(event: MouseEvent) {
       const target = event.target;
       if (listRef.current?.contains(target as Node)) return;
       if (target instanceof Element && target.closest('[data-pin="cluster"]')) return;
-      returnIds.current = ids;
       setOpenCluster(null);
+      queueReturn(ids);
     }
     document.addEventListener('keydown', onKey);
-    document.addEventListener('mousedown', onDown);
+    document.addEventListener('click', onDown);
     return () => {
       document.removeEventListener('keydown', onKey);
-      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('click', onDown);
     };
-  }, [openCluster]);
-
-  useEffect(() => {
-    if (openCluster) return;
-    const ids = returnIds.current;
-    if (!ids?.length) return;
-    returnIds.current = null;
-    const node = svgRef.current;
-    if (!node) return;
-    const wanted = new Set(ids);
-    const chip = grouped.clusters.find((cluster) => cluster.pins.length === ids.length && cluster.pins.every((pin) => wanted.has(pin.id)));
-    const chipKey = chip ? chip.pins.map((pin) => pin.id).join(':') : null;
-    const markers = [...node.querySelectorAll<SVGRectElement>('[data-hit]')];
-    const chipMarker = chipKey ? markers.find((marker) => marker.getAttribute('data-hit') === chipKey) : undefined;
-    const memberMarker = ids.map((id) => markers.find((marker) => marker.getAttribute('data-hit') === id)).find((marker) => marker);
-    (chipMarker ?? memberMarker)?.focus({ preventScroll: true });
-  }, [openCluster, grouped]);
+  }, [openCluster, grouped, queueReturn]);
 
   function openDispensary(id: string) {
     onOpenAccount(id);
@@ -120,8 +117,9 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   }
 
   function closeList() {
-    returnIds.current = openCluster?.pins.map((pin) => pin.id) ?? null;
+    const ids = openCluster?.pins.map((pin) => pin.id) ?? [];
     setOpenCluster(null);
+    queueReturn(ids);
   }
 
   function zoomBy(direction: 1 | -1) {
