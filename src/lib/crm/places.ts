@@ -16,6 +16,8 @@ export type PlaceCard = {
   mapsUrl: string | null;
   photoName: string | null;
   photoCredits: string[];
+  photoContentType?: string | null;
+  photoBytes?: string | null;
 };
 
 export type PlaceCache = {
@@ -177,10 +179,73 @@ export async function fetchAllowedPhoto(start: string, deps: { lookup: PhotoLook
   return response;
 }
 
-function imageType(value: string | null): string | null {
+const RASTER_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif']);
+
+export function imageType(value: string | null): string | null {
   const type = (value || '').split(';')[0].trim().toLowerCase();
-  if (!type.startsWith('image/')) return null;
-  return type;
+  if (!RASTER_TYPES.has(type)) return null;
+  return type === 'image/jpg' ? 'image/jpeg' : type;
+}
+
+export function collectCapped(maxBytes: number) {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  return {
+    push(chunk: Buffer): boolean {
+      if (total + chunk.length > maxBytes) return false;
+      chunks.push(chunk);
+      total += chunk.length;
+      return true;
+    },
+    concat(): Buffer {
+      return Buffer.concat(chunks);
+    },
+  };
+}
+
+export function encodePhoto(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString('base64');
+}
+
+export function decodePhoto(value: string): Uint8Array | null {
+  if (!value || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return null;
+  const bytes = Buffer.from(value, 'base64');
+  if (!bytes.length || bytes.length > PHOTO_MAX_BYTES) return null;
+  return new Uint8Array(bytes);
+}
+
+export function freshPhoto(cache: PlaceCache | null, now: number): { bytes: Uint8Array; contentType: string } | null {
+  if (!cache?.fields || !placeCacheFresh(cache.fetchedAt, now)) return null;
+  const contentType = imageType(cache.fields.photoContentType ?? null);
+  const raw = cache.fields.photoBytes;
+  if (!contentType || typeof raw !== 'string') return null;
+  const bytes = decodePhoto(raw);
+  if (!bytes) return null;
+  return { bytes, contentType };
+}
+
+export function attachPhoto(card: PlaceCard, bytes: Uint8Array, contentType: string): PlaceCard | null {
+  const type = imageType(contentType);
+  if (!type || bytes.byteLength > PHOTO_MAX_BYTES) return null;
+  return { ...card, photoContentType: type, photoBytes: encodePhoto(bytes) };
+}
+
+export async function photoForView(input: {
+  cache: PlaceCache | null;
+  now: number;
+  key: string;
+  read: (photoName: string, key: string) => Promise<{ bytes: ArrayBuffer; contentType: string } | null>;
+}): Promise<{ bytes: Uint8Array; contentType: string; nextFields: PlaceCard | null } | null> {
+  const stored = freshPhoto(input.cache, input.now);
+  if (stored) return { ...stored, nextFields: null };
+  const fields = input.cache?.fields;
+  if (!fields?.photoName || !input.cache || !placeCacheFresh(input.cache.fetchedAt, input.now)) return null;
+  const photo = await input.read(fields.photoName, input.key);
+  if (!photo) return null;
+  const bytes = new Uint8Array(photo.bytes);
+  const nextFields = attachPhoto(fields, bytes, photo.contentType);
+  if (!nextFields) return null;
+  return { bytes, contentType: nextFields.photoContentType || photo.contentType, nextFields };
 }
 
 async function readLimited(response: Response, maxBytes: number): Promise<Uint8Array | null> {
@@ -249,16 +314,30 @@ export const pinnedPhotoRequest: PinnedRequest = (url, address, init) => {
         callback(null, address, family);
       },
     }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      const capped = collectCapped(PHOTO_MAX_BYTES);
+      let settled = false;
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      res.on('data', (chunk: Buffer) => {
+        if (capped.push(chunk)) return;
+        res.destroy();
+        req.destroy();
+        fail(new Error('photo too large'));
+      });
       res.on('end', () => {
+        if (settled) return;
+        settled = true;
         const headers = new Headers();
         for (const [name, value] of Object.entries(res.headers)) {
           if (typeof value === 'string') headers.set(name, value);
           else if (Array.isArray(value)) for (const item of value) headers.append(name, item);
         }
-        resolve(new Response(Buffer.concat(chunks), { status: res.statusCode || 0, headers }));
+        resolve(new Response(capped.concat(), { status: res.statusCode || 0, headers }));
       });
+      res.on('error', fail);
     });
     req.on('error', reject);
     req.end();

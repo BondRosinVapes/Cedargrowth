@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { assertDashboardTabs } from './crm-dashboard-tabs-selftest.ts';
-import { allowedPhotoUrl, fetchAllowedPhoto, lookupPlace, photoAddressAllowed, photoMediaUrl, PLACE_TTL_MS, placeCacheFresh, placeQuery, placeReadPlan, readPlacePhoto, type PhotoLookup, type PlaceCache } from '../src/lib/crm/places.ts';
+import { allowedPhotoUrl, attachPhoto, collectCapped, fetchAllowedPhoto, freshPhoto, imageType, lookupPlace, photoAddressAllowed, photoForView, photoMediaUrl, PLACE_TTL_MS, placeCacheFresh, placeQuery, placeReadPlan, readPlacePhoto, type PhotoLookup, type PlaceCache, type PlaceCard } from '../src/lib/crm/places.ts';
 import { browserLink } from '../src/lib/crm/placeLinks.ts';
 import { applyWonMerge, undoWonMerge, wonMergeOnSave, type LicenseWorld } from '../src/lib/crm/distributionMerge.ts';
 import { isDispensaryAccount } from '../src/lib/crm/engine.ts';
@@ -1638,7 +1638,29 @@ const slowPhoto = await readPlacePhoto('places/ok/photos/pic', 'server-key', {
   }),
 });
 assert(keptPrivate.every((row) => row === null) && specialBlocked.every((row) => row === null) && specialUse.every((address) => photoAddressAllowed(address) === false) && mixedDns === null && pinned.join(',') === '142.250.190.78' && photoAddressAllowed('8.8.8.8') && photoAddressAllowed('100.63.255.255') && photoAddressAllowed('2001:4860:4802:32::78') && privateHop === null && hopCalls[0] === '142.250.190.78 https://lh3.googleusercontent.com/a' && hopCalls[1] === '142.250.190.78' && hopCalls[2] === '142.250.190.79' && (await followed?.text()) === 'img', 'TEST ONLY: a photo connects only to a checked public address, including each redirect hop');
-assert(jpeg?.contentType === 'image/jpeg' && jpeg.bytes.byteLength === 3 && photoCallsForImage.length === 2 && photoCallsForImage.every((url) => url.includes('searchText') === false) && htmlPhoto === null && hugePhoto === null && cappedPhoto === null && slowPhoto === null && photoRoute.includes('authorizePlacePhoto') && photoRoute.includes('readPlaceCache') && photoRoute.includes('lookupPlace') === false && photoRoute.includes('searchText') === false, 'TEST ONLY: a photo view uses the cached name, times out, stays under the byte cap, and accepts only an image');
+const svgPhoto = await readPlacePhoto('places/ok/photos/pic', 'server-key', {
+  lookup: publicLookup,
+  request: async (url) => url.includes('places.googleapis.com')
+    ? new Response(JSON.stringify({ photoUri: 'https://lh3.googleusercontent.com/a' }), { status: 200, headers: { 'content-type': 'application/json' } })
+    : new Response('<svg>', { status: 200, headers: { 'content-type': 'image/svg+xml' } }),
+});
+const bin = collectCapped(4);
+const cappedPush = bin.push(Buffer.from('ab')) && bin.push(Buffer.from('cd')) && bin.push(Buffer.from('e')) === false && bin.concat().toString() === 'abcd';
+const photoNow = Date.now();
+const photoCard: PlaceCard = { name: 'TEST ONLY', rating: null, reviewCount: null, hours: [], phone: null, website: null, mapsUrl: null, photoName: 'places/ChIJtest/photos/abc', photoCredits: [] };
+const freshCache: PlaceCache = { placeId: 'p', matchStatus: 'matched', fields: photoCard, fetchedAt: new Date(photoNow).toISOString() };
+let photoReads = 0;
+const readCached = async () => {
+  photoReads += 1;
+  return { bytes: Uint8Array.from([7, 8, 9]).buffer, contentType: 'image/jpeg' };
+};
+const firstView = await photoForView({ cache: freshCache, now: photoNow, key: 'k', read: readCached });
+const secondView = await photoForView({ cache: firstView?.nextFields ? { ...freshCache, fields: firstView.nextFields } : null, now: photoNow, key: 'k', read: readCached });
+const staleView = await photoForView({ cache: { ...freshCache, fields: firstView?.nextFields || photoCard, fetchedAt: new Date(photoNow - PLACE_TTL_MS - 5000).toISOString() }, now: photoNow, key: 'k', read: readCached });
+const svgStored = attachPhoto(photoCard, Uint8Array.from([1]), 'image/svg+xml');
+const cardUi = readFileSync('src/app/admin/crm/GooglePlaceCard.tsx', 'utf8');
+assert(jpeg?.contentType === 'image/jpeg' && jpeg.bytes.byteLength === 3 && photoCallsForImage.length === 2 && photoCallsForImage.every((url) => url.includes('searchText') === false) && htmlPhoto === null && hugePhoto === null && cappedPhoto === null && slowPhoto === null && svgPhoto === null && photoRoute.includes('authorizePlacePhoto') && photoRoute.includes('readPlaceCache') && photoRoute.includes('photoForView') && photoRoute.includes('lookupPlace') === false && photoRoute.includes('searchText') === false, 'TEST ONLY: a photo view uses the cached name, times out, stays under the byte cap, and accepts only an image');
+assert(imageType('image/svg+xml') === null && imageType('image/bmp') === null && imageType('image/jpeg') === 'image/jpeg' && imageType('image/png') === 'image/png' && imageType('image/webp') === 'image/webp' && imageType('image/gif') === 'image/gif' && cappedPush && photoReads === 1 && firstView?.nextFields?.photoContentType === 'image/jpeg' && secondView?.nextFields === null && secondView?.bytes.length === 3 && freshPhoto(secondView && firstView?.nextFields ? { ...freshCache, fields: firstView.nextFields } : null, photoNow)?.contentType === 'image/jpeg' && staleView === null && svgStored === null && cardUi.includes('h-auto max-h-48 w-auto max-w-full object-contain') && cardUi.includes('max-h-48 w-full') === false, 'TEST ONLY: a fresh place photo is served from the row with no second Google read, SVG is refused, and the stream stops at the byte cap');
 assert(browserLink('https://maps.google.com/a') === 'https://maps.google.com/a' && browserLink('http://shop.test') === 'http://shop.test/' && browserLink('javascript:alert(1)') === null && browserLink('data:text/html,hi') === null && browserLink('ftp://files.test') === null, 'TEST ONLY: a Google card link is only http or https');
 const world: LicenseWorld = {
   accounts: [

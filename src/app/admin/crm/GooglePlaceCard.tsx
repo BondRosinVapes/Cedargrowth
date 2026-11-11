@@ -56,7 +56,7 @@ export function GooglePlaceCard({ accountId }: { accountId: string }) {
           {card.photoUrl ? (
             // The photo is proxied by our server. The Google key never reaches the browser.
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={card.photoUrl} alt="" className="max-h-48 w-full" />
+            <img src={card.photoUrl} alt="" className="h-auto max-h-48 w-auto max-w-full object-contain" />
           ) : null}
           {card.photoCredits.length ? <p className="text-caption text-tertiary">Photo: {card.photoCredits.join(', ')}</p> : null}
           {mapsUrl ? <a href={mapsUrl} className="inline-flex min-h-[44px] items-center text-body-m text-primary underline">View on Google Maps</a> : null}
