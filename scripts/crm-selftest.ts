@@ -9,7 +9,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { assertDashboardTabs } from './crm-dashboard-tabs-selftest.ts';
-import { allowedPhotoUrl, cachedPhotoName, collectCapped, currentPhotoName, fetchAllowedPhoto, imageType, lookupPlace, PHOTO_CACHE_CONTROL, PHOTO_MAX_BYTES, PHOTO_MAX_HEIGHT_PX, PHOTO_MAX_WIDTH_PX, photoAddressAllowed, photoMediaUrl, photoResponseHeaders, pinnedPhotoRequest, PLACE_TTL_MS, placeCacheFresh, placeCardOnly, placeQuery, placeReadPlan, readPlacePhoto, retainPlaceCache, sharePhotoLoad, shouldPurgePlaceDetails, storedPlaceCard, storesPlaceDetails, type PhotoLookup, type PlaceCache } from '../src/lib/crm/places.ts';
+import { createHash } from 'node:crypto';
+import { allowedPhotoUrl, cachedPhotoName, collectCapped, currentPhotoName, fetchAllowedPhoto, imageType, loadStoredOrGooglePhoto, lookupPlace, PHOTO_CACHE_CONTROL, PHOTO_MAX_BYTES, PHOTO_MAX_HEIGHT_PX, PHOTO_MAX_WIDTH_PX, photoAddressAllowed, photoMediaUrl, photoResponseHeaders, pinnedPhotoRequest, PLACE_TTL_MS, placeCacheFresh, placeCardOnly, placePhotoObjectPath, placeQuery, placeReadPlan, readPlacePhoto, retainPlaceCache, sharePhotoLoad, shouldPurgePlaceDetails, storedPlaceCard, storesPlaceDetails, type PhotoLookup, type PlaceCache } from '../src/lib/crm/places.ts';
 import { browserLink, stablePhotoUrl } from '../src/lib/crm/placeLinks.ts';
 import { applyWonMerge, undoWonMerge, wonMergeOnSave, type LicenseWorld } from '../src/lib/crm/distributionMerge.ts';
 import { handleDistributionMerge, handleGooglePlace } from '../src/lib/crm/googlePlaceHandler.ts';
@@ -1853,7 +1854,7 @@ const cappedPush = bin.push(Buffer.from('ab')) && bin.push(Buffer.from('cd')) &&
 const cardUi = readFileSync('src/app/admin/crm/GooglePlaceCard.tsx', 'utf8');
 const placeStore = readFileSync('src/lib/crm/store.ts', 'utf8');
 const stripped = placeCardOnly({ name: 'TEST ONLY', rating: 4, reviewCount: 2, hours: ['Mon'], phone: null, website: null, mapsUrl: null, photoName: 'places/ChIJtest/photos/abc', photoCredits: [], photoBytes: 'aaaa', photoContentType: 'image/jpeg' } as PlaceCache['fields']);
-assert(jpeg?.contentType === 'image/jpeg' && jpeg.bytes.byteLength === 3 && photoCallsForImage.length === 2 && photoCallsForImage.every((url) => url.includes('searchText') === false) && htmlPhoto === null && hugePhoto === null && cappedPhoto === null && slowPhoto === null && svgPhoto === null && photoRoute.includes('authorizePlacePhoto') && photoRoute.includes('readPlaceCache') && photoRoute.includes('sharePhotoLoad') && photoRoute.includes('currentPhotoName') && photoRoute.includes('accountHasWonDeal') && photoRoute.includes('savePlace') === false && photoRoute.includes('photoBytes') === false && photoRoute.includes('lookupPlace') === false && photoRoute.includes('searchText') === false && photoRoute.includes('photoResponseHeaders(photo.contentType)') && photoRoute.includes('photoResponseHeaders(photo.contentType,') === false && photoRoute.includes('no-store') === false && photoRoute.includes('immutable') === false && photoRoute.includes('s-maxage') === false && /etag/i.test(photoRoute) === false, 'TEST ONLY: a photo view fetches the image, writes nothing, checks the place is current, and stays under the byte cap');
+assert(jpeg?.contentType === 'image/jpeg' && jpeg.bytes.byteLength === 3 && photoCallsForImage.length === 2 && photoCallsForImage.every((url) => url.includes('searchText') === false) && htmlPhoto === null && hugePhoto === null && cappedPhoto === null && slowPhoto === null && svgPhoto === null && photoRoute.includes('authorizePlacePhoto') && photoRoute.includes('readPlaceCache') && photoRoute.includes('sharePhotoLoad') && photoRoute.includes('findStoredPlacePhoto') && photoRoute.indexOf('findStoredPlacePhoto') < photoRoute.indexOf('readPlacePhoto') && photoRoute.includes('accountHasWonDeal') && photoRoute.includes('savePlaceCache') === false && photoRoute.includes('photoBytes') === false && photoRoute.includes('lookupPlace') === false && photoRoute.includes('searchText') === false && photoRoute.includes('createSignedUrl') === false && photoRoute.includes('getPublicUrl') === false && photoRoute.includes('photoResponseHeaders(photo.contentType)') && photoRoute.includes('photoResponseHeaders(photo.contentType,') === false && photoRoute.includes('no-store') === false && photoRoute.includes('immutable') === false && photoRoute.includes('s-maxage') === false && /etag/i.test(photoRoute) === false, 'TEST ONLY: a stored photo is served before Google, and the route does not publish a photo URL');
 const photoHeaders = photoResponseHeaders('image/jpeg');
 const photoHeaderNames = Object.keys(photoHeaders).map((name) => name.toLowerCase());
 const photoA = stablePhotoUrl('acct-1', 'places/ChIJtest/photos/abc');
@@ -1865,6 +1866,34 @@ let namedFetches = 0;
 const namedPhoto = await currentPhotoName({ sells: false, cache: null, query: '1 Test St, Buffalo, NY', now: Date.now(), key: 'server-key', photoName: 'places/ChIJtest/photos/abc', fetchImpl: async () => { namedFetches += 1; return new Response('no', { status: 500 }); } });
 const rejectedPhotoName = await currentPhotoName({ sells: false, cache: null, query: '1 Test St, Buffalo, NY', now: Date.now(), key: 'server-key', photoName: 'not-a-photo', fetchImpl: async () => new Response(JSON.stringify({ places: [] }), { status: 200 }) });
 assert(namedPhoto === 'places/ChIJtest/photos/abc' && namedFetches === 0 && rejectedPhotoName === null, 'TEST ONLY: a validated photo name skips Place Details');
+const photoObjectName = 'places/ChIJtest/photos/abc';
+const photoObjectPath = placePhotoObjectPath('ChIJtest', photoObjectName, 'image/jpeg');
+const photoObjectSha = createHash('sha256').update(photoObjectName).digest('hex');
+const storedBytes = new Uint8Array([9, 8, 7]);
+let googleReads = 0;
+let uploads = 0;
+const uploadLogs: string[] = [];
+const firstStored = await loadStoredOrGooglePhoto({
+  stored: null,
+  readGoogle: async () => { googleReads += 1; return { bytes: storedBytes, contentType: 'image/jpeg' }; },
+  upload: async () => { uploads += 1; return true; },
+  log: (message) => uploadLogs.push(message),
+});
+const secondStored = await loadStoredOrGooglePhoto({
+  stored: { bytes: storedBytes, contentType: 'image/jpeg' },
+  readGoogle: async () => { googleReads += 1; return { bytes: new Uint8Array([1]), contentType: 'image/jpeg' }; },
+  upload: async () => { uploads += 1; return true; },
+  log: (message) => uploadLogs.push(message),
+});
+const failedUpload = await loadStoredOrGooglePhoto({
+  stored: null,
+  readGoogle: async () => ({ bytes: storedBytes, contentType: 'image/jpeg' }),
+  upload: async () => { throw new Error('bucket down'); },
+  log: (message) => uploadLogs.push(message),
+});
+const photoBucket = readFileSync('src/lib/crm/placePhotoBucket.ts', 'utf8');
+const placeSource = readFileSync('src/lib/crm/places.ts', 'utf8');
+assert(photoObjectPath === `ChIJtest/${photoObjectSha}.jpg` && placePhotoObjectPath('ChIJtest', photoObjectName, 'image/png')?.endsWith('.png') === true && placePhotoObjectPath('ChIJtest', photoObjectName, 'image/webp')?.endsWith('.webp') === true && placePhotoObjectPath('ChIJtest', photoObjectName, 'image/gif') === null && firstStored?.bytes[0] === 9 && secondStored?.bytes[0] === 9 && googleReads === 1 && uploads === 1 && failedUpload?.bytes[0] === 9 && uploadLogs.length === 1 && photoBucket.includes('from(PLACE_PHOTO_BUCKET)') && photoBucket.includes('createSignedUrl') === false && photoBucket.includes('getPublicUrl') === false && photoBucket.includes('FIELD_BUCKET') === false && photoBucket.includes('COA_BUCKET') === false && placeSource.includes("PLACE_PHOTO_BUCKET = 'crm-place-photos'") && placeStore.includes('previousPlaceId !== cache.placeId') && placeStore.includes('removeStoredPlacePhotos(previousPlaceId)') && placeStore.includes('await this.removePhotosForAccount(accountId)'), 'TEST ONLY: the first photo is stored, a later view skips Google, and a failed upload still returns the bytes');
 let sharedPlaceFetches = 0;
 const sharedPlace = async () => {
   sharedPlaceFetches += 1;

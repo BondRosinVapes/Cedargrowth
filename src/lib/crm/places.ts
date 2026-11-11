@@ -1,5 +1,6 @@
 // Google Places (New) lookup for CedarGrowth accounts. The API key stays on the server.
 
+import { createHash } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import https from 'node:https';
 import ipaddr from 'ipaddr.js';
@@ -192,13 +193,60 @@ export function cachedPhotoName(input: { sells: boolean; cache: PlaceCache | nul
 
 export async function currentPhotoName(input: { sells: boolean; cache: PlaceCache | null; query: string | null; now: number; key: string; fetchImpl: typeof fetch; photoName?: string | null }): Promise<string | null> {
   if (input.photoName && PHOTO_NAME_PATTERN.test(input.photoName)) return input.photoName;
+  const resolved = await resolvePlacePhoto(input);
+  return resolved?.photoName ?? null;
+}
+
+export async function resolvePlacePhoto(input: { sells: boolean; cache: PlaceCache | null; query: string | null; now: number; key: string; fetchImpl: typeof fetch; photoName?: string | null; placeId?: string | null }): Promise<{ placeId: string; photoName: string } | null> {
+  const placeId = input.placeId ?? input.cache?.placeId ?? null;
+  if (placeId && input.photoName && PHOTO_NAME_PATTERN.test(input.photoName)) return { placeId, photoName: input.photoName };
   const cached = cachedPhotoName(input);
-  if (cached && PHOTO_NAME_PATTERN.test(cached)) return cached;
-  const live = await loadPlace({ placeId: input.cache?.placeId ?? null, query: input.query, key: input.key, fetchImpl: input.fetchImpl });
-  return live?.card.photoName ?? null;
+  if (placeId && cached && PHOTO_NAME_PATTERN.test(cached)) return { placeId, photoName: cached };
+  const live = await loadPlace({ placeId, query: input.query, key: input.key, fetchImpl: input.fetchImpl });
+  if (!live?.card.photoName || !PHOTO_NAME_PATTERN.test(live.card.photoName) || !placePhotoPrefix(live.placeId)) return null;
+  return { placeId: live.placeId, photoName: live.card.photoName };
 }
 
 export const PHOTO_NAME_PATTERN = /^places\/[A-Za-z0-9_-]+\/photos\/[A-Za-z0-9_-]+$/;
+export const PLACE_PHOTO_BUCKET = 'crm-place-photos';
+
+const STORED_PHOTO_EXT: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+};
+
+export function placePhotoPrefix(placeId: string): string | null {
+  const id = placeId.trim().replace(/^places\//, '');
+  if (!id || /[^A-Za-z0-9_-]/.test(id)) return null;
+  return id;
+}
+
+export function placePhotoObjectPath(placeId: string, photoName: string, contentType: string): string | null {
+  const prefix = placePhotoPrefix(placeId);
+  const ext = STORED_PHOTO_EXT[contentType];
+  if (!prefix || !ext || !PHOTO_NAME_PATTERN.test(photoName)) return null;
+  const sha = createHash('sha256').update(photoName).digest('hex');
+  return `${prefix}/${sha}.${ext}`;
+}
+
+export async function loadStoredOrGooglePhoto(input: {
+  stored: { bytes: Uint8Array; contentType: string } | null;
+  readGoogle: () => Promise<{ bytes: Uint8Array; contentType: string } | null>;
+  upload: () => Promise<boolean>;
+  log: (message: string) => void;
+}): Promise<{ bytes: Uint8Array; contentType: string } | null> {
+  if (input.stored) return input.stored;
+  const fresh = await input.readGoogle();
+  if (!fresh) return null;
+  try {
+    const saved = await input.upload();
+    if (!saved) input.log('crm place photo upload failed');
+  } catch {
+    input.log('crm place photo upload failed');
+  }
+  return fresh;
+}
 
 export const PHOTO_MAX_HEIGHT_PX = 384;
 export const PHOTO_MAX_WIDTH_PX = 768;

@@ -29,6 +29,7 @@ import { intakeTestMarker, type IntakeLead } from './intake';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
 import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
 import { wonMergeOnSave, type ContactPrior, type MergeRow } from './distributionMerge';
+import { removeStoredPlacePhotos } from './placePhotoBucket';
 import { placeCardOnly, shouldPurgePlaceDetails, storedPlaceCard, type PlaceCache } from './places';
 
 export type StoreResult<T> =
@@ -1066,6 +1067,17 @@ class SupabaseCrmStore implements CrmStore {
   }
 
   async savePlaceCache(brand: CrmBrand, accountId: string, cache: PlaceCache): Promise<StoreResult<PlaceCache>> {
+    const prior = await this.db.from('crm_google_places').select('place_id').eq('account_id', accountId).eq('brand', brand).maybeSingle();
+    const failedPrior = classify(prior.error);
+    if (failedPrior) return { state: failedPrior };
+    const previousPlaceId = prior.data && typeof prior.data.place_id === 'string' ? prior.data.place_id : null;
+    if (previousPlaceId && previousPlaceId !== cache.placeId) {
+      try {
+        await removeStoredPlacePhotos(previousPlaceId);
+      } catch {
+        console.error('crm place photo delete failed', { accountId });
+      }
+    }
     const { error } = await this.db.from('crm_google_places').upsert({
       account_id: accountId,
       brand,
@@ -1086,6 +1098,17 @@ class SupabaseCrmStore implements CrmStore {
     if (failed) return { state: failed };
     if (error) return { state: 'unavailable' };
     return { state: 'ok', value: Array.isArray(data) && data.length > 0 };
+  }
+
+  private async removePhotosForAccount(accountId: string): Promise<void> {
+    const row = await this.db.from('crm_google_places').select('place_id').eq('account_id', accountId).maybeSingle();
+    const placeId = row.data && typeof row.data.place_id === 'string' ? row.data.place_id : null;
+    if (!placeId) return;
+    try {
+      await removeStoredPlacePhotos(placeId);
+    } catch {
+      console.error('crm place photo delete failed', { accountId });
+    }
   }
 
   async purgePlaceDetails(brand: CrmBrand, accountId: string): Promise<StoreResult<{ purged: true }>> {
@@ -1766,11 +1789,12 @@ class SupabaseCrmStore implements CrmStore {
   async deleteBondInquiry(inquiryId: string) {
     const prior = await this.db.from('crm_accounts').select('id,brand').eq('source_inquiry_id', inquiryId).maybeSingle();
     if (classify(prior.error)) return { state: classify(prior.error) as 'absent' | 'unavailable' };
+    const accountId = prior.data && typeof prior.data.id === 'string' ? prior.data.id : null;
+    if (accountId) await this.removePhotosForAccount(accountId);
     const { data, error } = await this.db.rpc('crm_delete_bond_inquiry', { p_inquiry_id: inquiryId });
     if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
     const payload = data as { ok?: boolean; deleted?: boolean } | null;
     if (error || !payload || payload.ok !== true) return { state: 'unavailable' as const };
-    const accountId = prior.data && typeof prior.data.id === 'string' ? prior.data.id : null;
     const accountBrand = prior.data && (prior.data.brand === 'cedargrowth' || prior.data.brand === 'bond') ? prior.data.brand : null;
     if (accountId && accountBrand) {
       const cleared = await this.clearPlaceDetailsIfNotSelling(accountBrand, accountId);

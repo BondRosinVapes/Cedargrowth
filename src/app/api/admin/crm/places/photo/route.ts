@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { authorizePlacePhoto } from '@/lib/crm/engine';
-import { cachedPhotoName, currentPhotoName, dnsPhotoLookup, photoResponseHeaders, pinnedPhotoRequest, placeQuery, readPlacePhoto, sharePhotoLoad } from '@/lib/crm/places';
+import { findStoredPlacePhoto, uploadStoredPlacePhoto } from '@/lib/crm/placePhotoBucket';
+import { cachedPhotoName, dnsPhotoLookup, loadStoredOrGooglePhoto, photoResponseHeaders, pinnedPhotoRequest, placeQuery, readPlacePhoto, resolvePlacePhoto, sharePhotoLoad } from '@/lib/crm/places';
 import { resolveDeskAccess } from '@/lib/crm/salesSession';
 import { getCrmStore } from '@/lib/crm/store';
 
@@ -30,9 +31,18 @@ export async function GET(request: Request) {
     const account = await store.readAccount(auth.brand, accountId);
     const cache = await store.readPlaceCache(auth.brand, accountId);
     if (account.state !== 'ok' || !account.value || cache.state !== 'ok') return null;
+    const placeId = cache.value?.placeId ?? null;
+    if (placeId) {
+      try {
+        const stored = await findStoredPlacePhoto(placeId);
+        if (stored) return { bytes: stored.bytes.buffer.slice(stored.bytes.byteOffset, stored.bytes.byteOffset + stored.bytes.byteLength) as ArrayBuffer, contentType: stored.contentType };
+      } catch {
+        console.error('crm place photo read failed', { accountId });
+      }
+    }
     const now = Date.now();
     const known = cachedPhotoName({ sells: selling.value, cache: cache.value, now });
-    const photoName = await currentPhotoName({
+    const resolved = await resolvePlacePhoto({
       sells: selling.value,
       cache: cache.value,
       query: placeQuery(account.value),
@@ -40,9 +50,19 @@ export async function GET(request: Request) {
       key,
       fetchImpl: fetch,
       photoName: known,
+      placeId,
     });
-    if (!photoName) return null;
-    return readPlacePhoto(photoName, key, { lookup: dnsPhotoLookup, request: pinnedPhotoRequest });
+    if (!resolved) return null;
+    const fresh = await readPlacePhoto(resolved.photoName, key, { lookup: dnsPhotoLookup, request: pinnedPhotoRequest });
+    if (!fresh) return null;
+    const served = await loadStoredOrGooglePhoto({
+      stored: null,
+      readGoogle: async () => ({ bytes: new Uint8Array(fresh.bytes), contentType: fresh.contentType }),
+      upload: () => uploadStoredPlacePhoto(resolved.placeId, resolved.photoName, new Uint8Array(fresh.bytes), fresh.contentType),
+      log: (message) => console.error(message, { accountId }),
+    });
+    if (!served) return null;
+    return { bytes: served.bytes.buffer.slice(served.bytes.byteOffset, served.bytes.byteOffset + served.bytes.byteLength) as ArrayBuffer, contentType: served.contentType };
   });
   if (!photo) return new NextResponse(null, { status: 404 });
   return new NextResponse(photo.bytes, {
