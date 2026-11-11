@@ -118,6 +118,30 @@ import {
   handleTaskCollection,
 } from '../src/lib/crm/handlers.ts';
 import type { CrmStore, Account, Contact, Opportunity, Task, Note, Activity } from '../src/lib/crm/store.ts';
+import { handleRequestContactEmail } from '../src/lib/crm/handlers.ts';
+import {
+  ALERT_KEYS,
+  HANDOFF_CAP,
+  SHARE_CONSENT_VERSION,
+  STORE_LIST_KEYS,
+  adminHandoffRows,
+  alertRecipientAllowed,
+  assignRequestEmail,
+  businessDaysBetween,
+  deliverMessage,
+  emptyHandoffBook,
+  gatesFromEnv,
+  handleBondRequestHttp,
+  pinsMatch,
+  purgeHandoffs,
+  recordStop,
+  retryQueuedHandoffs,
+  sendingReady,
+  storeList,
+  type AccountView,
+  type HandoffProvider,
+  type ProviderMessage,
+} from '../src/lib/crm/requestHandoff.ts';
 
 let failures = 0;
 function assert(cond: boolean, msg: string) {
@@ -2298,6 +2322,177 @@ assert(wholesale.includes('getCrmStore') && wholesale.includes('localStorage') =
 const middleware = readFileSync('src/middleware.ts', 'utf8');
 assert(middleware.includes("'/admin/crm'") && middleware.includes("'/sales/field'") && middleware.includes('kelvinEmail') && middleware.includes('SALES_AT_COOKIE'), 'middleware keeps the KELVIN owner path and the sales cookie');
 assert(readFileSync('vercel.json', 'utf8').includes('crons') === false, 'no scheduled job was added');
+
+const handoffNow = Date.parse('2026-11-11T15:00:00Z');
+const handoffEnv = {
+  CG_BOND_REQUEST_HANDOFF_SECRET: 'handoff-secret',
+  CG_BOND_REQUEST_HANDOFF_SECRET_NEXT: 'handoff-next',
+  CG_BOND_REQUEST_FROM_ADDRESS: 'requests@cedargrowthco.com',
+  CG_BOND_REQUEST_POSTAL_ADDRESS: '1 Test Street, Buffalo, NY 14201',
+  CG_BOND_REQUEST_SEND_ENABLED: 'true',
+};
+function handoffShop(id: string, extra: Partial<AccountView> = {}): AccountView {
+  return {
+    id,
+    brand: 'cedargrowth',
+    displayName: 'TEST ONLY Request Shop',
+    city: 'Buffalo',
+    latitude: 42.89,
+    longitude: -78.87,
+    accountType: 'adult_use_dispensary',
+    requestContactEmail: 'shop@request.test',
+    carriedSkus: ['vape-1g'],
+    requestOptOut: false,
+    doNotContact: false,
+    ...extra,
+  };
+}
+function handoffId(n: number) {
+  return `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+}
+function handoffBody(n: number, shopId: string, extra: Record<string, unknown> = {}) {
+  return {
+    handoff_id: handoffId(n),
+    bond_request_id: `bond-${n}`,
+    submitted_at: '2026-11-11T15:00:00Z',
+    dispensary_ref: shopId,
+    items: [{ sku: 'vape-1g', qty: 1 }],
+    member_first_name: 'Ada',
+    member_contact: 'ada@member.test',
+    share_consent_version: SHARE_CONSENT_VERSION,
+    source: 'bond-haus',
+    ...extra,
+  };
+}
+function handoffRequest(body: unknown, token?: string) {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (token !== undefined) headers.authorization = `Bearer ${token}`;
+  return new Request('https://cedargrowth.vercel.app/api/intake/bond-request-handoff', { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) });
+}
+function handoffProvider(): HandoffProvider {
+  const calls: ProviderMessage[] = [];
+  return { calls, send: async () => ({ id: `msg-${calls.length + 1}` }) };
+}
+const sendShop = handoffShop(handoffId(1));
+const quietShop = handoffShop(handoffId(2), { displayName: 'TEST ONLY Quiet Shop', requestContactEmail: null });
+const farShop = handoffShop(handoffId(3), { displayName: 'TEST ONLY Far Shop', city: 'Albany', latitude: 42.65, longitude: -73.75, carriedSkus: ['vape-1g'] });
+const blockedShop = handoffShop(handoffId(4), { displayName: 'TEST ONLY Blocked Shop', doNotContact: true });
+const handoffAccounts = [sendShop, quietShop, farShop, blockedShop];
+const handoffBook = emptyHandoffBook();
+handoffBook.purgeScheduled = true;
+const handoffDepsLocal = {
+  book: handoffBook,
+  accountById: async (id: string) => handoffAccounts.find((row) => row.id === id) || null,
+  accounts: async () => handoffAccounts,
+};
+const handoffLogs: string[] = [];
+const handoffConsole = console.error;
+console.error = (...args: unknown[]) => { handoffLogs.push(args.map((item) => String(item)).join(' ')); };
+const handoffMissing = await handleBondRequestHttp(handoffRequest(handoffBody(5, sendShop.id), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: {} });
+const wrongBearer = await handleBondRequestHttp(handoffRequest(handoffBody(6, sendShop.id), 'wrong'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const noBearer = await handleBondRequestHttp(handoffRequest(handoffBody(7, sendShop.id)), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+console.error = handoffConsole;
+const offProvider = handoffProvider();
+const sendingOff = await handleBondRequestHttp(handoffRequest(handoffBody(8, sendShop.id), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: { CG_BOND_REQUEST_HANDOFF_SECRET: 'handoff-secret' }, provider: offProvider });
+const handoffRotated = await handleBondRequestHttp(handoffRequest(handoffBody(9, sendShop.id), 'handoff-next'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv, provider: handoffProvider() });
+const handoffBadConsent = await handleBondRequestHttp(handoffRequest(handoffBody(10, sendShop.id, { share_consent_version: 'v1:46652a17994f78d1' }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const otherConsent = await handleBondRequestHttp(handoffRequest(handoffBody(11, sendShop.id, { share_consent_version: 'v1:56b70a071c4714eb' }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const futureClock = await handleBondRequestHttp(handoffRequest(handoffBody(12, sendShop.id, { submitted_at: '2026-11-11T15:10:00Z' }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const oldClock = await handleBondRequestHttp(handoffRequest(handoffBody(13, sendShop.id, { submitted_at: '2026-11-10T14:00:00Z' }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const handoffNoted = await handleBondRequestHttp(handoffRequest(handoffBody(14, sendShop.id, { member_note: 'hidden' }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const hashed = await handleBondRequestHttp(handoffRequest(handoffBody(15, sendShop.id, { email_hmac: 'hidden' }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const handoffTooMany = await handleBondRequestHttp(handoffRequest(handoffBody(16, sendShop.id, { items: [{ sku: 'vape-1g', qty: 6 }] }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const handoffBlocked = await handleBondRequestHttp(handoffRequest(handoffBody(17, blockedShop.id), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const sendProvider = handoffProvider();
+const handoffSent = await handleBondRequestHttp(handoffRequest(handoffBody(18, sendShop.id), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv, provider: sendProvider });
+const handoffReplay = await handleBondRequestHttp(handoffRequest(handoffBody(18, sendShop.id), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv, provider: sendProvider });
+const handoffErased = await handleBondRequestHttp(new Request(`https://cedargrowth.vercel.app/api/intake/bond-request-handoff/${handoffId(18)}/erase`, { method: 'POST', headers: { authorization: 'Bearer handoff-secret' } }), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv, provider: sendProvider, kind: 'erase', handoffId: handoffId(18) });
+const statusOnly = await handleBondRequestHttp(new Request(`https://cedargrowth.vercel.app/api/intake/bond-request-handoff/${handoffId(18)}`, { headers: { authorization: 'Bearer handoff-secret' } }), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv, kind: 'status', handoffId: handoffId(18) });
+for (let n = 0; n < HANDOFF_CAP; n += 1) {
+  await handleBondRequestHttp(handoffRequest(handoffBody(100 + n, quietShop.id), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv, provider: handoffProvider() });
+}
+const capped = await handleBondRequestHttp(handoffRequest(handoffBody(200, quietShop.id, { member_first_name: 'Hidden', member_contact: 'hidden@member.test' }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const handoffStores = storeList(handoffAccounts, 'vape-1g', 'name', null);
+const distance = storeList(handoffAccounts, 'vape-1g', 'distance', { latitude: 42.9, longitude: -78.8 });
+const adminRows = adminHandoffRows(handoffBook, 'owner');
+const salesRows = adminHandoffRows(handoffBook, 'salesperson');
+const emailShop = handoffShop(handoffId(5), { requestContactEmail: null });
+const salesEmail = assignRequestEmail(emailShop, 'salesperson', 'buyer@shop.test');
+const adminEmail = assignRequestEmail(emailShop, 'administrator', 'buyer@shop.test');
+const microEmail = assignRequestEmail(handoffShop(handoffId(6), { accountType: 'microbusiness' }), 'owner', 'buyer@shop.test');
+const stopAccount = { id: handoffId(7), requestOptOut: false };
+const stopContacts = [{ accountId: stopAccount.id, preference: 'unspecified' }];
+const stopOk = recordStop(handoffBook, stopAccount, stopContacts, '2026-11-06T15:00:00Z', '2026-11-10T15:00:00Z', 'owner');
+const stopLate = recordStop(handoffBook, { id: handoffId(8) }, [], '2026-11-06T15:00:00Z', '2026-11-12T15:00:00Z', 'owner');
+const gateChecks = [
+  { from: '', postal: handoffEnv.CG_BOND_REQUEST_POSTAL_ADDRESS, purgeScheduled: true, sendFlag: true },
+  { from: 'requests@example.com', postal: handoffEnv.CG_BOND_REQUEST_POSTAL_ADDRESS, purgeScheduled: true, sendFlag: true },
+  { from: handoffEnv.CG_BOND_REQUEST_FROM_ADDRESS, postal: '', purgeScheduled: true, sendFlag: true },
+  { from: handoffEnv.CG_BOND_REQUEST_FROM_ADDRESS, postal: handoffEnv.CG_BOND_REQUEST_POSTAL_ADDRESS, purgeScheduled: false, sendFlag: true },
+  { from: handoffEnv.CG_BOND_REQUEST_FROM_ADDRESS, postal: handoffEnv.CG_BOND_REQUEST_POSTAL_ADDRESS, purgeScheduled: true, sendFlag: false },
+];
+let gateCalls = 0;
+for (const gates of gateChecks) {
+  const provider = handoffProvider();
+  const outcome = await deliverMessage(gates, null, provider);
+  gateCalls += provider.calls.length;
+  if (outcome.state !== 'failed:no_sender') gateCalls += 1;
+}
+const handoffHuge = await handleBondRequestHttp(handoffRequest('x'.repeat(9000), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const clearedBook = emptyHandoffBook();
+clearedBook.rows.push({
+  handoffId: handoffId(300), bondRequestId: 'old', receivedAt: '2025-01-01T00:00:00Z', submittedAt: '2025-01-01T00:00:00Z', dispensaryAccountId: quietShop.id,
+  items: [{ sku: 'vape-1g', qty: 1 }], memberFirstName: 'Ada', memberContact: 'ada@member.test', contactKind: 'email', visitPreference: null,
+  shareConsentVersion: SHARE_CONSENT_VERSION, source: 'bond-haus', sourceEvent: null, status: 'sent', eraseRequestedAt: null, erasedAt: null, consumerClearedAt: null,
+});
+clearedBook.sends.push({ handoffId: handoffId(300), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'abc', providerMessageId: 'm', sentAt: '2025-01-01T00:00:00Z', status: 'sent' });
+clearedBook.audits.push({ handoffId: handoffId(300), status: 'sent', recordedAt: '2025-01-01T00:00:00Z' });
+const purgedHandoff = purgeHandoffs(clearedBook, '2026-11-11T15:00:00Z');
+const retryBook = emptyHandoffBook();
+retryBook.purgeScheduled = true;
+retryBook.rows.push({
+  handoffId: handoffId(301), bondRequestId: 'late', receivedAt: '2026-11-10T14:00:00Z', submittedAt: '2026-11-10T14:00:00Z', dispensaryAccountId: sendShop.id,
+  items: [{ sku: 'vape-1g', qty: 1 }], memberFirstName: 'Ada', memberContact: 'ada@member.test', contactKind: 'email', visitPreference: null,
+  shareConsentVersion: SHARE_CONSENT_VERSION, source: 'bond-haus', sourceEvent: null, status: 'queued', eraseRequestedAt: null, erasedAt: null, consumerClearedAt: null,
+});
+const retryProvider = handoffProvider();
+await retryQueuedHandoffs({ book: retryBook, accountById: handoffDepsLocal.accountById, accounts: handoffDepsLocal.accounts }, gatesFromEnv(handoffEnv, true), retryProvider, handoffNow);
+const handoffSql = readFileSync('supabase/migrations/0139_crm_bond_request_handoff.sql', 'utf8');
+const handoffSrc = ['src/lib/crm/requestHandoff.ts', 'src/lib/crm/handoffDeps.ts', 'src/app/api/intake/bond-request-handoff/route.ts', 'src/app/api/intake/bond-request-stores/route.ts', 'src/app/admin/crm/CrmConsole.tsx'].map((file) => readFileSync(file, 'utf8')).join('\n');
+const pricingSrc = ['src/lib/crm/distributor.ts', 'src/lib/crm/forecast.ts', 'src/lib/crm/reorder.ts'].map((file) => readFileSync(file, 'utf8')).join('\n');
+const sentRow = handoffBook.rows.find((row) => row.handoffId === handoffId(18));
+const handoffAlert = handoffBook.alerts[0];
+assert(pinsMatch(), 'S4 pinned consent, privacy, and template hashes match');
+assert(handoffMissing.status === 401 && handoffMissing.body === null && wrongBearer.status === 401 && wrongBearer.body === null && noBearer.status === 401 && handoffLogs.length === 0, 'a request without a valid bearer is 401 with no body and no log');
+assert(sendingOff.status === 503 && offProvider.calls.length === 0 && handoffBook.rows.every((row) => row.handoffId !== handoffId(8)), 'an authenticated request is 503 while sending is off and stores nothing');
+assert(handoffRotated.status === 200 && handoffRotated.body?.result === 'accepted', 'the rotation secret is accepted');
+assert(handoffBadConsent.body?.result === 'rejected:consent' && otherConsent.body?.result === 'rejected:consent', 'the dispensary and supplier consent versions are rejected');
+assert(futureClock.body?.result === 'rejected:clock' && oldClock.body?.result === 'rejected:clock', 'submitted_at outside 300 seconds or 24 hours is rejected');
+assert(handoffNoted.body?.result === 'rejected:schema' && hashed.body?.result === 'rejected:schema' && handoffTooMany.body?.result === 'rejected:items', 'unknown keys, member notes, hashes, and more than 5 units are rejected');
+assert(handoffBlocked.body?.result === 'rejected:dispensary' && JSON.stringify(handoffBlocked.body).includes(blockedShop.displayName) === false, 'E3 a do_not_contact account is rejected without an account echo');
+assert(handoffSent.status === 200 && handoffSent.body?.status === 'sent' && sendProvider.calls.length === 2 && sendProvider.calls.every((call) => call.openTracking === false && call.clickTracking === false && call.replyTo === call.from) && sendProvider.calls[0].html.includes('<img') === false && sendProvider.calls[0].html.includes('font-size:12px') && handoffReplay.body?.result === 'duplicate' && handoffReplay.body?.status === 'sent', 'one handoff sends once, with tracking off, and a replay does not send again');
+assert(handoffErased.body && Object.keys(handoffErased.body).join(',') === 'status' && handoffErased.body.status === 'erased' && sentRow?.memberFirstName === null && sentRow?.bondRequestId === null, 'erase clears the consumer fields and returns status only');
+assert(statusOnly.body && Object.keys(statusOnly.body).join(',') === 'status', 'status returns status only');
+assert(capped.body?.result === 'rejected:rate' && JSON.stringify(capped.body).includes('Hidden') === false && JSON.stringify(capped.body).includes('hidden@member.test') === false && handoffAlert && Object.keys(handoffAlert).sort().join(',') === [...ALERT_KEYS].sort().join(',') && alertRecipientAllowed(undefined, ['shop@request.test']) === false && alertRecipientAllowed('shop@request.test', ['shop@request.test']) === false, 'the 51st handoff is rejected without an echo and the alert is not sent to a dispensary');
+assert(handoffStores.length === 3 && handoffStores.map((row) => row.display_name).join('|') === 'TEST ONLY Far Shop|TEST ONLY Quiet Shop|TEST ONLY Request Shop' && handoffStores.every((row) => Object.keys(row).sort().join(',') === [...STORE_LIST_KEYS].sort().join(',')) && distance[0].display_name === 'TEST ONLY Request Shop' && JSON.stringify(handoffStores).includes('featured') === false, 'E1 the store list has no placement field and sorts by name or by distance');
+assert(adminRows !== null && adminRows.length > 0 && JSON.stringify(adminRows).includes('ada@member.test') === false && salesRows === null, 'E4 the 12 month row is readable only through the admin and owner view');
+assert(salesEmail.ok === false && adminEmail.ok === true && emailShop.requestContactEmail === 'buyer@shop.test' && microEmail.ok === false, 'only an owner or administrator can set request contact email, and only on an adult-use dispensary');
+assert(stopOk.ok === true && stopOk.onTime === true && stopAccount.requestOptOut === true && stopContacts[0].preference === 'do_not_contact' && handoffBook.audits.some((row) => row.status === 'request_stop') && stopLate.ok === false && businessDaysBetween('2026-11-06T15:00:00Z', '2026-11-10T15:00:00Z') === 2, 'E3 a stop reply becomes do_not_contact within 2 business days with an audit row');
+assert(gateCalls === 0 && gateChecks.every((gates) => sendingReady(gates) === false), 'sending refuses with no provider call while the sender, postal address, purge schedule, or send flag is missing');
+assert(handoffHuge.status === 413, 'an 8 KB body is the cap');
+assert(purgedHandoff.purged === 1 && clearedBook.rows.length === 0 && clearedBook.sends.length === 0 && clearedBook.audits.length === 0, 'S3 the 12 month purge removes the send log and audit rows with the row');
+assert(retryProvider.calls.length === 0 && retryBook.rows[0].status === 'failed', 'a queued handoff older than 24 hours is marked failed without a provider call');
+assert(handoffSql.includes('revoke all on table public.crm_bond_request_handoffs from public, anon, authenticated, service_role') && handoffSql.includes('recipient') === false && handoffSql.includes('set search_path = pg_catalog') && handoffSql.includes('least(p_now, pg_catalog.now())'), 'E2 and privileges: no fee column, no recipient column, and the purge clock is capped');
+assert(/reservation|metrc|coupon|discount/i.test(handoffSrc) === false && /\u2013|\u2014/.test(handoffSrc) === false, 'handoff surfaces do not use reservation, Metrc, coupon, discount, or dash marks');
+assert(pricingSrc.includes('do_not_contact') === false && pricingSrc.includes('request_opt_out') === false, 'E3 pricing and order code does not read the opt out flag');
+assert(readFileSync('src/app/admin/crm/CrmConsole.tsx', 'utf8').includes('Request contact email'), 'the account field is labelled Request contact email');
+const emailAccount = memory.accounts[0];
+if (emailAccount) {
+  emailAccount.accountType = 'adult_use_dispensary';
+  const salesDenied = await handleRequestContactEmail({ actorId: 'sales@cedargrowthco.com', grants: salesGrant, request: crmReq('POST', '/api/admin/crm/accounts/request-email', { brand: 'cedargrowth', accountId: emailAccount.id, email: 'buyer@shop.test' }), store: memory });
+  const ownerSet = await handleRequestContactEmail({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('POST', '/api/admin/crm/accounts/request-email', { brand: emailAccount.brand, accountId: emailAccount.id, email: 'buyer@shop.test' }), store: memory });
+  assert(salesDenied.status === 403 && ownerSet.status === 200 && emailAccount.requestContactEmail === 'buyer@shop.test', 'the desk route lets an owner store the request contact email and refuses sales');
+}
 
 if (failures > 0) {
   console.error(`\n${failures} failure(s).`);

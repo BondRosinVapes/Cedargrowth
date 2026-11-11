@@ -74,6 +74,9 @@ export type Account = {
   geocodedAt?: string | null;
   distributor: Distributor | null;
   distributorAccountRef: string | null;
+  requestContactEmail?: string | null;
+  bondCarriedSkus?: string[];
+  requestOptOut?: boolean;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
@@ -392,7 +395,7 @@ export interface CrmStore {
   undoMerge(brand: CrmBrand, mergeId: string, actor: string, now: string): Promise<StoreResult<{ merge: MergeRow; refused: string[]; reassigned: string[] }>>;
 }
 
-const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,street,state,postal_code,consent_version,consent_received_at,intake_submitted_at,ocm_status,record_marker,source_inquiry_id,latitude,longitude,geocode_source,geocode_match,geocoded_at,created_at,updated_at,created_by,updated_by';
+const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,street,state,postal_code,consent_version,consent_received_at,intake_submitted_at,ocm_status,record_marker,source_inquiry_id,latitude,longitude,geocode_source,geocode_match,geocoded_at,request_contact_email,bond_carried_skus,request_opt_out,created_at,updated_at,created_by,updated_by';
 const ORDER_COLS = 'id,public_id,brand,account_id,distributor,order_ref,retailer_name,ordered_on,delivered_on,order_status,invoice_cents,retailer_payment_status,retailer_paid_on,payout_status,payout_cents,payout_on,opportunity_id,source,imported_at';
 const CONTACT_COLS = 'id,public_id,brand,account_id,name,title,email,phone,notes,preference,created_at,updated_at';
 const OPP_COLS = 'id,public_id,brand,account_id,name,stage,forecast_cents,expected_close_on,notes,loss_reason,next_action,next_action_on,product_line,quantity_units,updated_at';
@@ -475,6 +478,9 @@ function mapAccount(row: Record<string, unknown>): Account | null {
     geocodedAt: row.geocoded_at ? String(row.geocoded_at) : null,
     distributor: (DISTRIBUTORS as readonly string[]).includes(String(row.distributor)) ? (row.distributor as Distributor) : null,
     distributorAccountRef: row.distributor_account_ref ? String(row.distributor_account_ref) : null,
+    requestContactEmail: row.request_contact_email ? String(row.request_contact_email) : null,
+    bondCarriedSkus: Array.isArray(row.bond_carried_skus) ? row.bond_carried_skus.map(String) : [],
+    requestOptOut: row.request_opt_out === true,
     createdAt: String(row.created_at ?? ''),
     updatedAt: String(row.updated_at ?? ''),
     createdBy: String(row.created_by ?? ''),

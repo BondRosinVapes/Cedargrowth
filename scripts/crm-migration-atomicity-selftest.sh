@@ -55,6 +55,7 @@ awk -v root="$ROOT" '
     sub(/^\\ir \.\.\//, "\\ir " root "/")
     if (orig ~ /0138_crm_card_and_supplier_intake\.sql$/) {
       print "alter default privileges for role postgres in schema public grant all on tables to service_role, anon, authenticated;"
+      print "alter default privileges for role postgres in schema public grant all on functions to service_role, anon, authenticated;"
     }
     print
     next
@@ -384,6 +385,43 @@ if [ "$KEPT_BUCKET" != "1,1,0" ]; then
   exit 1
 fi
 echo 'ok: rollback leaves the photo bucket and its objects in place'
+
+HAND_PRIV=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace cross join lateral aclexplode(c.relacl) e left join pg_roles r on r.oid = e.grantee where n.nspname = 'public' and c.relname like 'crm_bond_request_%' and (e.grantee = 0 or r.rolname in ('anon', 'authenticated', 'service_role'));")
+HAND_BITS=$(sudo -u postgres psql -d "$DB" -tA -c "select has_table_privilege('service_role', 'public.crm_bond_request_handoffs', 'select')::text || ',' || has_table_privilege('service_role', 'public.crm_bond_request_handoffs', 'insert')::text || ',' || has_table_privilege('service_role', 'public.crm_bond_request_handoffs', 'update')::text || ',' || has_table_privilege('service_role', 'public.crm_bond_request_handoffs', 'delete')::text || ',' || has_table_privilege('anon', 'public.crm_bond_request_handoffs', 'select')::text || ',' || has_function_privilege('anon', 'public.crm_receive_bond_request_handoff(jsonb)', 'execute')::text || ',' || has_function_privilege('service_role', 'public.crm_receive_bond_request_handoff(jsonb)', 'execute')::text;")
+HAND_COLS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from information_schema.columns where table_schema = 'public' and table_name in ('crm_bond_request_handoffs', 'crm_bond_request_send_log') and column_name ~* 'fee|price|commission|credit|target|recipient';")
+if [ "$HAND_PRIV" != "0" ] || [ "$HAND_BITS" != "false,false,false,false,false,false,true" ] || [ "$HAND_COLS" != "0" ]; then
+  echo "FAIL: handoff privileges priv=${HAND_PRIV} bits=${HAND_BITS} cols=${HAND_COLS}"
+  exit 1
+fi
+echo 'ok: handoff tables grant nothing direct under default privileges'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_accounts (brand, display_name, status, created_by, updated_by, account_type, bond_carried_skus, request_contact_email) values ('cedargrowth', 'TEST ONLY Request Shop', 'active', 'test-only', 'test-only', 'adult_use_dispensary', array['vape-1g'], 'shop@request.test');" >/dev/null
+ACCT=$(sudo -u postgres psql -d "$DB" -tA -c "select id from public.crm_accounts where display_name = 'TEST ONLY Request Shop';")
+expect_fail 'handoff direct update' "set role service_role; update public.crm_bond_request_handoffs set submitted_at = now();"
+BAD_CONSENT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','81818181-8181-4181-8181-818181818181','bond_request_id','b1','submitted_at','2026-11-11T14:00:00Z','dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:46652a17994f78d1','source','bond-haus'))->>'result';")
+OK_HAND=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','82828282-8282-4282-8282-828282828282','bond_request_id','b2','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+DUP_HAND=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','82828282-8282-4282-8282-828282828282','bond_request_id','b2','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+ADMIN_ROWS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_admin_view('salesperson');")
+ADMIN_OK=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_admin_view('owner');")
+if [ "$BAD_CONSENT" != "rejected:consent" ] || [ "$OK_HAND" != "accepted" ] || [ "$DUP_HAND" != "duplicate" ] || [ "$ADMIN_ROWS" != "0" ] || [ "$ADMIN_OK" != "1" ]; then
+  echo "FAIL: handoff sql consent=${BAD_CONSENT} ok=${OK_HAND} dup=${DUP_HAND} admin=${ADMIN_ROWS}/${ADMIN_OK} acct=${ACCT}"
+  exit 1
+fi
+echo 'ok: handoff sql rejects the other consent versions, replays one row, and hides the row from other roles'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update public.crm_bond_request_handoffs set received_at = now() - interval '13 months' where handoff_id = '82828282-8282-4282-8282-828282828282'; insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, status) values ('82828282-8282-4282-8282-828282828282', 'A', 'v1:6321250367f61781', 'abc', 'sent'); insert into public.crm_bond_request_audit (handoff_id, status) values ('82828282-8282-4282-8282-828282828282', 'queued');" >/dev/null
+PURGE_HAND=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now())->>'purged';")
+LEFT_HAND=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_bond_request_handoffs) || ',' || (select count(*) from public.crm_bond_request_send_log) || ',' || (select count(*) from public.crm_bond_request_audit);")
+if [ "$PURGE_HAND" != "1" ] || [ "$LEFT_HAND" != "0,0,0" ]; then
+  echo "FAIL: handoff purge ${PURGE_HAND} ${LEFT_HAND}"
+  exit 1
+fi
+echo 'ok: the 12 month purge removes the handoff, the send log, and the audit rows'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-rollback-0139.sql" >/tmp/crm-0139-rollback.log
+GONE=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relname like 'crm_bond_request_%';")
+if [ "$GONE" != "0" ]; then
+  echo "FAIL: 0139 rollback left ${GONE} relations"
+  exit 1
+fi
+echo 'ok: 0139 rollback removes the handoff tables'
 
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${DB};" >/dev/null
 

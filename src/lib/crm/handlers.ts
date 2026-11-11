@@ -45,6 +45,7 @@ import { coordinatesInRange, unmappedAccountCount, type MapPin } from './nyMap';
 import { nextBestActions, snoozeUntil } from './nextAction';
 import { INTAKE_MAX_BYTES, intakeSecrets, parseIntake, signIntake, signaturesMatch, takeIntakeRate, timestampFresh } from './intake';
 import { parseSupplierIntake, signSupplierIntake, supplierSecrets, supplierSignaturesMatch, supplierTimestampFresh } from './supplierIntake';
+import { assignRequestEmail, type AccountView } from './requestHandoff';
 import { AGENT_ACTOR, AGENT_MAX_BYTES, AGENT_ROW_LIMIT, agentReady, agentSecret, agentSignatureOk, agentTimestampFresh, parseAgentEnvelope, parseAgentRow, type AgentOp } from './agentIntake';
 import { readResendEvent, sendDigestEmail, sendReorderLink } from '@/lib/email';
 import { FIELD_BUCKET, READ_URL_SECONDS, isProductLine, isVisitOutcome, mediaPath, roundLocation, validateMediaUpload } from './field';
@@ -1786,6 +1787,40 @@ export async function handleIntakePurge(ctx: CrmContext): Promise<CrmResult> {
   const saved = await ctx.store.purgeBondInquiries(new Date().toISOString());
   if (saved.state !== 'ok') return storageBody(auth.brand, saved.state === 'rejected' || saved.state === 'missing' ? 'unavailable' : saved.state);
   return { status: 200, body: { ok: true, purged: saved.value.purged } };
+}
+
+export async function handleRequestContactEmail(ctx: CrmContext): Promise<CrmResult> {
+  const body = await readBody(ctx.request);
+  if (isCrmResult(body)) return body;
+  const record = (body ?? {}) as Record<string, unknown>;
+  const auth = await gate(ctx, typeof record.brand === 'string' ? record.brand : null);
+  if (isResult(auth)) return auth;
+  const id = parseUuid(record.accountId);
+  if (!id || typeof record.email !== 'string') return { status: 400, body: { ok: false, reason: 'Enter a work email.' } };
+  const row = await ctx.store.readAccount(auth.brand, id);
+  if (row.state !== 'ok' || !row.value) return { status: 404, body: { ok: false, reason: 'Not found in this brand.' } };
+  const view: AccountView = {
+    id: row.value.id,
+    brand: row.value.brand,
+    displayName: row.value.displayName,
+    city: row.value.city,
+    latitude: row.value.latitude ?? null,
+    longitude: row.value.longitude ?? null,
+    accountType: row.value.accountType,
+    requestContactEmail: row.value.requestContactEmail ?? null,
+    carriedSkus: row.value.bondCarriedSkus || [],
+    requestOptOut: row.value.requestOptOut === true,
+    doNotContact: false,
+  };
+  const assigned = assignRequestEmail(view, auth.role, record.email);
+  if (!assigned.ok) return { status: assigned.status, body: { ok: false, reason: assigned.reason } };
+  row.value.requestContactEmail = record.email;
+  const db = getSupabaseServerClient();
+  if (db) {
+    const saved = await db.from('crm_accounts').update({ request_contact_email: record.email, updated_by: auth.actorId }).eq('id', id).eq('brand', auth.brand).eq('account_type', 'adult_use_dispensary');
+    if (saved.error) return { status: 400, body: { ok: false, reason: 'Request contact email was not stored.' } };
+  }
+  return { status: 200, body: { ok: true } };
 }
 
 export function staffAudience(hasCedarSalesMembership: boolean): Audience {

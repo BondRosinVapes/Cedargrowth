@@ -1,4 +1,4 @@
--- Apply CRM migrations 0120 through 0138 as one transaction.
+-- Apply CRM migrations 0120 through 0139 as one transaction. 0137 is not included.
 -- This file is not in supabase/migrations, so a hosted migration runner does not
 -- pick it up by itself. Run it only with psql --single-transaction against an
 -- isolated database after review. This repository does not run it.
@@ -24,3 +24,4 @@
 \ir ../supabase/migrations/0135_crm_account_geocode.sql
 \ir ../supabase/migrations/0136_crm_google_places.sql
 \ir ../supabase/migrations/0138_crm_card_and_supplier_intake.sql
+\ir ../supabase/migrations/0139_crm_bond_request_handoff.sql
