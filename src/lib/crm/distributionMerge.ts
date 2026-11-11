@@ -14,6 +14,7 @@ export type MergeRow = {
   createdAt: string;
   undoneAt: string | null;
   undoneBy: string | null;
+  reassignedIds: string[];
 };
 
 export type LicenseAccount = {
@@ -78,17 +79,23 @@ export function applyWonMerge(world: LicenseWorld, input: {
     createdAt: input.now,
     undoneAt: null,
     undoneBy: null,
+    reassignedIds: [],
   };
   return { world: { ...world, contacts, merges: [...world.merges, merge] }, code: 'merged' };
 }
 
-export function undoWonMerge(world: LicenseWorld, mergeId: string, actor: string, now: string): { world: LicenseWorld; refused: string[] } {
+export function undoWonMerge(world: LicenseWorld, mergeId: string, actor: string, now: string): { world: LicenseWorld; refused: string[]; reassigned: string[] } {
   const merge = world.merges.find((row) => row.id === mergeId && row.undoneAt === null);
-  if (!merge) return { world, refused: [] };
+  if (!merge) return { world, refused: [], reassigned: [] };
   const refused: string[] = [];
+  const reassigned: string[] = [];
   const contacts = world.contacts.map((contact) => {
     const prior = merge.priors.find((row) => row.contactId === contact.id);
     if (!prior) return contact;
+    if (contact.accountId !== merge.accountId) {
+      reassigned.push(contact.id);
+      return contact;
+    }
     const account = world.accounts.find((row) => row.id === prior.priorAccountId);
     if (!account || account.brand !== 'cedargrowth' || account.brand !== contact.brand) {
       refused.push(contact.id);
@@ -96,6 +103,6 @@ export function undoWonMerge(world: LicenseWorld, mergeId: string, actor: string
     }
     return { ...contact, accountId: prior.priorAccountId };
   });
-  const merges = world.merges.map((row) => (row.id === merge.id ? { ...row, undoneAt: now, undoneBy: actor } : row));
-  return { world: { ...world, contacts, merges }, refused };
+  const merges = world.merges.map((row) => (row.id === merge.id ? { ...row, undoneAt: now, undoneBy: actor, reassignedIds: reassigned } : row));
+  return { world: { ...world, contacts, merges }, refused, reassigned };
 }

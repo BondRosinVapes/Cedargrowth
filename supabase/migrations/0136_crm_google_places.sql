@@ -21,13 +21,14 @@ create table if not exists public.crm_google_places (
   fetched_at timestamptz not null default now()
 );
 
-comment on table public.crm_google_places is 'Cached Google Places fields for a CedarGrowth account. Not seeded. Page views read this table.';
+comment on table public.crm_google_places is 'Google place_id for a CedarGrowth dispensary. fields holds name, rating, hours, phone, website, Maps link, photo name, and credits only when the account has a Won deal. Not seeded.';
+comment on column public.crm_google_places.fields is 'Place details for a dispensary with a Won deal. Every other dispensary keeps this object empty.';
 
 alter table public.crm_google_places enable row level security;
 alter table public.crm_google_places force row level security;
 revoke all on table public.crm_google_places from public, anon, authenticated;
 grant select, insert, update on table public.crm_google_places to service_role;
-revoke delete on table public.crm_google_places from service_role, anon, authenticated, public;
+revoke delete, truncate, references, trigger on table public.crm_google_places from service_role, anon, authenticated, public;
 
 create table if not exists public.crm_distribution_merges (
   id uuid primary key default gen_random_uuid(),
@@ -40,10 +41,12 @@ create table if not exists public.crm_distribution_merges (
   created_at timestamptz not null default now(),
   undone_at timestamptz,
   undone_by text check (undone_by is null or char_length(undone_by) between 3 and 200),
+  reassigned_ids uuid[] not null default '{}',
   check ((undone_at is null and undone_by is null) or (undone_at is not null and undone_by is not null))
 );
 
-comment on table public.crm_distribution_merges is 'Audit of contacts attached to an account after a won deal. prior_accounts stores each contact id and the account id it had before the merge. Rows are undone, never deleted.';
+comment on table public.crm_distribution_merges is 'Append-only audit of contacts attached to an account after a won deal. prior_accounts stores each contact id and the account id it had before the merge. reassigned_ids lists contacts skipped on undo because their account changed later. Rows are undone, never deleted or rewritten.';
+comment on column public.crm_distribution_merges.reassigned_ids is 'Contacts skipped on undo because their account changed after the merge.';
 
 create or replace function crm_private.guard_contact()
 returns trigger
@@ -84,14 +87,51 @@ create unique index if not exists crm_distribution_merges_open_idx
 alter table public.crm_distribution_merges enable row level security;
 alter table public.crm_distribution_merges force row level security;
 revoke all on table public.crm_distribution_merges from public, anon, authenticated;
-grant select, insert, update on table public.crm_distribution_merges to service_role;
-revoke delete on table public.crm_distribution_merges from service_role, anon, authenticated, public;
+grant select, insert on table public.crm_distribution_merges to service_role;
+revoke update, delete, truncate, references, trigger on table public.crm_distribution_merges from service_role, anon, authenticated, public;
+
+create or replace function public.crm_guard_distribution_merge()
+returns trigger
+language plpgsql
+set search_path = pg_catalog
+as $$
+begin
+  if tg_op = 'DELETE' then
+    raise exception 'merge audit is append-only';
+  end if;
+  if old.undone_at is not null then
+    raise exception 'merge audit is append-only';
+  end if;
+  if new.id is distinct from old.id
+     or new.brand is distinct from old.brand
+     or new.account_id is distinct from old.account_id
+     or new.opportunity_id is distinct from old.opportunity_id
+     or new.actor is distinct from old.actor
+     or new.contact_ids is distinct from old.contact_ids
+     or new.prior_accounts is distinct from old.prior_accounts
+     or new.created_at is distinct from old.created_at then
+    raise exception 'merge audit is append-only';
+  end if;
+  if new.undone_at is null or new.undone_by is null then
+    raise exception 'merge audit is append-only';
+  end if;
+  return new;
+end;
+$$;
+
+comment on function public.crm_guard_distribution_merge() is 'The merge audit accepts one undo update. The original row stays. A second update or a delete is rejected.';
+
+revoke all on function public.crm_guard_distribution_merge() from public, anon, authenticated, service_role;
+
+create trigger crm_distribution_merges_append_only
+  before update or delete on public.crm_distribution_merges
+  for each row execute function public.crm_guard_distribution_merge();
 
 create or replace function public.crm_merge_won_distribution(p_opportunity_id uuid, p_actor text)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog
 as $$
 declare
   v_brand text;
@@ -165,15 +205,17 @@ create or replace function public.crm_undo_distribution_merge(p_merge_id uuid, p
 returns jsonb
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog
 as $$
 declare
   v_row public.crm_distribution_merges%rowtype;
   v_item jsonb;
   v_contact uuid;
   v_prior uuid;
+  v_current uuid;
   v_brand text;
   v_refused jsonb := '[]'::jsonb;
+  v_reassigned uuid[] := '{}';
 begin
   if p_actor is null or char_length(btrim(p_actor)) < 3 or char_length(btrim(p_actor)) > 200 then
     return jsonb_build_object('ok', false);
@@ -189,21 +231,27 @@ begin
   loop
     v_contact := nullif(v_item->>'contactId', '')::uuid;
     v_prior := nullif(v_item->>'priorAccountId', '')::uuid;
-    select brand into v_brand from public.crm_accounts where id = v_prior;
-    if v_brand is distinct from 'cedargrowth' then
-      v_refused := v_refused || jsonb_build_array(v_item->>'contactId');
+    select account_id into v_current from public.crm_contacts where id = v_contact and brand = 'cedargrowth';
+    if v_current is not null and v_current is distinct from v_row.account_id then
+      v_reassigned := v_reassigned || v_contact;
     else
-      update public.crm_contacts
-      set account_id = v_prior, updated_by = btrim(p_actor)
-      where id = v_contact and brand = 'cedargrowth';
+      select brand into v_brand from public.crm_accounts where id = v_prior;
+      if v_brand is distinct from 'cedargrowth' then
+        v_refused := v_refused || jsonb_build_array(v_item->>'contactId');
+      else
+        update public.crm_contacts
+        set account_id = v_prior, updated_by = btrim(p_actor)
+        where id = v_contact and brand = 'cedargrowth';
+      end if;
     end if;
   end loop;
   update public.crm_distribution_merges
-  set undone_at = p_now, undone_by = btrim(p_actor)
+  set undone_at = p_now, undone_by = btrim(p_actor), reassigned_ids = v_reassigned
   where id = p_merge_id and undone_at is null;
   return jsonb_build_object(
     'ok', true,
     'refused', v_refused,
+    'reassigned', to_jsonb(v_reassigned),
     'merge', jsonb_build_object(
       'id', v_row.id,
       'account_id', v_row.account_id,
@@ -213,13 +261,14 @@ begin
       'prior_accounts', v_row.prior_accounts,
       'created_at', v_row.created_at,
       'undone_at', p_now,
-      'undone_by', btrim(p_actor)
+      'undone_by', btrim(p_actor),
+      'reassigned_ids', to_jsonb(v_reassigned)
     )
   );
 end;
 $$;
 
-comment on function public.crm_undo_distribution_merge(uuid, text, timestamptz) is 'One transaction. Restores each contact to its prior account. A missing or non CedarGrowth prior account is refused and reported. The audit row is marked undone.';
+comment on function public.crm_undo_distribution_merge(uuid, text, timestamptz) is 'One transaction. Restores each contact that is still on the won account. A contact whose account changed after the merge is skipped, listed in reassigned_ids, and left where it is. A missing or non CedarGrowth prior account is refused and reported. Any desk staff may call this. The audit row is marked undone once.';
 
 revoke all on function public.crm_merge_won_distribution(uuid, text) from public, anon, authenticated;
 grant execute on function public.crm_merge_won_distribution(uuid, text) to service_role;

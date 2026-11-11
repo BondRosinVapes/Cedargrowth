@@ -29,7 +29,7 @@ export type PlacePlan =
   | { action: 'not_connected' }
   | { action: 'no_address' }
   | { action: 'use_cache'; cache: PlaceCache }
-  | { action: 'refresh' };
+  | { action: 'refresh'; retain: 'details' | 'place_id' };
 
 export function placeQuery(account: { street?: string | null; city?: string | null }): string | null {
   const street = account.street?.trim();
@@ -44,11 +44,29 @@ export function placeCacheFresh(fetchedAt: string, now: number): boolean {
   return now - then < PLACE_TTL_MS;
 }
 
-export function placeReadPlan(input: { hasKey: boolean; query: string | null; cache: PlaceCache | null; now: number }): PlacePlan {
+// Account status is prospect, active, paused, or closed. None of those is a customer status.
+// A dispensary we sell to is one with a Won deal. Only that account keeps place details.
+export function storesPlaceDetails(stages: readonly string[]): boolean {
+  return stages.includes('won');
+}
+
+export function shouldPurgePlaceDetails(input: { previousStage: string | null; nextStage: string | null | undefined; remainingWon: boolean }): boolean {
+  if (input.previousStage !== 'won' || input.nextStage === undefined || input.nextStage === 'won') return false;
+  return input.remainingWon === false;
+}
+
+export type PlaceRetain = 'details' | 'place_id';
+
+export function placeReadPlan(input: { hasKey: boolean; query: string | null; cache: PlaceCache | null; now: number; sells: boolean }): PlacePlan {
   if (!input.hasKey) return { action: 'not_connected' };
-  if (!input.query) return { action: 'no_address' };
-  if (input.cache && placeCacheFresh(input.cache.fetchedAt, input.now)) return { action: 'use_cache', cache: input.cache };
-  return { action: 'refresh' };
+  if (!input.query && !input.cache?.placeId) return { action: 'no_address' };
+  if (input.sells && input.cache && placeCacheFresh(input.cache.fetchedAt, input.now)) return { action: 'use_cache', cache: input.cache };
+  return { action: 'refresh', retain: input.sells ? 'details' : 'place_id' };
+}
+
+export function retainPlaceCache(cache: PlaceCache, retain: PlaceRetain): PlaceCache {
+  if (retain === 'details') return cache;
+  return { placeId: cache.placeId, matchStatus: cache.matchStatus, fields: null, fetchedAt: cache.fetchedAt };
 }
 
 type DetailBody = {
@@ -95,6 +113,63 @@ export async function lookupPlace(query: string, key: string, fetchImpl: typeof 
   const place = found.places?.[0];
   if (!place?.id) return null;
   return { placeId: place.id, card: parsePlaceDetail(place) };
+}
+
+const DETAIL_FIELD_MASK = 'id,displayName,rating,userRatingCount,regularOpeningHours,nationalPhoneNumber,websiteUri,googleMapsUri,photos';
+
+export async function lookupPlaceById(placeId: string, key: string, fetchImpl: typeof fetch): Promise<{ placeId: string; card: PlaceCard } | null> {
+  const id = placeId.trim().replace(/^places\//, '');
+  if (!id || /[^A-Za-z0-9_-]/.test(id)) return null;
+  const response = await fetchImpl(`https://places.googleapis.com/v1/places/${encodeURIComponent(id)}`, {
+    headers: {
+      'X-Goog-Api-Key': key,
+      'X-Goog-FieldMask': DETAIL_FIELD_MASK,
+    },
+  });
+  if (!response.ok) return null;
+  const body = await response.json() as DetailBody;
+  if (!body.id) return null;
+  return { placeId: body.id, card: parsePlaceDetail(body) };
+}
+
+export async function loadPlace(input: { placeId: string | null; query: string | null; key: string; fetchImpl: typeof fetch }): Promise<{ placeId: string; card: PlaceCard } | null> {
+  if (input.placeId) {
+    const byId = await lookupPlaceById(input.placeId, input.key, input.fetchImpl);
+    if (byId) return byId;
+  }
+  if (!input.query) return null;
+  return lookupPlace(input.query, input.key, input.fetchImpl);
+}
+
+export function storedPlaceCard(input: {
+  name?: unknown;
+  rating?: unknown;
+  reviewCount?: unknown;
+  hours?: unknown;
+  phone?: unknown;
+  website?: unknown;
+  mapsUrl?: unknown;
+  photoName?: unknown;
+  photoCredits?: unknown;
+} | null | undefined): PlaceCard | null {
+  if (!input) return null;
+  const text = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
+  const list = (value: unknown) => Array.isArray(value) && value.some((item) => typeof item === 'string' && item.trim().length > 0);
+  const present = text(input.name) || typeof input.rating === 'number' || typeof input.reviewCount === 'number' || list(input.hours) || text(input.phone) || text(input.website) || text(input.mapsUrl) || text(input.photoName) || list(input.photoCredits);
+  if (!present) return null;
+  return placeCardOnly(input);
+}
+
+export function cachedPhotoName(input: { sells: boolean; cache: PlaceCache | null; now: number }): string | null {
+  if (!input.sells || !input.cache || !placeCacheFresh(input.cache.fetchedAt, input.now)) return null;
+  return input.cache.fields?.photoName || null;
+}
+
+export async function currentPhotoName(input: { sells: boolean; cache: PlaceCache | null; query: string | null; now: number; key: string; fetchImpl: typeof fetch }): Promise<string | null> {
+  const cached = cachedPhotoName(input);
+  if (cached) return cached;
+  const live = await loadPlace({ placeId: input.cache?.placeId ?? null, query: input.query, key: input.key, fetchImpl: input.fetchImpl });
+  return live?.card.photoName ?? null;
 }
 
 export const PHOTO_NAME_PATTERN = /^places\/[A-Za-z0-9_-]+\/photos\/[A-Za-z0-9_-]+$/;

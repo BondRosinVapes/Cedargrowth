@@ -1,6 +1,6 @@
 import { authorizeCrmRequest, isDispensaryAccount } from './engine';
 import type { CrmContext, CrmResult } from './handlers';
-import { lookupPlace, placeQuery, placeReadPlan, type PlaceCard } from './places';
+import { loadPlace, placeQuery, placeReadPlan, retainPlaceCache, type PlaceCard } from './places';
 import { browserLink } from './placeLinks';
 
 function denied(status: number, reason: string): CrmResult {
@@ -29,12 +29,16 @@ export async function handleGooglePlace(ctx: CrmContext, now = Date.now()): Prom
   if (!isDispensaryAccount(account.value.accountType)) return { status: 200, body: { ok: true, state: 'not_dispensary' } };
   const cacheResult = await ctx.store.readPlaceCache(auth.brand, accountId);
   if (cacheResult.state !== 'ok') return denied(503, 'CRM storage could not be read.');
+  const selling = await ctx.store.accountHasWonDeal(auth.brand, accountId);
+  if (selling.state !== 'ok') return denied(503, 'CRM storage could not be read.');
   const key = process.env.GOOGLE_PLACES_API_KEY?.trim() || '';
+  const query = placeQuery(account.value);
   const plan = placeReadPlan({
     hasKey: key.length > 0,
-    query: placeQuery(account.value),
+    query,
     cache: cacheResult.value,
     now,
+    sells: selling.value,
   });
   if (plan.action === 'not_connected') return { status: 200, body: { ok: true, state: 'not_connected' } };
   if (plan.action === 'no_address') return { status: 200, body: { ok: true, state: 'no_match' } };
@@ -42,11 +46,11 @@ export async function handleGooglePlace(ctx: CrmContext, now = Date.now()): Prom
     if (plan.cache.matchStatus === 'none' || !plan.cache.fields) return { status: 200, body: { ok: true, state: 'no_match' } };
     return { status: 200, body: { ok: true, state: 'matched', card: publicCard(accountId, plan.cache.fields) } };
   }
-  const found = await lookupPlace(placeQuery(account.value) || '', key, fetch);
+  const found = await loadPlace({ placeId: cacheResult.value?.placeId ?? null, query, key, fetchImpl: fetch });
   const fetchedAt = new Date(now).toISOString();
-  const saved = await ctx.store.savePlaceCache(auth.brand, accountId, found
+  const saved = await ctx.store.savePlaceCache(auth.brand, accountId, retainPlaceCache(found
     ? { placeId: found.placeId, matchStatus: 'matched', fields: found.card, fetchedAt }
-    : { placeId: null, matchStatus: 'none', fields: null, fetchedAt });
+    : { placeId: cacheResult.value?.placeId ?? null, matchStatus: 'none', fields: null, fetchedAt }, plan.retain));
   if (saved.state !== 'ok') return denied(503, 'CRM storage could not be read.');
   if (!found) return { status: 200, body: { ok: true, state: 'no_match' } };
   return { status: 200, body: { ok: true, state: 'matched', card: publicCard(accountId, found.card) } };
@@ -93,5 +97,5 @@ export async function handleDistributionMerge(ctx: CrmContext): Promise<CrmResul
   if (!auth.actorId) return denied(401, 'Sign in required.');
   const undone = await ctx.store.undoMerge(auth.brand, String(body.mergeId || ''), auth.actorId, new Date().toISOString());
   if (undone.state !== 'ok') return denied(400, 'That merge was not undone.');
-  return { status: 200, body: { ok: true, merge: undone.value.merge, refused: undone.value.refused } };
+  return { status: 200, body: { ok: true, merge: undone.value.merge, refused: undone.value.refused, reassigned: undone.value.reassigned } };
 }

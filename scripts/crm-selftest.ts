@@ -9,9 +9,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { assertDashboardTabs } from './crm-dashboard-tabs-selftest.ts';
-import { allowedPhotoUrl, collectCapped, fetchAllowedPhoto, imageType, lookupPlace, PHOTO_MAX_BYTES, PHOTO_MAX_HEIGHT_PX, PHOTO_MAX_WIDTH_PX, photoAddressAllowed, photoMediaUrl, pinnedPhotoRequest, PLACE_TTL_MS, placeCacheFresh, placeCardOnly, placeQuery, placeReadPlan, readPlacePhoto, sharePhotoLoad, type PhotoLookup, type PlaceCache } from '../src/lib/crm/places.ts';
+import { allowedPhotoUrl, cachedPhotoName, collectCapped, currentPhotoName, fetchAllowedPhoto, imageType, lookupPlace, PHOTO_MAX_BYTES, PHOTO_MAX_HEIGHT_PX, PHOTO_MAX_WIDTH_PX, photoAddressAllowed, photoMediaUrl, pinnedPhotoRequest, PLACE_TTL_MS, placeCacheFresh, placeCardOnly, placeQuery, placeReadPlan, readPlacePhoto, retainPlaceCache, sharePhotoLoad, shouldPurgePlaceDetails, storedPlaceCard, storesPlaceDetails, type PhotoLookup, type PlaceCache } from '../src/lib/crm/places.ts';
 import { browserLink } from '../src/lib/crm/placeLinks.ts';
 import { applyWonMerge, undoWonMerge, wonMergeOnSave, type LicenseWorld } from '../src/lib/crm/distributionMerge.ts';
+import { handleDistributionMerge, handleGooglePlace } from '../src/lib/crm/googlePlaceHandler.ts';
 import { isDispensaryAccount } from '../src/lib/crm/engine.ts';
 import { assertProductionForecast } from './crm-production-forecast-selftest.ts';
 import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, parseDate, parseMoney, skipRepeatedImportRows } from '../src/lib/crm/importer.ts';
@@ -1535,10 +1536,15 @@ assert(merged.clusters.length === 1 && members.length === 2 && members[0].latitu
 const freshAt = new Date(Date.now()).toISOString();
 const staleAt = new Date(Date.now() - PLACE_TTL_MS - 1000).toISOString();
 const matchedCache: PlaceCache = { placeId: 'places/test', matchStatus: 'matched', fields: { name: 'TEST ONLY Shop', rating: 4, reviewCount: 2, hours: [], phone: null, website: null, mapsUrl: 'https://maps.google.com', photoName: null, photoCredits: [] }, fetchedAt: freshAt };
-assert(placeReadPlan({ hasKey: false, query: '1 Test St, Buffalo, NY', cache: matchedCache, now: Date.now() }).action === 'not_connected', 'TEST ONLY: a missing Google key is not connected');
-assert(placeReadPlan({ hasKey: true, query: null, cache: null, now: Date.now() }).action === 'no_address', 'TEST ONLY: an account without a street has no Google match');
-assert(placeReadPlan({ hasKey: true, query: '1 Test St, Buffalo, NY', cache: null, now: Date.now() }).action === 'refresh', 'TEST ONLY: an empty cache asks for one Google refresh');
-assert(placeCacheFresh(freshAt, Date.now()) && placeCacheFresh(staleAt, Date.now()) === false && placeReadPlan({ hasKey: true, query: '1 Test St, Buffalo, NY', cache: matchedCache, now: Date.now() }).action === 'use_cache' && placeReadPlan({ hasKey: true, query: '1 Test St, Buffalo, NY', cache: { ...matchedCache, fetchedAt: staleAt }, now: Date.now() }).action === 'refresh', 'TEST ONLY: a Google cache lasts seven days and then refreshes');
+assert(placeReadPlan({ hasKey: false, query: '1 Test St, Buffalo, NY', cache: matchedCache, now: Date.now(), sells: true }).action === 'not_connected', 'TEST ONLY: a missing Google key is not connected');
+assert(placeReadPlan({ hasKey: true, query: null, cache: null, now: Date.now(), sells: true }).action === 'no_address', 'TEST ONLY: an account without a street has no Google match');
+const sellerRefresh = placeReadPlan({ hasKey: true, query: '1 Test St, Buffalo, NY', cache: null, now: Date.now(), sells: true });
+assert(sellerRefresh.action === 'refresh' && sellerRefresh.action === 'refresh' && sellerRefresh.retain === 'details', 'TEST ONLY: an empty cache asks for one Google refresh');
+const sellerFresh = placeReadPlan({ hasKey: true, query: '1 Test St, Buffalo, NY', cache: matchedCache, now: Date.now(), sells: true });
+const sellerStale = placeReadPlan({ hasKey: true, query: '1 Test St, Buffalo, NY', cache: { ...matchedCache, fetchedAt: staleAt }, now: Date.now(), sells: true });
+const prospectPlan = placeReadPlan({ hasKey: true, query: '1 Test St, Buffalo, NY', cache: matchedCache, now: Date.now(), sells: false });
+assert(placeCacheFresh(freshAt, Date.now()) && placeCacheFresh(staleAt, Date.now()) === false && sellerFresh.action === 'use_cache' && sellerStale.action === 'refresh' && sellerStale.retain === 'details', 'TEST ONLY: a Google cache lasts seven days and then refreshes');
+assert(storesPlaceDetails(['won']) && storesPlaceDetails(['proposal', 'won']) && storesPlaceDetails(['active']) === false && storesPlaceDetails(['prospect']) === false && storesPlaceDetails([]) === false && prospectPlan.action === 'refresh' && prospectPlan.retain === 'place_id' && retainPlaceCache(matchedCache, 'place_id').fields === null && retainPlaceCache(matchedCache, 'place_id').placeId === matchedCache.placeId && retainPlaceCache(matchedCache, 'details').fields?.name === 'TEST ONLY Shop' && storedPlaceCard({}) === null && storedPlaceCard({ name: null, photoName: null }) === null && shouldPurgePlaceDetails({ previousStage: 'won', nextStage: 'lost', remainingWon: false }) && shouldPurgePlaceDetails({ previousStage: 'won', nextStage: 'lost', remainingWon: true }) === false && shouldPurgePlaceDetails({ previousStage: 'proposal', nextStage: 'won', remainingWon: false }) === false, 'TEST ONLY: place details are stored only for a Won deal, and a prospect keeps the place id');
 assert(placeQuery({ street: ' 1 Test St ', city: 'Buffalo' }) === '1 Test St, Buffalo, NY' && placeQuery({ street: ' ', city: 'Buffalo' }) === null, 'TEST ONLY: the Google query uses the stored street');
 const calls: string[] = [];
 const placeHit = await lookupPlace('1 Test St, Buffalo, NY', 'server-key', async (input, init) => {
@@ -1656,7 +1662,7 @@ const cappedPush = bin.push(Buffer.from('ab')) && bin.push(Buffer.from('cd')) &&
 const cardUi = readFileSync('src/app/admin/crm/GooglePlaceCard.tsx', 'utf8');
 const placeStore = readFileSync('src/lib/crm/store.ts', 'utf8');
 const stripped = placeCardOnly({ name: 'TEST ONLY', rating: 4, reviewCount: 2, hours: ['Mon'], phone: null, website: null, mapsUrl: null, photoName: 'places/ChIJtest/photos/abc', photoCredits: [], photoBytes: 'aaaa', photoContentType: 'image/jpeg' } as PlaceCache['fields']);
-assert(jpeg?.contentType === 'image/jpeg' && jpeg.bytes.byteLength === 3 && photoCallsForImage.length === 2 && photoCallsForImage.every((url) => url.includes('searchText') === false) && htmlPhoto === null && hugePhoto === null && cappedPhoto === null && slowPhoto === null && svgPhoto === null && photoRoute.includes('authorizePlacePhoto') && photoRoute.includes('readPlaceCache') && photoRoute.includes('sharePhotoLoad') && photoRoute.includes('savePlace') === false && photoRoute.includes('photoBytes') === false && photoRoute.includes('lookupPlace') === false && photoRoute.includes('searchText') === false && photoRoute.includes('private, max-age=3600'), 'TEST ONLY: a photo view fetches the image, writes nothing, and stays under the byte cap');
+assert(jpeg?.contentType === 'image/jpeg' && jpeg.bytes.byteLength === 3 && photoCallsForImage.length === 2 && photoCallsForImage.every((url) => url.includes('searchText') === false) && htmlPhoto === null && hugePhoto === null && cappedPhoto === null && slowPhoto === null && svgPhoto === null && photoRoute.includes('authorizePlacePhoto') && photoRoute.includes('readPlaceCache') && photoRoute.includes('sharePhotoLoad') && photoRoute.includes('currentPhotoName') && photoRoute.includes('accountHasWonDeal') && photoRoute.includes('savePlace') === false && photoRoute.includes('photoBytes') === false && photoRoute.includes('lookupPlace') === false && photoRoute.includes('searchText') === false && photoRoute.includes('private, max-age=3600'), 'TEST ONLY: a photo view fetches the image, writes nothing, checks the place is current, and stays under the byte cap');
 assert(imageType('image/svg+xml') === null && imageType('image/bmp') === null && imageType('image/jpeg') === 'image/jpeg' && imageType('image/png') === 'image/png' && imageType('image/webp') === 'image/webp' && imageType('image/gif') === 'image/gif' && cappedPush && PHOTO_MAX_BYTES === 524288 && stripped?.photoName === 'places/ChIJtest/photos/abc' && stripped && !('photoBytes' in stripped) && !('photoContentType' in stripped) && placeStore.includes('photo_name:fields->photoName') && placeStore.includes('photoBytes') === false && cardUi.includes('h-auto max-h-48 w-auto max-w-full self-start object-contain'), 'TEST ONLY: the card read omits photo bytes, SVG is refused, and the cap is 512 KB');
 let sharedReads = 0;
 const sharedRead = () => new Promise<{ bytes: ArrayBuffer; contentType: string }>((resolve) => {
@@ -1716,6 +1722,55 @@ try {
 }
 assert(smallOk && cappedOk && photoAddressAllowed('3fff:1000::1') && photoAddressAllowed('5f01::1'), 'TEST ONLY: a pinned https request reads a small image and stops a stream past 512 KB');
 assert(browserLink('https://maps.google.com/a') === 'https://maps.google.com/a' && browserLink('http://shop.test') === 'http://shop.test/' && browserLink('javascript:alert(1)') === null && browserLink('data:text/html,hi') === null && browserLink('ftp://files.test') === null, 'TEST ONLY: a Google card link is only http or https');
+const photoCache: PlaceCache = { ...matchedCache, fields: { ...matchedCache.fields!, photoName: 'places/ChIJold/photos/old' } };
+const stalePhoto = { ...photoCache, fetchedAt: staleAt };
+let livePhotoHits = 0;
+const livePhotoName = await currentPhotoName({
+  sells: true,
+  cache: stalePhoto,
+  query: '1 Test St, Buffalo, NY',
+  now: Date.now(),
+  key: 'server-key',
+  fetchImpl: async (input) => {
+    livePhotoHits += 1;
+    const href = String(input);
+    assert(href.includes('searchText') === false && href.includes('/places/ChIJold') === false && href.endsWith('/places/places%2Ftest') === false, 'TEST ONLY: a stale photo does not reuse the stored photo name');
+    return new Response(JSON.stringify({ id: 'ChIJlive', displayName: { text: 'LIVE' }, photos: [{ name: 'places/ChIJlive/photos/new' }] }), { status: 200 });
+  },
+});
+const freshPhotoName = await currentPhotoName({ sells: true, cache: photoCache, query: '1 Test St, Buffalo, NY', now: Date.now(), key: 'server-key', fetchImpl: async () => { livePhotoHits += 1; return new Response('no', { status: 500 }); } });
+const missedPhotoName = await currentPhotoName({ sells: true, cache: stalePhoto, query: '1 Test St, Buffalo, NY', now: Date.now(), key: 'server-key', fetchImpl: async () => new Response('no', { status: 500 }) });
+const unsoldPhotoName = await currentPhotoName({ sells: false, cache: photoCache, query: '1 Test St, Buffalo, NY', now: Date.now(), key: 'server-key', fetchImpl: async () => new Response(JSON.stringify({ id: 'ChIJlive', photos: [{ name: 'places/ChIJlive/photos/new' }] }), { status: 200 }) });
+assert(cachedPhotoName({ sells: true, cache: photoCache, now: Date.now() }) === 'places/ChIJold/photos/old' && cachedPhotoName({ sells: true, cache: stalePhoto, now: Date.now() }) === null && cachedPhotoName({ sells: false, cache: photoCache, now: Date.now() }) === null && livePhotoName === 'places/ChIJlive/photos/new' && freshPhotoName === 'places/ChIJold/photos/old' && livePhotoHits === 1 && missedPhotoName === null && unsoldPhotoName === 'places/ChIJlive/photos/new', 'TEST ONLY: a photo uses a fresh Won cache and otherwise loads the current Google photo');
+const previousFetch = globalThis.fetch;
+const previousPlacesKey = process.env.GOOGLE_PLACES_API_KEY;
+const savedPlaces: PlaceCache[] = [];
+let placeSells = false;
+const sellingStore = {
+  readAccount: async () => ({ state: 'ok' as const, value: { accountType: 'adult_use_dispensary', street: '1 Test St', city: 'Buffalo', status: 'prospect' } as Account }),
+  accountHasWonDeal: async () => ({ state: 'ok' as const, value: placeSells }),
+  readPlaceCache: async () => ({ state: 'ok' as const, value: photoCache }),
+  savePlaceCache: async (_brand: 'cedargrowth', _accountId: string, cache: PlaceCache) => {
+    savedPlaces.push(cache);
+    return { state: 'ok' as const, value: cache };
+  },
+} as unknown as CrmStore;
+process.env.GOOGLE_PLACES_API_KEY = 'server-key';
+globalThis.fetch = (async () => new Response(JSON.stringify({ id: 'ChIJlive', displayName: { text: 'LIVE SHOP' }, rating: 5, photos: [{ name: 'places/ChIJlive/photos/new' }] }), { status: 200 })) as typeof fetch;
+try {
+  const prospectView = await handleGooglePlace({ actorId: 'sales-1', grants: salesGrant, request: crmReq('GET', '/api/admin/crm/places?brand=cedargrowth&accountId=00000000-0000-4000-8000-000000000031'), store: sellingStore });
+  placeSells = true;
+  const sellerView = await handleGooglePlace({ actorId: 'sales-1', grants: salesGrant, request: crmReq('GET', '/api/admin/crm/places?brand=cedargrowth&accountId=00000000-0000-4000-8000-000000000031'), store: sellingStore });
+  delete process.env.GOOGLE_PLACES_API_KEY;
+  const offlineView = await handleGooglePlace({ actorId: 'sales-1', grants: salesGrant, request: crmReq('GET', '/api/admin/crm/places?brand=cedargrowth&accountId=00000000-0000-4000-8000-000000000031'), store: sellingStore });
+  const prospectCard = prospectView.body.card as { name?: string } | undefined;
+  const sellerCard = sellerView.body.card as { name?: string } | undefined;
+  assert(prospectView.status === 200 && prospectView.body.state === 'matched' && prospectCard?.name === 'LIVE SHOP' && savedPlaces.length === 1 && savedPlaces[0]?.fields === null && savedPlaces[0]?.placeId === 'ChIJlive' && sellerView.status === 200 && sellerCard?.name === 'TEST ONLY Shop' && offlineView.body.state === 'not_connected', 'TEST ONLY: a prospect stores only the place id, a Won deal uses its cache, and no key stays not connected');
+} finally {
+  globalThis.fetch = previousFetch;
+  if (previousPlacesKey === undefined) delete process.env.GOOGLE_PLACES_API_KEY;
+  else process.env.GOOGLE_PLACES_API_KEY = previousPlacesKey;
+}
 const world: LicenseWorld = {
   accounts: [
     { id: 'won', brand: 'cedargrowth', accountType: 'adult_use_dispensary', licenseRef: ' OCM-123 ' },
@@ -1748,7 +1803,10 @@ const gone = undoWonMerge({ ...wonCreated.world, accounts: wonCreated.world.acco
 const moved = (id: string, rows = wonCreated.world.contacts) => rows.find((row) => row.id === id)?.accountId;
 assert(wonCreated.code === 'merged' && moved('from-dup') === 'won' && moved('on-won') === 'won' && moved('from-punct') === 'punct' && moved('from-blank') === 'blank' && moved('from-bond') === 'bond' && moved('from-dist') === 'dist' && moved('from-other') === 'other' && wonCreated.world.notes[0]?.accountId === 'dup' && wonCreated.world.merges[0]?.priors[0]?.priorAccountId === 'dup', 'TEST ONLY: the same license with different spacing and case moves that contact, and punctuation, a blank license, Bond, a distributor, and another account type stay put');
 assert(again.code === 'already' && again.world.merges.length === 1 && again.world.contacts.find((row) => row.id === 'from-dup')?.accountId === 'won', 'TEST ONLY: a second won on the same open merge does nothing');
-assert(undone.refused.length === 0 && undone.world.contacts.find((row) => row.id === 'from-dup')?.accountId === 'dup' && undone.world.merges[0]?.undoneAt === staleAt && undone.world.merges[0]?.undoneBy === 'gary@cedargrowthco.com', 'TEST ONLY: undo restores each prior account id');
+assert(undone.refused.length === 0 && undone.reassigned.length === 0 && undone.world.contacts.find((row) => row.id === 'from-dup')?.accountId === 'dup' && undone.world.merges[0]?.undoneAt === staleAt && undone.world.merges[0]?.undoneBy === 'gary@cedargrowthco.com', 'TEST ONLY: undo restores each prior account id');
+const movedAway = { ...wonCreated.world, contacts: wonCreated.world.contacts.map((row) => row.id === 'from-dup' ? { ...row, accountId: 'punct' } : row) };
+const kept = undoWonMerge(movedAway, wonCreated.world.merges[0]?.id || '', 'gary@cedargrowthco.com', staleAt);
+assert(kept.reassigned.join(',') === 'from-dup' && kept.refused.length === 0 && kept.world.contacts.find((row) => row.id === 'from-dup')?.accountId === 'punct' && kept.world.merges[0]?.reassignedIds.join(',') === 'from-dup' && kept.world.merges[0]?.undoneAt === staleAt, 'TEST ONLY: undo skips a contact that was reassigned and records it on the audit');
 assert(notWon.code === 'not_won' && notWon.world.merges.length === 0 && distributor.code === 'skipped' && distributor.world.merges.length === 0 && blankWon.code === 'merged' && blankWon.world.merges[0]?.contactIds.length === 0 && blankWon.world.contacts.every((row) => row.accountId !== 'won' || row.id === 'on-won'), 'TEST ONLY: a lead does not merge, a distributor does not merge, and a blank license records that nothing moved');
 assert(gone.refused.join(',') === 'from-dup' && gone.world.contacts.find((row) => row.id === 'from-dup')?.accountId === 'won' && gone.world.merges[0]?.undoneAt === staleAt, 'TEST ONLY: undo refuses a contact whose prior account is gone and reports it');
 const storeSrc = readFileSync('src/lib/crm/store.ts', 'utf8');
@@ -1758,6 +1816,18 @@ const updateOpp = storeSrc.slice(storeSrc.indexOf('async updateOpportunity'), st
 const orderWon = storeSrc.slice(storeSrc.indexOf('async markDealWonFromOrder'), storeSrc.indexOf('async listStageEvents'));
 assert(createOpp.includes('wonMergeOnSave') && createOpp.includes('mergeWonContacts') && updateOpp.includes('previousStage') && updateOpp.includes('wonMergeOnSave') && orderWon.includes("stage: 'won'") && storeSrc.includes("console.error('crm won merge failed'") && storeSrc.includes('mergeFailed') && storeSrc.includes('crm_merge_won_distribution') && wonMergeOnSave({ brand: 'cedargrowth', creating: true, nextStage: 'won', previousStage: null }) && wonMergeOnSave({ brand: 'cedargrowth', creating: false, nextStage: 'won', previousStage: 'proposal' }) && wonMergeOnSave({ brand: 'cedargrowth', creating: false, nextStage: 'won', previousStage: 'won' }) === false && wonMergeOnSave({ brand: 'bond', creating: true, nextStage: 'won', previousStage: null }) === false && isDispensaryAccount('adult_use_dispensary') && isDispensaryAccount('microbusiness') && isDispensaryAccount('registered_organization') && isDispensaryAccount('distributor') === false, 'TEST ONLY: a new Won merges, a failed merge is reported, and resending Won after Undo does not merge again');
 assert(mergeSql.includes("lower(btrim(a.license_ref)) = v_key") && mergeSql.includes("v_key <> ''") && mergeSql.includes("a.brand = 'cedargrowth'") && mergeSql.includes("a.account_type in ('adult_use_dispensary', 'microbusiness', 'registered_organization')") && mergeSql.includes('for update') && mergeSql.includes('crm_notes') === false && mergeSql.includes('crm_tasks') === false && mergeSql.includes('crm_distributor_orders') === false, 'TEST ONLY: the migration matches a dispensary source license by trim and lowercase in one transaction and does not move notes, tasks, or orders');
+const mergeFn = mergeSql.slice(mergeSql.indexOf('function public.crm_merge_won_distribution'), mergeSql.indexOf('function public.crm_undo_distribution_merge'));
+const undoFn = mergeSql.slice(mergeSql.indexOf('function public.crm_undo_distribution_merge'), mergeSql.indexOf('comment on function public.crm_undo_distribution_merge'));
+const undoHandler = readFileSync('src/lib/crm/googlePlaceHandler.ts', 'utf8');
+const undoBody = undoHandler.slice(undoHandler.indexOf('export async function handleDistributionMerge'));
+assert(mergeFn.includes('set search_path = pg_catalog') && mergeFn.includes('set search_path = public') === false && undoFn.includes('set search_path = pg_catalog') && undoFn.includes('v_current is distinct from v_row.account_id') && undoFn.includes('reassigned_ids = v_reassigned') && mergeSql.includes('revoke delete, truncate, references, trigger on table public.crm_google_places from service_role') && mergeSql.includes('revoke update, delete, truncate, references, trigger on table public.crm_distribution_merges from service_role') && mergeSql.includes('grant select, insert on table public.crm_distribution_merges to service_role') && mergeSql.includes('grant update on table public.crm_distribution_merges') === false && mergeSql.includes('merge audit is append-only') && mergeSql.includes('grant execute on function public.crm_undo_distribution_merge(uuid, text, timestamptz) to service_role') && undoBody.includes('canExport') === false && undoBody.includes('reassigned: undone.value.reassigned') && updateOpp.includes('purgePlaceDetails') && updateOpp.includes('shouldPurgePlaceDetails'), 'TEST ONLY: undo skips a reassigned contact, the merge audit is append-only, and definer functions pin search_path');
+const salesUndo = await handleDistributionMerge({
+  actorId: 'sales-1',
+  grants: salesGrant,
+  request: crmReq('POST', '/api/admin/crm/distribution-merge', { brand: 'cedargrowth', mergeId: '00000000-0000-4000-8000-000000000010' }),
+  store: { undoMerge: async () => ({ state: 'ok' as const, value: { merge: { id: '00000000-0000-4000-8000-000000000010', opportunityId: 'deal', accountId: 'won', actor: 'sales-1', contactIds: ['from-dup'], priors: [{ contactId: 'from-dup', priorAccountId: 'dup' }], createdAt: freshAt, undoneAt: freshAt, undoneBy: 'sales-1', reassignedIds: ['from-dup'] }, refused: [] as string[], reassigned: ['from-dup'] } }) } as unknown as CrmStore,
+});
+assert(salesUndo.status === 200 && (salesUndo.body.reassigned as string[]).join(',') === 'from-dup', 'TEST ONLY: any desk staff can undo, and a reassigned contact is reported');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);
 
