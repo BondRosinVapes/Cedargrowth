@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { authorizePlacePhoto } from '@/lib/crm/engine';
-import { dnsPhotoLookup, photoForView, pinnedPhotoRequest, readPlacePhoto } from '@/lib/crm/places';
+import { dnsPhotoLookup, photoBytesAbsent, photoForView, pinnedPhotoRequest, readPlacePhoto, sharePhotoLoad } from '@/lib/crm/places';
 import { resolveDeskAccess } from '@/lib/crm/salesSession';
 import { getCrmStore } from '@/lib/crm/store';
 
@@ -24,16 +24,21 @@ export async function GET(request: Request) {
   const key = process.env.GOOGLE_PLACES_API_KEY?.trim() || '';
   if (!key || !accountId) return new NextResponse(null, { status: 404 });
   const store = getCrmStore();
-  const cache = await store.readPlaceCache(auth.brand, accountId);
-  if (cache.state !== 'ok') return new NextResponse(null, { status: 404 });
-  const photo = await photoForView({
-    cache: cache.value,
-    now: Date.now(),
-    key,
-    read: (photoName, apiKey) => readPlacePhoto(photoName, apiKey, { lookup: dnsPhotoLookup, request: pinnedPhotoRequest }),
+  const photo = await sharePhotoLoad(`${auth.brand}:${accountId}`, async () => {
+    const cache = await store.readPlaceCache(auth.brand, accountId);
+    if (cache.state !== 'ok') return null;
+    const loaded = await photoForView({
+      cache: cache.value,
+      now: Date.now(),
+      key,
+      read: (photoName, apiKey) => readPlacePhoto(photoName, apiKey, { lookup: dnsPhotoLookup, request: pinnedPhotoRequest }),
+    });
+    if (loaded?.nextFields && cache.value && photoBytesAbsent(cache.value.fields)) {
+      await store.savePlacePhotoIfAbsent(auth.brand, accountId, loaded.nextFields);
+    }
+    return loaded;
   });
   if (!photo) return new NextResponse(null, { status: 404 });
-  if (photo.nextFields && cache.value) await store.savePlaceCache(auth.brand, accountId, { ...cache.value, fields: photo.nextFields });
   return new NextResponse(photo.bytes, {
     status: 200,
     headers: {

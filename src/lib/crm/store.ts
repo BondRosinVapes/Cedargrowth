@@ -379,6 +379,7 @@ export interface CrmStore {
   readAccount(brand: CrmBrand, id: string): Promise<StoreResult<Account | null>>;
   readPlaceCache(brand: CrmBrand, accountId: string): Promise<StoreResult<PlaceCache | null>>;
   savePlaceCache(brand: CrmBrand, accountId: string, cache: PlaceCache): Promise<StoreResult<PlaceCache>>;
+  savePlacePhotoIfAbsent(brand: CrmBrand, accountId: string, fields: PlaceCard): Promise<StoreResult<boolean>>;
   readOpenMerge(brand: CrmBrand, opportunityId: string): Promise<StoreResult<MergeRow | null>>;
   readAccountMerge(brand: CrmBrand, accountId: string): Promise<StoreResult<MergeRow | null>>;
   insertMerge(brand: CrmBrand, row: Omit<MergeRow, 'id'>): Promise<StoreResult<MergeRow>>;
@@ -1058,6 +1059,14 @@ class SupabaseCrmStore implements CrmStore {
     if (failed) return { state: failed };
     if (error) return { state: 'unavailable' };
     return { state: 'ok', value: cache };
+  }
+
+  async savePlacePhotoIfAbsent(brand: CrmBrand, accountId: string, fields: PlaceCard): Promise<StoreResult<boolean>> {
+    const { data, error } = await this.db.from('crm_google_places').update({ fields }).eq('account_id', accountId).eq('brand', brand).or('fields->>photoBytes.is.null,fields->>photoBytes.eq.').select('account_id');
+    const failed = classify(error);
+    if (failed) return { state: failed };
+    if (error) return { state: 'unavailable' };
+    return { state: 'ok', value: Array.isArray(data) && data.length > 0 };
   }
 
   async readOpenMerge(brand: CrmBrand, opportunityId: string): Promise<StoreResult<MergeRow | null>> {

@@ -124,7 +124,7 @@ export function allowedPhotoUrl(raw: string): string | null {
 }
 
 export type PhotoLookup = (host: string) => Promise<{ address: string; family: number }[]>;
-export type PinnedRequest = (url: string, address: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
+export type PinnedRequest = (url: string, address: string, init?: { headers?: Record<string, string>; signal?: AbortSignal; ca?: string }) => Promise<Response>;
 
 export const PHOTO_TIMEOUT_MS = 8000;
 export const PHOTO_MAX_BYTES = 2_000_000;
@@ -212,6 +212,23 @@ export function decodePhoto(value: string): Uint8Array | null {
   const bytes = Buffer.from(value, 'base64');
   if (!bytes.length || bytes.length > PHOTO_MAX_BYTES) return null;
   return new Uint8Array(bytes);
+}
+
+export function photoBytesAbsent(fields: PlaceCard | null | undefined): boolean {
+  const raw = fields?.photoBytes;
+  return typeof raw !== 'string' || raw.length === 0;
+}
+
+const photoFlights = new Map<string, Promise<unknown>>();
+
+export function sharePhotoLoad<T>(accountId: string, load: () => Promise<T>): Promise<T> {
+  const current = photoFlights.get(accountId) as Promise<T> | undefined;
+  if (current) return current;
+  const flight = load().finally(() => {
+    if (photoFlights.get(accountId) === flight) photoFlights.delete(accountId);
+  });
+  photoFlights.set(accountId, flight);
+  return flight;
 }
 
 export function freshPhoto(cache: PlaceCache | null, now: number): { bytes: Uint8Array; contentType: string } | null {
@@ -302,30 +319,37 @@ export const pinnedPhotoRequest: PinnedRequest = (url, address, init) => {
   const target = new URL(url);
   const family = address.includes(':') ? 6 : 4;
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
     const req = https.request({
       protocol: 'https:',
       hostname: target.hostname,
       servername: target.hostname,
+      port: target.port || '443',
       path: `${target.pathname}${target.search}`,
       method: 'GET',
       headers: init?.headers,
       signal: init?.signal,
-      lookup: (_hostname, _options, callback) => {
+      ca: init?.ca,
+      lookup: (_hostname, options, callback) => {
+        const all = typeof options === 'object' && options !== null && 'all' in options && Boolean((options as { all?: boolean }).all);
+        if (all) {
+          callback(null, [{ address, family }] as unknown as string);
+          return;
+        }
         callback(null, address, family);
       },
     }, (res) => {
       const capped = collectCapped(PHOTO_MAX_BYTES);
-      let settled = false;
-      const fail = (error: Error) => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      };
       res.on('data', (chunk: Buffer) => {
         if (capped.push(chunk)) return;
+        fail(new Error('photo too large'));
         res.destroy();
         req.destroy();
-        fail(new Error('photo too large'));
       });
       res.on('end', () => {
         if (settled) return;
@@ -339,7 +363,11 @@ export const pinnedPhotoRequest: PinnedRequest = (url, address, init) => {
       });
       res.on('error', fail);
     });
-    req.on('error', reject);
+    req.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
     req.end();
   });
 };

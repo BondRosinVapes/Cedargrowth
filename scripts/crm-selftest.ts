@@ -2,10 +2,14 @@
 // These fixtures are not account findings and are not written to storage.
 // Run: node --experimental-strip-types scripts/crm-selftest.ts
 
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { createServer } from 'node:https';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { assertDashboardTabs } from './crm-dashboard-tabs-selftest.ts';
-import { allowedPhotoUrl, attachPhoto, collectCapped, fetchAllowedPhoto, freshPhoto, imageType, lookupPlace, photoAddressAllowed, photoForView, photoMediaUrl, PLACE_TTL_MS, placeCacheFresh, placeQuery, placeReadPlan, readPlacePhoto, type PhotoLookup, type PlaceCache, type PlaceCard } from '../src/lib/crm/places.ts';
+import { allowedPhotoUrl, attachPhoto, collectCapped, fetchAllowedPhoto, freshPhoto, imageType, lookupPlace, PHOTO_MAX_BYTES, photoAddressAllowed, photoBytesAbsent, photoForView, photoMediaUrl, pinnedPhotoRequest, PLACE_TTL_MS, placeCacheFresh, placeQuery, placeReadPlan, readPlacePhoto, sharePhotoLoad, type PhotoLookup, type PlaceCache, type PlaceCard } from '../src/lib/crm/places.ts';
 import { browserLink } from '../src/lib/crm/placeLinks.ts';
 import { applyWonMerge, undoWonMerge, wonMergeOnSave, type LicenseWorld } from '../src/lib/crm/distributionMerge.ts';
 import { isDispensaryAccount } from '../src/lib/crm/engine.ts';
@@ -1660,7 +1664,68 @@ const staleView = await photoForView({ cache: { ...freshCache, fields: firstView
 const svgStored = attachPhoto(photoCard, Uint8Array.from([1]), 'image/svg+xml');
 const cardUi = readFileSync('src/app/admin/crm/GooglePlaceCard.tsx', 'utf8');
 assert(jpeg?.contentType === 'image/jpeg' && jpeg.bytes.byteLength === 3 && photoCallsForImage.length === 2 && photoCallsForImage.every((url) => url.includes('searchText') === false) && htmlPhoto === null && hugePhoto === null && cappedPhoto === null && slowPhoto === null && svgPhoto === null && photoRoute.includes('authorizePlacePhoto') && photoRoute.includes('readPlaceCache') && photoRoute.includes('photoForView') && photoRoute.includes('lookupPlace') === false && photoRoute.includes('searchText') === false, 'TEST ONLY: a photo view uses the cached name, times out, stays under the byte cap, and accepts only an image');
-assert(imageType('image/svg+xml') === null && imageType('image/bmp') === null && imageType('image/jpeg') === 'image/jpeg' && imageType('image/png') === 'image/png' && imageType('image/webp') === 'image/webp' && imageType('image/gif') === 'image/gif' && cappedPush && photoReads === 1 && firstView?.nextFields?.photoContentType === 'image/jpeg' && secondView?.nextFields === null && secondView?.bytes.length === 3 && freshPhoto(secondView && firstView?.nextFields ? { ...freshCache, fields: firstView.nextFields } : null, photoNow)?.contentType === 'image/jpeg' && staleView === null && svgStored === null && cardUi.includes('h-auto max-h-48 w-auto max-w-full object-contain') && cardUi.includes('max-h-48 w-full') === false, 'TEST ONLY: a fresh place photo is served from the row with no second Google read, SVG is refused, and the stream stops at the byte cap');
+assert(imageType('image/svg+xml') === null && imageType('image/bmp') === null && imageType('image/jpeg') === 'image/jpeg' && imageType('image/png') === 'image/png' && imageType('image/webp') === 'image/webp' && imageType('image/gif') === 'image/gif' && cappedPush && photoReads === 1 && firstView?.nextFields?.photoContentType === 'image/jpeg' && secondView?.nextFields === null && secondView?.bytes.length === 3 && freshPhoto(secondView && firstView?.nextFields ? { ...freshCache, fields: firstView.nextFields } : null, photoNow)?.contentType === 'image/jpeg' && staleView === null && svgStored === null && cardUi.includes('h-auto max-h-48 w-auto max-w-full self-start object-contain') && cardUi.includes('max-h-48 w-full') === false, 'TEST ONLY: a fresh place photo is served from the row with no second Google read, SVG is refused, and the stream stops at the byte cap');
+let sharedReads = 0;
+const sharedRead = () => new Promise<{ bytes: ArrayBuffer; contentType: string }>((resolve) => {
+  sharedReads += 1;
+  setTimeout(() => resolve({ bytes: Uint8Array.from([4, 5]).buffer, contentType: 'image/jpeg' }), 30);
+});
+const [leftPhoto, rightPhoto] = await Promise.all([
+  sharePhotoLoad('test-only-account', () => photoForView({ cache: freshCache, now: photoNow, key: 'k', read: sharedRead })),
+  sharePhotoLoad('test-only-account', () => photoForView({ cache: freshCache, now: photoNow, key: 'k', read: sharedRead })),
+]);
+let storedFields: PlaceCard | null = photoCard;
+const firstStore = photoBytesAbsent(storedFields) && !!leftPhoto?.nextFields;
+if (firstStore && leftPhoto?.nextFields) storedFields = leftPhoto.nextFields;
+const secondStore = photoBytesAbsent(storedFields);
+const placeStore = readFileSync('src/lib/crm/store.ts', 'utf8');
+assert(sharedReads === 1 && leftPhoto?.bytes.length === 2 && rightPhoto?.bytes.length === 2 && firstStore && secondStore === false && placeStore.includes("fields->>photoBytes.is.null") && photoRoute.includes('sharePhotoLoad') && photoRoute.includes('savePlacePhotoIfAbsent'), 'TEST ONLY: two first photo views share one Google read and only the empty row is stored');
+const tlsDir = mkdtempSync(join(tmpdir(), 'cg-photo-tls-'));
+execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-keyout', join(tlsDir, 'key.pem'), '-out', join(tlsDir, 'cert.pem'), '-days', '1', '-nodes', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
+const tlsKey = readFileSync(join(tlsDir, 'key.pem'));
+const tlsCert = readFileSync(join(tlsDir, 'cert.pem'));
+const tlsServer = createServer({ key: tlsKey, cert: tlsCert }, (req, res) => {
+  res.on('error', () => undefined);
+  res.setHeader('content-type', 'image/jpeg');
+  if (req.url === '/small') {
+    res.end(Buffer.from([1, 2, 3, 4]));
+    return;
+  }
+  const chunk = Buffer.alloc(64 * 1024, 7);
+  let sent = 0;
+  const goal = PHOTO_MAX_BYTES + 1;
+  const write = () => {
+    if (res.destroyed) return;
+    while (sent < goal) {
+      const size = Math.min(chunk.length, goal - sent);
+      if (!res.write(chunk.subarray(0, size))) {
+        sent += size;
+        res.once('drain', write);
+        return;
+      }
+      sent += size;
+    }
+    res.end();
+  };
+  write();
+});
+await new Promise<void>((resolve) => tlsServer.listen(0, '127.0.0.1', () => resolve()));
+const tlsPort = (tlsServer.address() as { port: number }).port;
+let smallOk = false;
+let cappedOk = false;
+try {
+  const small = await pinnedPhotoRequest(`https://127.0.0.1:${tlsPort}/small`, '127.0.0.1', { ca: tlsCert.toString() });
+  const smallBytes = new Uint8Array(await small.arrayBuffer());
+  smallOk = small.status === 200 && smallBytes.length === 4 && smallBytes[0] === 1;
+  try {
+    await pinnedPhotoRequest(`https://127.0.0.1:${tlsPort}/big`, '127.0.0.1', { ca: tlsCert.toString() });
+  } catch (error) {
+    cappedOk = error instanceof Error && error.message === 'photo too large';
+  }
+} finally {
+  tlsServer.close();
+}
+assert(smallOk && cappedOk, 'TEST ONLY: a pinned https request reads a small image and stops a stream past 2 MB');
 assert(browserLink('https://maps.google.com/a') === 'https://maps.google.com/a' && browserLink('http://shop.test') === 'http://shop.test/' && browserLink('javascript:alert(1)') === null && browserLink('data:text/html,hi') === null && browserLink('ftp://files.test') === null, 'TEST ONLY: a Google card link is only http or https');
 const world: LicenseWorld = {
   accounts: [
