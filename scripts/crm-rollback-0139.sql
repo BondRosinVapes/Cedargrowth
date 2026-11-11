@@ -2,10 +2,13 @@
 -- Review it, then the only supported invocation is:
 --   psql --single-transaction -v ON_ERROR_STOP=1 -f scripts/crm-rollback-0139.sql
 -- Do not run this file with autocommit. This repository does not run it.
--- It restores crm_private.guard_account to the 0135 body.
+-- It restores crm_private.guard_account to the 0138 body, including source_event.
+-- It does not drop source_event. That column belongs to 0138.
 
+drop function if exists public.crm_bond_request_handoff_row(uuid);
 drop function if exists public.crm_bond_request_purge_scheduled();
 drop function if exists public.crm_bond_request_admin_view(text);
+drop function if exists public.crm_bond_request_store_list(text);
 drop function if exists public.crm_bond_request_store_list(text, text, double precision, double precision);
 drop function if exists public.crm_purge_bond_request_handoffs(timestamptz);
 drop function if exists public.crm_mark_bond_request_handoff(uuid, text, text, text, text, text);
@@ -56,7 +59,8 @@ begin
        and new.longitude is not distinct from old.longitude
        and new.geocode_source is not distinct from old.geocode_source
        and new.geocode_match is not distinct from old.geocode_match
-       and new.geocoded_at is not distinct from old.geocoded_at then
+       and new.geocoded_at is not distinct from old.geocoded_at
+       and new.source_event is not distinct from old.source_event then
       return old;
     end if;
     new.updated_at := now();

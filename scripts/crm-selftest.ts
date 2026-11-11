@@ -119,6 +119,7 @@ import {
 } from '../src/lib/crm/handlers.ts';
 import type { CrmStore, Account, Contact, Opportunity, Task, Note, Activity } from '../src/lib/crm/store.ts';
 import { handleRequestContactEmail } from '../src/lib/crm/handlers.ts';
+import { handoffDeps } from '../src/lib/crm/handoffDeps.ts';
 import {
   ALERT_KEYS,
   HANDOFF_CAP,
@@ -2412,8 +2413,7 @@ for (let n = 0; n < HANDOFF_CAP; n += 1) {
   await handleBondRequestHttp(handoffRequest(handoffBody(100 + n, quietShop.id), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv, provider: handoffProvider() });
 }
 const capped = await handleBondRequestHttp(handoffRequest(handoffBody(200, quietShop.id, { member_first_name: 'Hidden', member_contact: 'hidden@member.test' }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
-const handoffStores = storeList(handoffAccounts, 'vape-1g', 'name', null);
-const distance = storeList(handoffAccounts, 'vape-1g', 'distance', { latitude: 42.9, longitude: -78.8 });
+const handoffStores = storeList(handoffAccounts, 'vape-1g');
 const adminRows = adminHandoffRows(handoffBook, 'owner');
 const salesRows = adminHandoffRows(handoffBook, 'salesperson');
 const emailShop = handoffShop(handoffId(5), { requestContactEmail: null });
@@ -2474,10 +2474,13 @@ assert(handoffSent.status === 200 && handoffSent.body?.status === 'sent' && send
 assert(handoffErased.body && Object.keys(handoffErased.body).join(',') === 'status' && handoffErased.body.status === 'erased' && sentRow?.memberFirstName === null && sentRow?.bondRequestId === null, 'erase clears the consumer fields and returns status only');
 assert(statusOnly.body && Object.keys(statusOnly.body).join(',') === 'status', 'status returns status only');
 assert(capped.body?.result === 'rejected:rate' && JSON.stringify(capped.body).includes('Hidden') === false && JSON.stringify(capped.body).includes('hidden@member.test') === false && handoffAlert && Object.keys(handoffAlert).sort().join(',') === [...ALERT_KEYS].sort().join(',') && alertRecipientAllowed(undefined, ['shop@request.test']) === false && alertRecipientAllowed('shop@request.test', ['shop@request.test']) === false, 'the 51st handoff is rejected without an echo and the alert is not sent to a dispensary');
-assert(handoffStores.length === 3 && handoffStores.map((row) => row.display_name).join('|') === 'TEST ONLY Far Shop|TEST ONLY Quiet Shop|TEST ONLY Request Shop' && handoffStores.every((row) => Object.keys(row).sort().join(',') === [...STORE_LIST_KEYS].sort().join(',')) && distance[0].display_name === 'TEST ONLY Request Shop' && JSON.stringify(handoffStores).includes('featured') === false, 'E1 the store list has no placement field and sorts by name or by distance');
-const picker = await handleBondRequestHttp(new Request('https://cedargrowth.vercel.app/api/intake/bond-request-stores?sku=vape-1g&order=distance&latitude=42.9&longitude=-78.8', { headers: { authorization: 'Bearer handoff-secret' } }), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv, kind: 'stores' });
+assert(handoffStores.length === 3 && handoffStores.map((row) => row.display_name).join('|') === 'TEST ONLY Far Shop|TEST ONLY Quiet Shop|TEST ONLY Request Shop' && handoffStores.every((row) => Object.keys(row).sort().join(',') === [...STORE_LIST_KEYS].sort().join(',')) && JSON.stringify(handoffStores).includes('featured') === false, 'E1 the store list has no placement field and sorts by name');
+const pickerUrl = 'https://cedargrowth.vercel.app/api/intake/bond-request-stores?sku=vape-1g';
+const picker = await handleBondRequestHttp(new Request(pickerUrl, { headers: { authorization: 'Bearer handoff-secret' } }), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv, kind: 'stores' });
 const pickerRows = (picker.body?.stores || []) as { id: string; display_name: string }[];
-assert(picker.status === 200 && pickerRows.length === 3 && pickerRows.every((row) => row.id !== blockedShop.id && row.display_name !== blockedShop.displayName) && distance.every((row) => row.id !== blockedShop.id) && handoffStores.every((row) => row.id !== blockedShop.id) && handoffBlocked.body?.result === 'rejected:dispensary', 'T1 a do_not_contact store is left out of the store list and a create naming it is rejected:dispensary');
+const storeBranch = readFileSync('src/lib/crm/requestHandoff.ts', 'utf8');
+const storeSlice = storeBranch.slice(storeBranch.indexOf("kind === 'stores'"), storeBranch.indexOf("kind === 'status'"));
+assert(picker.status === 200 && pickerUrl.includes('latitude') === false && storeSlice.includes('latitude') === false && pickerRows.length === 3 && pickerRows.map((row) => row.display_name).join('|') === 'TEST ONLY Far Shop|TEST ONLY Quiet Shop|TEST ONLY Request Shop' && pickerRows.every((row) => row.id !== blockedShop.id) && handoffStores.every((row) => row.id !== blockedShop.id) && handoffBlocked.body?.result === 'rejected:dispensary', 'T1 a do_not_contact store is left out of the store list and a create naming it is rejected:dispensary');
 let raceEntered = 0;
 let raceRelease: () => void = () => {};
 const raceGate = new Promise<void>((resolve) => { raceRelease = resolve; });
@@ -2500,6 +2503,34 @@ const raceRow = handoffBook.rows.find((row) => row.handoffId === handoffId(401))
 const raceAccepted = raceResults.filter((row) => row.body?.result === 'accepted');
 const raceDuplicate = raceResults.filter((row) => row.body?.result === 'duplicate');
 assert(raceAccepted.length === 1 && raceDuplicate.length === 5 && handoffBook.rows.filter((row) => row.handoffId === handoffId(401)).length === 1 && raceProvider.calls.length === 1 && raceEntered === 1 && raceDuplicate.every((row) => row.body?.status === raceRow?.status && row.body?.status === raceAccepted[0].body?.status), 'T2 replaying one handoff_id, including concurrent replays, keeps one row, sends once, and returns duplicate with the original status');
+const flagOffEnv = { CG_BOND_REQUEST_HANDOFF_SECRET: 'handoff-secret' };
+const heldOpen = await handleBondRequestHttp(handoffRequest(handoffBody(420, sendShop.id), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv, provider: handoffProvider() });
+const statusOff = await handleBondRequestHttp(new Request(`https://cedargrowth.vercel.app/api/intake/bond-request-handoff/${handoffId(420)}`, { headers: { authorization: 'Bearer handoff-secret' } }), handoffDepsLocal, { nowMs: handoffNow, env: flagOffEnv, kind: 'status', handoffId: handoffId(420) });
+const eraseOffProvider = handoffProvider();
+const eraseOff = await handleBondRequestHttp(new Request(`https://cedargrowth.vercel.app/api/intake/bond-request-handoff/${handoffId(420)}/erase`, { method: 'POST', headers: { authorization: 'Bearer handoff-secret' } }), handoffDepsLocal, { nowMs: handoffNow, env: flagOffEnv, provider: eraseOffProvider, kind: 'erase', handoffId: handoffId(420) });
+const heldRow = handoffBook.rows.find((row) => row.handoffId === handoffId(420));
+const skippedSend = handoffBook.sends.find((row) => row.handoffId === handoffId(420) && row.template === 'B');
+assert(heldOpen.body?.status === 'sent' && statusOff.status === 200 && statusOff.body?.status === 'sent' && eraseOff.status === 200 && eraseOff.body?.status === 'erased' && eraseOffProvider.calls.length === 0 && skippedSend?.status === 'failed:no_sender' && heldRow?.status === 'erased' && heldRow?.memberFirstName === null, 'erase and status work while sending is off, and a withdrawal records that no email was sent');
+const persistedId = handoffId(421);
+const withdrawalMarks: Record<string, unknown>[] = [];
+const productionDb = {
+  rpc: async (fn: string, args?: Record<string, unknown>) => {
+    if (fn === 'crm_bond_request_purge_scheduled') return { data: true };
+    if (fn === 'crm_erase_bond_request_handoff') return { data: { status: 'erased', withdrawal: true } };
+    if (fn === 'crm_bond_request_handoff_row') return { data: { handoff_id: persistedId, dispensary_account_id: sendShop.id, items: [{ sku: 'vape-1g', qty: 1 }], visit_preference: null, received_at: '2026-11-11T15:00:00.000Z', submitted_at: '2026-11-11T15:00:00.000Z', status: 'erased', source: 'bond-haus', source_event: null } };
+    if (fn === 'crm_mark_bond_request_handoff') { withdrawalMarks.push(args || {}); return { data: { ok: true } }; }
+    return { data: null };
+  },
+  from: (table: string) => {
+    const data = table === 'crm_accounts' ? [{ id: sendShop.id, brand: 'cedargrowth', display_name: sendShop.displayName, city: 'Buffalo', latitude: 42.89, longitude: -78.87, account_type: 'adult_use_dispensary', request_contact_email: 'shop@request.test', bond_carried_skus: ['vape-1g'], request_opt_out: false }] : [];
+    const limit = async () => ({ data });
+    return { select: () => ({ eq: () => ({ eq: () => ({ limit }), limit }) }) };
+  },
+};
+const productionDeps = handoffDeps(productionDb);
+const productionProvider = handoffProvider();
+const productionErase = await handleBondRequestHttp(new Request(`https://cedargrowth.vercel.app/api/intake/bond-request-handoff/${persistedId}/erase`, { method: 'POST', headers: { authorization: 'Bearer handoff-secret' } }), productionDeps, { nowMs: handoffNow, env: handoffEnv, provider: productionProvider, kind: 'erase', handoffId: persistedId });
+assert(productionDeps.book.rows.length === 0 && productionErase.body?.status === 'erased' && productionProvider.calls.length === 1 && String(productionProvider.calls[0].subject).includes('withdrawn') && withdrawalMarks.some((row) => row.p_template === 'B' && row.p_status === 'sent'), 'template B is sent from the persisted row through the production adapter');
 assert(adminRows !== null && adminRows.length > 0 && JSON.stringify(adminRows).includes('ada@member.test') === false && salesRows === null, 'E4 the 12 month row is readable only through the admin and owner view');
 assert(salesEmail.ok === false && adminEmail.ok === true && emailShop.requestContactEmail === 'buyer@shop.test' && microEmail.ok === false, 'only an owner or administrator can set request contact email, and only on an adult-use dispensary');
 assert(stopOk.ok === true && stopOk.onTime === true && stopAccount.requestOptOut === true && stopContacts[0].preference === 'do_not_contact' && handoffBook.audits.some((row) => row.status === 'request_stop') && stopLate.ok === false && businessDaysBetween('2026-11-06T15:00:00Z', '2026-11-10T15:00:00Z') === 2, 'E3 a stop reply becomes do_not_contact within 2 business days with an audit row');

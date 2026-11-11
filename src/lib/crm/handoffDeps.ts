@@ -2,19 +2,30 @@
 // definer functions. This module does not log bodies or secrets.
 
 import { getSupabaseServerClient } from '@/lib/supabase';
-import { emptyHandoffBook, type AccountView, type HandoffDeps, type HandoffStatus, type SendLogRow } from './requestHandoff';
+import { emptyHandoffBook, SHARE_CONSENT_VERSION, type AccountView, type HandoffDeps, type HandoffRow, type HandoffStatus, type SendLogRow, type VisitPreference } from './requestHandoff';
 
-export function handoffDeps(): HandoffDeps {
+type HandoffDb = {
+  rpc: (fn: string, args?: Record<string, unknown>) => PromiseLike<{ data: unknown }>;
+  from: (table: string) => {
+    select: (columns: string) => {
+      eq: (column: string, value: string) => {
+        eq: (column: string, value: string) => { limit: (count: number) => PromiseLike<{ data: unknown[] | null }> };
+        limit: (count: number) => PromiseLike<{ data: unknown[] | null }>;
+      };
+    };
+  };
+};
+
+export function handoffDeps(db: HandoffDb | null = getSupabaseServerClient() as HandoffDb | null): HandoffDeps {
   const book = emptyHandoffBook();
-  const db = getSupabaseServerClient();
   return {
     book,
     async accountById(id: string) {
-      const rows = await loadAccounts(id);
+      const rows = await loadAccounts(db, id);
       return rows[0] || null;
     },
     async accounts() {
-      return loadAccounts(null);
+      return loadAccounts(db, null);
     },
     async remotePurgeScheduled() {
       if (!db) return false;
@@ -39,6 +50,11 @@ export function handoffDeps(): HandoffDeps {
       const row = data as { status?: HandoffStatus | null; withdrawal?: boolean } | null;
       return { status: row?.status || null, withdrawal: row?.withdrawal === true };
     },
+    async remoteRow(id: string) {
+      if (!db) return null;
+      const { data } = await db.rpc('crm_bond_request_handoff_row', { p_handoff_id: id });
+      return handoffRowFromRecord(data);
+    },
     async remoteMark(id: string, status: HandoffStatus, send: Omit<SendLogRow, 'handoffId'> | null) {
       if (!db) return;
       await db.rpc('crm_mark_bond_request_handoff', {
@@ -53,12 +69,44 @@ export function handoffDeps(): HandoffDeps {
   };
 }
 
-async function loadAccounts(id: string | null): Promise<AccountView[]> {
-  const db = getSupabaseServerClient();
+function handoffRowFromRecord(data: unknown): HandoffRow | null {
+  if (!data || typeof data !== 'object') return null;
+  const row = data as Record<string, unknown>;
+  if (typeof row.handoff_id !== 'string' || typeof row.dispensary_account_id !== 'string') return null;
+  const visit = row.visit_preference;
+  const visitPreference: VisitPreference | null = visit === 'today' || visit === 'tomorrow' || visit === 'this_week' ? visit : null;
+  const items = Array.isArray(row.items)
+    ? row.items.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const record = item as { sku?: unknown; qty?: unknown };
+      return typeof record.sku === 'string' && typeof record.qty === 'number' ? [{ sku: record.sku, qty: record.qty }] : [];
+    })
+    : [];
+  return {
+    handoffId: row.handoff_id,
+    bondRequestId: null,
+    receivedAt: String(row.received_at || ''),
+    submittedAt: String(row.submitted_at || ''),
+    dispensaryAccountId: row.dispensary_account_id,
+    items,
+    memberFirstName: null,
+    memberContact: null,
+    contactKind: null,
+    visitPreference,
+    shareConsentVersion: SHARE_CONSENT_VERSION,
+    source: 'bond-haus',
+    sourceEvent: typeof row.source_event === 'string' ? row.source_event : null,
+    status: (typeof row.status === 'string' ? row.status : 'erased') as HandoffStatus,
+    eraseRequestedAt: null,
+    erasedAt: null,
+    consumerClearedAt: String(row.received_at || ''),
+  };
+}
+
+async function loadAccounts(db: HandoffDb | null, id: string | null): Promise<AccountView[]> {
   if (!db) return [];
-  let accounts = db.from('crm_accounts').select('id,brand,display_name,city,latitude,longitude,account_type,request_contact_email,bond_carried_skus,request_opt_out').eq('brand', 'cedargrowth');
-  if (id) accounts = accounts.eq('id', id);
-  const { data } = await accounts.limit(500);
+  const accounts = db.from('crm_accounts').select('id,brand,display_name,city,latitude,longitude,account_type,request_contact_email,bond_carried_skus,request_opt_out').eq('brand', 'cedargrowth');
+  const { data } = id ? await accounts.eq('id', id).limit(500) : await accounts.limit(500);
   const contacts = await db.from('crm_contacts').select('account_id,preference').eq('preference', 'do_not_contact').limit(500);
   const blocked = new Set((contacts.data || []).map((row) => String((row as { account_id: string }).account_id)));
   return ((data || []) as Record<string, unknown>[]).map((row) => ({

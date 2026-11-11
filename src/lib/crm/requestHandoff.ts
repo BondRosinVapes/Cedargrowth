@@ -425,29 +425,15 @@ export function markHandoff(book: HandoffBook, handoffId: string, status: Handof
   if (send) book.sends.push({ handoffId, ...send });
 }
 
-export function storeList(accounts: AccountView[], sku: string, order: 'name' | 'distance', origin: { latitude: number; longitude: number } | null): Record<(typeof STORE_LIST_KEYS)[number], string | number | null>[] {
+export function storeList(accounts: AccountView[], sku: string): Record<(typeof STORE_LIST_KEYS)[number], string | number | null>[] {
   const rows = accounts.filter((account) => account.brand === 'cedargrowth' && account.accountType === 'adult_use_dispensary' && !account.requestOptOut && !account.doNotContact && account.carriedSkus.includes(sku));
-  const sorted = order === 'distance' && origin
-    ? [...rows].sort((a, b) => miles(origin, a) - miles(origin, b))
-    : [...rows].sort((a, b) => a.displayName.localeCompare(b.displayName));
-  return sorted.map((account) => ({
+  return [...rows].sort((a, b) => a.displayName.localeCompare(b.displayName)).map((account) => ({
     id: account.id,
     display_name: account.displayName,
     city: account.city,
     latitude: account.latitude,
     longitude: account.longitude,
   }));
-}
-
-function miles(origin: { latitude: number; longitude: number }, account: AccountView): number {
-  if (account.latitude === null || account.longitude === null) return Number.POSITIVE_INFINITY;
-  const rad = Math.PI / 180;
-  const dLat = (account.latitude - origin.latitude) * rad;
-  const dLng = (account.longitude - origin.longitude) * rad;
-  const lat1 = origin.latitude * rad;
-  const lat2 = account.latitude * rad;
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-  return 3958.8 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
 export type AdminHandoffRow = {
@@ -524,6 +510,7 @@ export type HandoffDeps = {
   remoteReceive?(payload: unknown): Promise<{ result: string; status?: HandoffStatus }>;
   remoteStatus?(id: string): Promise<HandoffStatus | null>;
   remoteErase?(id: string): Promise<{ status: HandoffStatus | null; withdrawal: boolean }>;
+  remoteRow?(id: string): Promise<HandoffRow | null>;
   remoteMark?(id: string, status: HandoffStatus, send: Omit<SendLogRow, 'handoffId'> | null): Promise<void>;
 };
 
@@ -563,15 +550,11 @@ export async function handleBondRequestHttp(
   const purgeScheduled = deps.remotePurgeScheduled ? await deps.remotePurgeScheduled() : deps.book.purgeScheduled;
   const gates = gatesFromEnv(env, purgeScheduled);
   const kind = options?.kind || 'create';
-  if (kind !== 'stores' && !sendingReady(gates)) return { status: 503, body: { ok: false, reason: 'sending_off' } };
+  if (kind === 'create' && !sendingReady(gates)) return { status: 503, body: { ok: false, reason: 'sending_off' } };
   if (kind === 'stores') {
     const url = new URL(request.url);
     const sku = url.searchParams.get('sku') || '';
-    const order = url.searchParams.get('order') === 'distance' ? 'distance' : 'name';
-    const latitude = Number(url.searchParams.get('latitude'));
-    const longitude = Number(url.searchParams.get('longitude'));
-    const origin = Number.isFinite(latitude) && Number.isFinite(longitude) ? { latitude, longitude } : null;
-    const rows = storeList(await deps.accounts(), sku, order, origin);
+    const rows = storeList(await deps.accounts(), sku);
     return { status: 200, body: { ok: true, stores: rows } };
   }
   if (kind === 'status') {
@@ -585,7 +568,9 @@ export async function handleBondRequestHttp(
       ? await deps.remoteErase(options?.handoffId || '')
       : eraseHandoff(deps.book, options?.handoffId || '', nowIso);
     if (erased.withdrawal) {
-      const row = deps.book.rows.find((item) => item.handoffId === options?.handoffId);
+      const row = deps.remoteRow
+        ? await deps.remoteRow(options?.handoffId || '')
+        : deps.book.rows.find((item) => item.handoffId === options?.handoffId) || null;
       const account = row ? await deps.accountById(row.dispensaryAccountId) : null;
       if (row && account) await dispatch(deps, row, account, gates, options?.provider || silentProvider(), nowIso, 'B');
     }
@@ -639,14 +624,20 @@ async function dispatch(deps: HandoffDeps, row: HandoffRow, account: AccountView
     return;
   }
   if (!account.requestContactEmail || !sendingReady(gates) || !gates.from || !gates.postal) {
-    await noted('failed:no_sender', {
+    const skipped = {
       template,
       templateVersion: template === 'A' ? 'v1:6321250367f61781' : 'v1:56216bdd6a9c3f35',
       renderedSha256: '',
       providerMessageId: null,
       sentAt: null,
-      status: 'failed:no_sender',
-    });
+      status: 'failed:no_sender' as const,
+    };
+    if (template === 'B' || row.status === 'erased') {
+      book.sends.push({ handoffId: row.handoffId, ...skipped });
+      if (deps.remoteMark) await deps.remoteMark(row.handoffId, 'failed:no_sender', skipped);
+      return;
+    }
+    await noted('failed:no_sender', skipped);
     return;
   }
   const rendered = renderTemplate(template, {

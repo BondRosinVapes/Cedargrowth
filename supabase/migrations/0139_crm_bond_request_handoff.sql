@@ -1,6 +1,30 @@
 -- Bond Haus product request hand-off. Draft only. Do not apply from CI.
 -- A request is not an order. No consumer field is joined to contacts, Hoodie,
 -- spend, pins, or Google Places. The purge function is not scheduled.
+-- Apply 0138 first. This guard is 0138's guard plus the request columns.
+-- 0139 must not land before 0138.
+
+do $$
+declare
+  v_super boolean;
+  v_bypass boolean;
+begin
+  select rolsuper, rolbypassrls into v_super, v_bypass
+  from pg_catalog.pg_roles
+  where rolname = current_user;
+  if coalesce(v_super, false) or coalesce(v_bypass, false) then
+    raise notice '0139 function owner % can bypass forced row level security', current_user;
+  else
+    raise exception '0139 function owner % cannot bypass forced row level security. Do not apply 0139 as this role.', current_user;
+  end if;
+end $$;
+
+alter table public.crm_accounts
+  add column if not exists source_event text;
+
+alter table public.crm_accounts drop constraint if exists crm_accounts_source_event_check;
+alter table public.crm_accounts add constraint crm_accounts_source_event_check
+  check (source_event is null or source_event ~ '^[a-z0-9-]{1,64}$');
 
 alter table public.crm_accounts
   add column if not exists request_contact_email text,
@@ -63,6 +87,7 @@ begin
        and new.geocode_source is not distinct from old.geocode_source
        and new.geocode_match is not distinct from old.geocode_match
        and new.geocoded_at is not distinct from old.geocoded_at
+       and new.source_event is not distinct from old.source_event
        and new.request_contact_email is not distinct from old.request_contact_email
        and new.bond_carried_skus is not distinct from old.bond_carried_skus
        and new.request_opt_out is not distinct from old.request_opt_out then
@@ -433,12 +458,10 @@ $$;
 comment on function public.crm_purge_bond_request_handoffs(timestamptz) is
   'Clears consumer fields on the retention windows, then deletes the non-personal row, the send log, and the audit rows 12 months after received_at. Uses least of the caller clock and the server clock. Not scheduled.';
 
-create or replace function public.crm_bond_request_store_list(
-  p_sku text,
-  p_order text,
-  p_latitude double precision,
-  p_longitude double precision
-) returns table (id uuid, display_name text, city text, latitude double precision, longitude double precision)
+drop function if exists public.crm_bond_request_store_list(text, text, double precision, double precision);
+
+create or replace function public.crm_bond_request_store_list(p_sku text)
+returns table (id uuid, display_name text, city text, latitude double precision, longitude double precision)
 language plpgsql
 security definer
 set search_path = pg_catalog
@@ -455,11 +478,44 @@ begin
       select 1 from public.crm_contacts c
       where c.account_id = a.id and c.preference = 'do_not_contact'
     )
-  order by
-    case when p_order = 'distance' and p_latitude is not null and p_longitude is not null and a.latitude is not null and a.longitude is not null
-      then ((a.latitude - p_latitude) ^ 2 + (a.longitude - p_longitude) ^ 2)
-      else null end,
-    case when p_order = 'distance' and p_latitude is not null then null else a.display_name end;
+  order by a.display_name;
+end;
+$$;
+
+create or replace function public.crm_bond_request_handoff_row(p_handoff_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  v_account uuid;
+  v_items jsonb;
+  v_visit text;
+  v_received timestamptz;
+  v_submitted timestamptz;
+  v_status text;
+  v_source text;
+  v_event text;
+begin
+  select dispensary_account_id, items, visit_preference, received_at, submitted_at, status, source, source_event
+    into v_account, v_items, v_visit, v_received, v_submitted, v_status, v_source, v_event
+  from public.crm_bond_request_handoffs
+  where handoff_id = p_handoff_id;
+  if not found then
+    return null;
+  end if;
+  return pg_catalog.jsonb_build_object(
+    'handoff_id', p_handoff_id,
+    'dispensary_account_id', v_account,
+    'items', v_items,
+    'visit_preference', v_visit,
+    'received_at', v_received,
+    'submitted_at', v_submitted,
+    'status', v_status,
+    'source', v_source,
+    'source_event', v_event
+  );
 end;
 $$;
 
@@ -503,7 +559,8 @@ revoke all on function public.crm_bond_request_handoff_status(uuid) from public,
 revoke all on function public.crm_erase_bond_request_handoff(uuid) from public, anon, authenticated;
 revoke all on function public.crm_mark_bond_request_handoff(uuid, text, text, text, text, text) from public, anon, authenticated;
 revoke all on function public.crm_purge_bond_request_handoffs(timestamptz) from public, anon, authenticated;
-revoke all on function public.crm_bond_request_store_list(text, text, double precision, double precision) from public, anon, authenticated;
+revoke all on function public.crm_bond_request_store_list(text) from public, anon, authenticated;
+revoke all on function public.crm_bond_request_handoff_row(uuid) from public, anon, authenticated;
 revoke all on function public.crm_bond_request_admin_view(text) from public, anon, authenticated;
 revoke all on function public.crm_bond_request_purge_scheduled() from public, anon, authenticated;
 
@@ -512,6 +569,7 @@ grant execute on function public.crm_bond_request_handoff_status(uuid) to servic
 grant execute on function public.crm_erase_bond_request_handoff(uuid) to service_role;
 grant execute on function public.crm_mark_bond_request_handoff(uuid, text, text, text, text, text) to service_role;
 grant execute on function public.crm_purge_bond_request_handoffs(timestamptz) to service_role;
-grant execute on function public.crm_bond_request_store_list(text, text, double precision, double precision) to service_role;
+grant execute on function public.crm_bond_request_store_list(text) to service_role;
+grant execute on function public.crm_bond_request_handoff_row(uuid) to service_role;
 grant execute on function public.crm_bond_request_admin_view(text) to service_role;
 grant execute on function public.crm_bond_request_purge_scheduled() to service_role;
