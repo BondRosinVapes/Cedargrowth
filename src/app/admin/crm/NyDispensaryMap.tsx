@@ -16,7 +16,7 @@ import {
   hitAt,
   markerUnits,
   mergeGap,
-  zoomStops,
+  nextZoomView,
   nycFrame,
   pinCard,
   placePins,
@@ -38,12 +38,12 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   const drag = useRef<{ x: number; y: number; viewX: number; viewY: number; pointer: number } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const clusterButton = useRef<SVGRectElement | null>(null);
+  const returnIds = useRef<string[] | null>(null);
   const [svgWidth, setSvgWidth] = useState(0);
   const [openCluster, setOpenCluster] = useState<PinCluster | null>(null);
   const placed = useMemo(() => placePins(pins).placed, [pins]);
   const units = markerUnits(view.w, svgWidth);
-  const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w)), [placed, view.w]);
+  const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w, svgWidth)), [placed, view.w, svgWidth]);
   const active = placed.find((pin) => pin.id === activeId) ?? null;
   const zoomed = view.w < WHOLE.w - 0.5;
 
@@ -72,16 +72,18 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   useEffect(() => {
     if (!openCluster) return;
     listRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    const ids = openCluster.pins.map((pin) => pin.id);
     function onKey(event: KeyboardEvent) {
       if (event.key !== 'Escape') return;
       event.preventDefault();
+      returnIds.current = ids;
       setOpenCluster(null);
-      clusterButton.current?.focus();
     }
     function onDown(event: MouseEvent) {
       const target = event.target;
       if (listRef.current?.contains(target as Node)) return;
       if (target instanceof Element && target.closest('[data-pin="cluster"]')) return;
+      returnIds.current = ids;
       setOpenCluster(null);
     }
     document.addEventListener('keydown', onKey);
@@ -92,32 +94,38 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
     };
   }, [openCluster]);
 
+  useEffect(() => {
+    if (openCluster) return;
+    const ids = returnIds.current;
+    if (!ids?.length) return;
+    returnIds.current = null;
+    const node = svgRef.current;
+    if (!node) return;
+    const wanted = new Set(ids);
+    const chip = grouped.clusters.find((cluster) => cluster.pins.length === ids.length && cluster.pins.every((pin) => wanted.has(pin.id)));
+    const chipKey = chip ? chip.pins.map((pin) => pin.id).join(':') : null;
+    const markers = [...node.querySelectorAll<SVGRectElement>('[data-hit]')];
+    const chipMarker = chipKey ? markers.find((marker) => marker.getAttribute('data-hit') === chipKey) : undefined;
+    const memberMarker = ids.map((id) => markers.find((marker) => marker.getAttribute('data-hit') === id)).find((marker) => marker);
+    (chipMarker ?? memberMarker)?.focus({ preventScroll: true });
+  }, [openCluster, grouped]);
+
   function openDispensary(id: string) {
     onOpenAccount(id);
   }
 
-  function showCluster(cluster: PinCluster, button: SVGRectElement) {
-    clusterButton.current = button;
+  function showCluster(cluster: PinCluster) {
     setOpenCluster(cluster);
     setView(clusterFrame(cluster.pins, WHOLE));
   }
 
+  function closeList() {
+    returnIds.current = openCluster?.pins.map((pin) => pin.id) ?? null;
+    setOpenCluster(null);
+  }
+
   function zoomBy(direction: 1 | -1) {
-    setView((current) => {
-      const stops = zoomStops(WHOLE.w);
-      let nearest = 0;
-      let best = Infinity;
-      stops.forEach((stop, index) => {
-        const delta = Math.abs(stop - current.w);
-        if (delta < best) { best = delta; nearest = index; }
-      });
-      const next = stops[Math.min(stops.length - 1, Math.max(0, nearest + direction))];
-      if (next >= WHOLE.w - 0.5) return WHOLE;
-      const h = next * (WHOLE.h / WHOLE.w);
-      const cx = current.x + current.w / 2;
-      const cy = current.y + current.h / 2;
-      return { x: cx - next / 2, y: cy - next / 2, w: next, h };
-    });
+    setView((current) => nextZoomView(current, direction, WHOLE));
   }
 
   return (
@@ -166,7 +174,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
           <div ref={listRef} role="dialog" aria-label={`${openCluster.count} dispensaries`} className="fixed inset-x-0 bottom-0 z-30 max-h-[70vh] overflow-y-auto border-t border-ink bg-clinical p-3 md:absolute md:inset-x-auto md:bottom-auto md:left-2 md:top-16 md:z-10 md:max-h-64 md:w-[min(18rem,calc(100%-1rem))] md:border md:p-0">
             <div className="mb-2 flex items-center justify-between gap-2">
               <p className="font-mono text-specimen uppercase text-tertiary">{openCluster.count} dispensaries</p>
-              <button type="button" aria-label="Close" onClick={() => { setOpenCluster(null); clusterButton.current?.focus(); }} className="min-h-[44px] min-w-[44px] border border-ink px-3 font-mono text-specimen uppercase text-primary">Close</button>
+              <button type="button" aria-label="Close" onClick={closeList} className="min-h-[44px] min-w-[44px] border border-ink px-3 font-mono text-specimen uppercase text-primary">Close</button>
             </div>
             <ul>
               {clusterMembers(openCluster.pins).map((row) => (
@@ -211,8 +219,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
             const pin = grouped.singles.find((item) => item.id === id);
             if (pin) { openDispensary(pin.id); return; }
             const cluster = grouped.clusters.find((item) => item.pins.map((member) => member.id).join(':') === id);
-            const button = node.querySelector(`[data-hit="${CSS.escape(id)}"]`);
-            if (cluster && button instanceof SVGRectElement) showCluster(cluster, button);
+            if (cluster) showCluster(cluster);
           }}
           onPointerDown={(event) => {
             if (!zoomed || (event.target as Element).closest('[data-pin]')) return;
@@ -257,7 +264,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
                   tabIndex={0}
                   role="button"
                   aria-label={`${cluster.count} dispensaries`}
-                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showCluster(cluster, event.currentTarget); } }}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showCluster(cluster); } }}
                 />
                 <rect x={cluster.x - chipW / 2} y={cluster.y - chipH / 2} width={chipW} height={chipH} fill="rgb(var(--surface-ink))" className="pointer-events-none" />
                 <text x={cluster.x} y={cluster.y} textAnchor="middle" dominantBaseline="central" fill="rgb(var(--text-inverse))" fontSize={textSize} className="pointer-events-none font-mono">{label}</text>

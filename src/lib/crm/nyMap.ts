@@ -137,8 +137,11 @@ export function hitTargetPx(svgClientWidth: number): number {
   return MIN_TARGET_PX;
 }
 
-export function mergeGap(viewWidth: number): number {
-  return markerSpan(viewWidth) * MERGE_MULTIPLE;
+export function mergeGap(viewWidth: number, svgClientWidth = 0): number {
+  const fractional = markerSpan(viewWidth) * MERGE_MULTIPLE;
+  if (svgClientWidth <= 0) return fractional;
+  const hitUnits = (hitTargetPx(svgClientWidth) / svgClientWidth) * viewWidth;
+  return Math.max(fractional, hitUnits);
 }
 
 // 0.0001 degrees of latitude near the city, about 11 m.
@@ -150,8 +153,8 @@ export function storefrontSeparation(): number {
 
 export function minZoomWidth(wholeWidth: number): number {
   const separation = storefrontSeparation();
-  const widthAtSplit = separation / (MARKER_FRACTION * MERGE_MULTIPLE);
-  return Math.min(wholeWidth, widthAtSplit * 0.95);
+  const coefficient = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, TOUCH_TARGET_PX / 390);
+  return Math.min(wholeWidth, (separation * 0.95) / coefficient);
 }
 
 export function zoomInFactor(currentWidth: number, wholeWidth: number): number {
@@ -174,6 +177,26 @@ export function zoomStops(wholeWidth: number): number[] {
 
 export function zoomPresses(wholeWidth: number): number {
   return Math.max(0, zoomStops(wholeWidth).length - 1);
+}
+
+export function nextZoomView(
+  current: { x: number; y: number; w: number; h: number },
+  direction: 1 | -1,
+  whole: { w: number; h: number },
+): { x: number; y: number; w: number; h: number } {
+  const stops = zoomStops(whole.w);
+  let nearest = 0;
+  let best = Infinity;
+  stops.forEach((stop, index) => {
+    const delta = Math.abs(stop - current.w);
+    if (delta < best) { best = delta; nearest = index; }
+  });
+  const next = stops[Math.min(stops.length - 1, Math.max(0, nearest + direction))];
+  if (Math.abs(next - current.w) < 1e-6) return current;
+  const h = next * (whole.h / whole.w);
+  const cx = current.x + current.w / 2;
+  const cy = current.y + current.h / 2;
+  return { x: cx - next / 2, y: cy - h / 2, w: next, h };
 }
 
 export function clusterFrame(points: readonly { x: number; y: number }[], whole: { x: number; y: number; w: number; h: number }): { x: number; y: number; w: number; h: number } {
