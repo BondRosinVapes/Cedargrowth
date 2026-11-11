@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { authorizePlacePhoto } from '@/lib/crm/engine';
-import { currentPhotoName, dnsPhotoLookup, pinnedPhotoRequest, placeQuery, readPlacePhoto, sharePhotoLoad } from '@/lib/crm/places';
+import { currentPhotoName, dnsPhotoLookup, photoResponseHeaders, pinnedPhotoRequest, placeQuery, readPlacePhoto, sharePhotoLoad } from '@/lib/crm/places';
 import { resolveDeskAccess } from '@/lib/crm/salesSession';
 import { getCrmStore } from '@/lib/crm/store';
 
@@ -43,10 +43,6 @@ export async function GET(request: Request) {
   if (!photo) return new NextResponse(null, { status: 404 });
   return new NextResponse(photo.bytes, {
     status: 200,
-    headers: {
-      'content-type': photo.contentType,
-      'cache-control': 'private, max-age=3600',
-      'x-content-type-options': 'nosniff',
-    },
+    headers: photoResponseHeaders(photo.contentType),
   });
 }

@@ -12,3 +12,11 @@ export function browserLink(raw: string | null | undefined): string | null {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
   return url.toString();
 }
+
+export function freshPhotoSrc(photoUrl: string, viewId: string): string | null {
+  const id = viewId.trim();
+  if (!photoUrl || !id) return null;
+  const url = new URL(photoUrl, 'https://cedargrowth.vercel.app');
+  url.searchParams.set('view', id);
+  return `${url.pathname}?${url.searchParams.toString()}`;
+}
