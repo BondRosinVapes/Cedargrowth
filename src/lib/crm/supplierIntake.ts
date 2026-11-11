@@ -36,6 +36,9 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{
 const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 const EVENT_RE = /^[a-z0-9-]{1,64}$/;
 const OCM_LICENSE_RE = /^OCM-[A-Z]{2,6}-[0-9]{2}-[0-9]{6}$/;
+const ROD_RE = /(^|-)(ROD|ROND)(-|$)/i;
+const HEMP_LICENSE_RE = /^[A-Z0-9-]{3,40}$/;
+const EIN_RE = /^\d{2}-?\d{7}$/;
 
 export type SupplierSupplyType = (typeof SUPPLY_TYPES)[number];
 
@@ -83,7 +86,9 @@ export function parseSupplierIntake(value: unknown): { ok: true; lead: SupplierL
   const supplyType = SUPPLY_TYPES.find((item) => item === record.supply_type) || null;
   if (!supplyType) fields.push('supply_type');
   const licenseNumber = optionalText(record.license_number, 40);
-  if (licenseNumber === 'invalid' || licenseNumber === 'ROD' || licenseNumber === 'ROND') fields.push('license_number');
+  if (licenseNumber === 'invalid' || (licenseNumber && ROD_RE.test(licenseNumber))) fields.push('license_number');
+  else if (supplyType === 'non_cannabis_inputs' && licenseNumber) fields.push('license_number');
+  else if (supplyType === 'hemp_or_hemp_extract' && licenseNumber && (!HEMP_LICENSE_RE.test(licenseNumber) || EIN_RE.test(licenseNumber))) fields.push('license_number');
   else if (supplyType && CANNABIS_SUPPLY.has(supplyType) && (licenseNumber === null || !OCM_LICENSE_RE.test(licenseNumber))) fields.push('license_number');
   const contactName = text(record.contact_name, 1, 120);
   if (!contactName) fields.push('contact_name');

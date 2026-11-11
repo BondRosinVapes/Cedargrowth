@@ -184,6 +184,9 @@ begin
   if v_route = '/order' and v_event is not null then
     raise exception 'source_event is not allowed for /order';
   end if;
+  if p_consent_version is distinct from 'v1:46652a17994f78d1' then
+    raise exception 'consent_version is not the dispensary line';
+  end if;
 
   if exists (select 1 from public.crm_intake_log where inquiry_id = p_inquiry_id) then
     return jsonb_build_object('ok', true, 'duplicate', true);
@@ -343,12 +346,22 @@ create table if not exists public.crm_supplier_inquiries (
     (
       supply_type in ('cannabis_nys_adult_use_cultivator', 'cannabis_nys_microbusiness_or_cooperative')
       and license_number ~ '^OCM-[A-Z]{2,6}-[0-9]{2}-[0-9]{6}$'
+      and upper(license_number) !~ '(^|-)(ROD|ROND)(-|$)'
     )
     or (
-      supply_type in ('hemp_or_hemp_extract', 'non_cannabis_inputs')
-      and (license_number is null or char_length(license_number) between 1 and 40)
-      and license_number is distinct from 'ROD'
-      and license_number is distinct from 'ROND'
+      supply_type = 'hemp_or_hemp_extract'
+      and (
+        license_number is null
+        or (
+          license_number ~ '^[A-Z0-9-]{3,40}$'
+          and license_number !~ '^[0-9]{2}-?[0-9]{7}$'
+          and upper(license_number) !~ '(^|-)(ROD|ROND)(-|$)'
+        )
+      )
+    )
+    or (
+      supply_type = 'non_cannabis_inputs'
+      and license_number is null
     )
   )
 );
@@ -377,7 +390,8 @@ comment on table public.crm_supplier_intake_deletions is
 alter table public.crm_supplier_inquiries enable row level security;
 alter table public.crm_supplier_inquiries force row level security;
 revoke all on table public.crm_supplier_inquiries from public, anon, authenticated;
-grant select, insert, update on table public.crm_supplier_inquiries to service_role;
+grant select, insert on table public.crm_supplier_inquiries to service_role;
+grant update (replied_at) on table public.crm_supplier_inquiries to service_role;
 revoke delete, truncate, references, trigger on table public.crm_supplier_inquiries from service_role, anon, authenticated, public;
 
 alter table public.crm_supplier_intake_deletions enable row level security;
@@ -443,10 +457,16 @@ begin
   v_role := nullif(btrim(p_contact_role), '');
   v_message := nullif(btrim(p_message), '');
   v_cannabis := p_supply_type in ('cannabis_nys_adult_use_cultivator', 'cannabis_nys_microbusiness_or_cooperative');
+  if v_license is not null and upper(v_license) ~ '(^|-)(ROD|ROND)(-|$)' then
+    raise exception 'license_number is not recognized';
+  end if;
   if v_cannabis and (v_license is null or v_license !~ '^OCM-[A-Z]{2,6}-[0-9]{2}-[0-9]{6}$') then
     raise exception 'license_number is required for this supply type';
   end if;
-  if v_license in ('ROD', 'ROND') then
+  if p_supply_type = 'non_cannabis_inputs' and v_license is not null then
+    raise exception 'license_number is not allowed for this supply type';
+  end if;
+  if p_supply_type = 'hemp_or_hemp_extract' and v_license is not null and (v_license !~ '^[A-Z0-9-]{3,40}$' or v_license ~ '^[0-9]{2}-?[0-9]{7}$') then
     raise exception 'license_number is not recognized';
   end if;
 
@@ -519,7 +539,7 @@ declare
 begin
   with gone as (
     delete from public.crm_supplier_inquiries
-    where coalesce(replied_at, submitted_at) <= p_now - interval '12 months'
+    where coalesce(replied_at, submitted_at) <= least(p_now, pg_catalog.now()) - interval '12 months'
     returning inquiry_id
   )
   select pg_catalog.count(*) into purged from gone;
@@ -540,4 +560,27 @@ revoke all on function public.crm_delete_supplier_inquiry(uuid) from public, ano
 grant execute on function public.crm_delete_supplier_inquiry(uuid) to service_role;
 revoke all on function public.crm_purge_supplier_inquiries(timestamptz) from public, anon, authenticated;
 grant execute on function public.crm_purge_supplier_inquiries(timestamptz) to service_role;
+
+create or replace function public.crm_mark_supplier_replied(p_inquiry_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+declare
+  v_count integer;
+begin
+  update public.crm_supplier_inquiries
+  set replied_at = pg_catalog.now()
+  where inquiry_id = p_inquiry_id;
+  get diagnostics v_count = row_count;
+  return pg_catalog.jsonb_build_object('ok', true, 'updated', v_count > 0);
+end;
+$$;
+
+comment on function public.crm_mark_supplier_replied(uuid) is
+  'Records a reply or qualification time. Unqualified means replied_at is null and the inquiry is older than 12 months. A qualified supplier is a separate record outside this table. Not scheduled.';
+
+revoke all on function public.crm_mark_supplier_replied(uuid) from public, anon, authenticated;
+grant execute on function public.crm_mark_supplier_replied(uuid) to service_role;
 

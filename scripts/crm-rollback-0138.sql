@@ -11,6 +11,7 @@
 -- The draft wrapped its own begin and commit. Those two lines are omitted
 -- here so this file stays inside one transaction.
 
+drop function if exists public.crm_mark_supplier_replied(uuid);
 drop function if exists public.crm_purge_supplier_inquiries(timestamptz);
 drop function if exists public.crm_delete_supplier_inquiry(uuid);
 drop function if exists public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text);

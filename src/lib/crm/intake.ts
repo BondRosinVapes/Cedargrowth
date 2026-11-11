@@ -36,7 +36,7 @@ const OPTIONAL = new Set(['contact_phone', 'license_number', 'county', 'message'
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const EVENT_RE = /^[a-z0-9-]{1,64}$/;
 const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
-const CONSENT_RE = /^v1:[0-9a-f]{16}$/;
+export const DISPENSARY_CONSENT_VERSION = 'v1:46652a17994f78d1';
 
 export type IntakeLead = {
   inquiryId: string;
@@ -129,7 +129,7 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
   if (!county.ok) fields.push('county');
   const message = optionalText(record.message, 500);
   if (message === 'invalid') fields.push('message');
-  const consentVersion = typeof record.consent_version === 'string' && CONSENT_RE.test(record.consent_version) ? record.consent_version : null;
+  const consentVersion = record.consent_version === DISPENSARY_CONSENT_VERSION ? DISPENSARY_CONSENT_VERSION : null;
   if (!consentVersion) fields.push('consent_version');
   const sourceRoute = record.source_route === '/order' || record.source_route === '/card' ? record.source_route : null;
   if (!sourceRoute) fields.push('source_route');
