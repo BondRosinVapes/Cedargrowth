@@ -407,6 +407,15 @@ if [ "$BAD_CONSENT" != "rejected:consent" ] || [ "$OK_HAND" != "accepted" ] || [
   exit 1
 fi
 echo 'ok: handoff sql rejects the other consent versions, replays one row, and hides the row from other roles'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_mark_bond_request_handoff('82828282-8282-4282-8282-828282828282'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'abc', 'm1');" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_erase_bond_request_handoff('82828282-8282-4282-8282-828282828282'::uuid);" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_mark_bond_request_handoff('82828282-8282-4282-8282-828282828282'::uuid, 'failed', 'B', 'v1:56216bdd6a9c3f35', 'def', null);" >/dev/null
+B_FAIL=$(sudo -u postgres psql -d "$DB" -tA -c "select (select status from public.crm_bond_request_handoffs where handoff_id = '82828282-8282-4282-8282-828282828282') || '|' || (select template || ':' || status || ':' || coalesce(provider_message_id, '') from public.crm_bond_request_send_log where handoff_id = '82828282-8282-4282-8282-828282828282' and template = 'B') || '|' || (select sends::text from public.crm_bond_request_admin_view('owner') where handoff_id = '82828282-8282-4282-8282-828282828282');")
+if [ "$B_FAIL" = "${B_FAIL#erased|B:failed:|}" ] || printf '%s' "$B_FAIL" | grep -q 'ada@member.test'; then
+  echo "FAIL: withdrawal failure log ${B_FAIL}"
+  exit 1
+fi
+echo 'ok: a failed withdrawal email is in the owner view and keeps no consumer fields'
 RACE_SQL="select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','83838383-8383-4383-8383-838383838383','bond_request_id','race','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';"
 sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "$RACE_SQL" >/tmp/crm-handoff-race-a.txt &
 sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "$RACE_SQL" >/tmp/crm-handoff-race-b.txt &
@@ -531,6 +540,21 @@ if [ "$BAD_STATE" != "0,not-a-stage" ]; then
   exit 1
 fi
 echo 'ok: unsupported stage aborted the atomic upgrade and left the row unchanged'
+
+PRE=crm_0139_without_0138
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database if exists ${PRE};" >/dev/null
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "create database ${PRE};" >/dev/null
+set +e
+sudo -u postgres psql -d "$PRE" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/supabase/migrations/0139_crm_bond_request_handoff.sql" >/tmp/crm-0139-precheck.log 2>&1
+PRE_CODE=$?
+set -e
+PRE_LEFT=$(sudo -u postgres psql -d "$PRE" -tA -c "select to_regclass('public.crm_bond_request_handoffs') is null;")
+if [ "$PRE_CODE" -eq 0 ] || ! grep -q '0138 is not applied' /tmp/crm-0139-precheck.log || [ "$PRE_LEFT" != "t" ]; then
+  echo "FAIL: 0139 applied without 0138 code=${PRE_CODE} left=${PRE_LEFT}"
+  exit 1
+fi
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${PRE};" >/dev/null
+echo 'ok: 0139 refuses to apply until 0138 is present'
 
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${UP};" >/dev/null
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${BAD};" >/dev/null

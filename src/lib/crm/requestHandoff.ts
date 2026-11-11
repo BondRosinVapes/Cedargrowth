@@ -441,6 +441,15 @@ export function storeList(accounts: AccountView[], sku: string): Record<(typeof 
   }));
 }
 
+export type AdminHandoffSend = {
+  template: 'A' | 'B';
+  templateVersion: string;
+  renderedSha256: string;
+  providerMessageId: string | null;
+  sentAt: string | null;
+  status: string;
+};
+
 export type AdminHandoffRow = {
   handoffId: string;
   dispensaryAccountId: string;
@@ -451,6 +460,7 @@ export type AdminHandoffRow = {
   status: HandoffStatus;
   receivedAt: string;
   submittedAt: string;
+  sends: AdminHandoffSend[];
 };
 
 export function adminHandoffRows(book: HandoffBook, role: DeskRole | null): AdminHandoffRow[] | null {
@@ -465,6 +475,14 @@ export function adminHandoffRows(book: HandoffBook, role: DeskRole | null): Admi
     status: row.status,
     receivedAt: row.receivedAt,
     submittedAt: row.submittedAt,
+    sends: book.sends.filter((send) => send.handoffId === row.handoffId).map((send) => ({
+      template: send.template,
+      templateVersion: send.templateVersion,
+      renderedSha256: send.renderedSha256,
+      providerMessageId: send.providerMessageId,
+      sentAt: send.sentAt,
+      status: send.status,
+    })),
   }));
 }
 
@@ -691,6 +709,19 @@ async function dispatch(deps: HandoffDeps, row: HandoffRow, account: AccountView
     };
     book.sends.push({ handoffId: row.handoffId, ...send });
     if (deps.remoteMark) await deps.remoteMark(row.handoffId, 'sent', send);
+    return;
+  }
+  if (template === 'B') {
+    const failedSend = {
+      template,
+      templateVersion: rendered.bodyVersion,
+      renderedSha256: rendered.renderedSha256,
+      providerMessageId: null,
+      sentAt: null,
+      status: 'failed' as const,
+    };
+    book.sends.push({ handoffId: row.handoffId, ...failedSend });
+    if (deps.remoteMark) await deps.remoteMark(row.handoffId, 'failed', failedSend);
     return;
   }
   if (row.status !== 'erased') await noted(outcome.state === 'failed:no_sender' ? 'failed:no_sender' : 'failed', null);

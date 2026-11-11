@@ -5,6 +5,14 @@
 -- 0139 must not land before 0138.
 
 do $$
+begin
+  if to_regclass('public.crm_supplier_inquiries') is null
+     or to_regprocedure('public.crm_receive_supplier_inquiry(uuid, timestamptz, text, text, text, text, text, text, text, text, text, text, text, text, text, text)') is null then
+    raise exception '0138 is not applied. crm_supplier_inquiries or crm_receive_supplier_inquiry with 16 arguments is missing. Apply 0138 before 0139.';
+  end if;
+end $$;
+
+do $$
 declare
   v_super boolean;
   v_bypass boolean;
@@ -529,7 +537,8 @@ returns table (
   source_event text,
   status text,
   received_at timestamptz,
-  submitted_at timestamptz
+  submitted_at timestamptz,
+  sends jsonb
 )
 language plpgsql
 security definer
@@ -540,7 +549,19 @@ begin
     return;
   end if;
   return query
-  select h.handoff_id, h.dispensary_account_id, h.items, h.visit_preference, h.source, h.source_event, h.status, h.received_at, h.submitted_at
+  select h.handoff_id, h.dispensary_account_id, h.items, h.visit_preference, h.source, h.source_event, h.status, h.received_at, h.submitted_at,
+    coalesce((
+      select pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
+        'template', s.template,
+        'template_version', s.template_version,
+        'rendered_sha256', s.rendered_sha256,
+        'provider_message_id', s.provider_message_id,
+        'sent_at', s.sent_at,
+        'status', s.status
+      ))
+      from public.crm_bond_request_send_log s
+      where s.handoff_id = h.handoff_id
+    ), '[]'::jsonb)
   from public.crm_bond_request_handoffs h;
 end;
 $$;
