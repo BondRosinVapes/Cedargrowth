@@ -16,8 +16,6 @@ export type PlaceCard = {
   mapsUrl: string | null;
   photoName: string | null;
   photoCredits: string[];
-  photoContentType?: string | null;
-  photoBytes?: string | null;
 };
 
 export type PlaceCache = {
@@ -101,9 +99,39 @@ export async function lookupPlace(query: string, key: string, fetchImpl: typeof 
 
 export const PHOTO_NAME_PATTERN = /^places\/[A-Za-z0-9_-]+\/photos\/[A-Za-z0-9_-]+$/;
 
+export const PHOTO_MAX_HEIGHT_PX = 384;
+export const PHOTO_MAX_WIDTH_PX = 768;
+
 export function photoMediaUrl(photoName: string): string | null {
   if (!PHOTO_NAME_PATTERN.test(photoName)) return null;
-  return `https://places.googleapis.com/v1/${photoName}/media?maxHeightPx=400&skipHttpRedirect=true`;
+  return `https://places.googleapis.com/v1/${photoName}/media?maxHeightPx=${PHOTO_MAX_HEIGHT_PX}&maxWidthPx=${PHOTO_MAX_WIDTH_PX}&skipHttpRedirect=true`;
+}
+
+export function placeCardOnly(input: {
+  name?: unknown;
+  rating?: unknown;
+  reviewCount?: unknown;
+  hours?: unknown;
+  phone?: unknown;
+  website?: unknown;
+  mapsUrl?: unknown;
+  photoName?: unknown;
+  photoCredits?: unknown;
+} | null | undefined): PlaceCard | null {
+  if (!input) return null;
+  const text = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : null);
+  const list = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : []);
+  return {
+    name: text(input.name) || 'Name not provided',
+    rating: typeof input.rating === 'number' ? input.rating : null,
+    reviewCount: typeof input.reviewCount === 'number' ? input.reviewCount : null,
+    hours: list(input.hours),
+    phone: text(input.phone),
+    website: text(input.website),
+    mapsUrl: text(input.mapsUrl),
+    photoName: text(input.photoName),
+    photoCredits: list(input.photoCredits),
+  };
 }
 
 export function allowedPhotoUrl(raw: string): string | null {
@@ -127,7 +155,7 @@ export type PhotoLookup = (host: string) => Promise<{ address: string; family: n
 export type PinnedRequest = (url: string, address: string, init?: { headers?: Record<string, string>; signal?: AbortSignal; ca?: string }) => Promise<Response>;
 
 export const PHOTO_TIMEOUT_MS = 8000;
-export const PHOTO_MAX_BYTES = 2_000_000;
+export const PHOTO_MAX_BYTES = 524_288;
 
 export function photoAddressAllowed(address: string): boolean {
   if (!ipaddr.isValid(address)) return false;
@@ -135,8 +163,17 @@ export function photoAddressAllowed(address: string): boolean {
   if (parsed.kind() === 'ipv6') {
     const v6 = parsed as ipaddr.IPv6;
     if (v6.parts.slice(0, 6).every((part) => part === 0)) return false;
+    if (blockedIpv6Prefix(v6.parts)) return false;
   }
   return parsed.range() === 'unicast';
+}
+
+function blockedIpv6Prefix(groups: number[]): boolean {
+  if (groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 1) return true;
+  if ((groups[0] & 0xffc0) === 0xfec0) return true;
+  if (groups[0] === 0x3fff && (groups[1] & 0xf000) === 0) return true;
+  if (groups[0] === 0x5f00) return true;
+  return false;
 }
 
 export async function checkedPhotoAddress(host: string, lookup: PhotoLookup): Promise<string | null> {
@@ -203,22 +240,6 @@ export function collectCapped(maxBytes: number) {
   };
 }
 
-export function encodePhoto(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString('base64');
-}
-
-export function decodePhoto(value: string): Uint8Array | null {
-  if (!value || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return null;
-  const bytes = Buffer.from(value, 'base64');
-  if (!bytes.length || bytes.length > PHOTO_MAX_BYTES) return null;
-  return new Uint8Array(bytes);
-}
-
-export function photoBytesAbsent(fields: PlaceCard | null | undefined): boolean {
-  const raw = fields?.photoBytes;
-  return typeof raw !== 'string' || raw.length === 0;
-}
-
 const photoFlights = new Map<string, Promise<unknown>>();
 
 export function sharePhotoLoad<T>(accountId: string, load: () => Promise<T>): Promise<T> {
@@ -229,40 +250,6 @@ export function sharePhotoLoad<T>(accountId: string, load: () => Promise<T>): Pr
   });
   photoFlights.set(accountId, flight);
   return flight;
-}
-
-export function freshPhoto(cache: PlaceCache | null, now: number): { bytes: Uint8Array; contentType: string } | null {
-  if (!cache?.fields || !placeCacheFresh(cache.fetchedAt, now)) return null;
-  const contentType = imageType(cache.fields.photoContentType ?? null);
-  const raw = cache.fields.photoBytes;
-  if (!contentType || typeof raw !== 'string') return null;
-  const bytes = decodePhoto(raw);
-  if (!bytes) return null;
-  return { bytes, contentType };
-}
-
-export function attachPhoto(card: PlaceCard, bytes: Uint8Array, contentType: string): PlaceCard | null {
-  const type = imageType(contentType);
-  if (!type || bytes.byteLength > PHOTO_MAX_BYTES) return null;
-  return { ...card, photoContentType: type, photoBytes: encodePhoto(bytes) };
-}
-
-export async function photoForView(input: {
-  cache: PlaceCache | null;
-  now: number;
-  key: string;
-  read: (photoName: string, key: string) => Promise<{ bytes: ArrayBuffer; contentType: string } | null>;
-}): Promise<{ bytes: Uint8Array; contentType: string; nextFields: PlaceCard | null } | null> {
-  const stored = freshPhoto(input.cache, input.now);
-  if (stored) return { ...stored, nextFields: null };
-  const fields = input.cache?.fields;
-  if (!fields?.photoName || !input.cache || !placeCacheFresh(input.cache.fetchedAt, input.now)) return null;
-  const photo = await input.read(fields.photoName, input.key);
-  if (!photo) return null;
-  const bytes = new Uint8Array(photo.bytes);
-  const nextFields = attachPhoto(fields, bytes, photo.contentType);
-  if (!nextFields) return null;
-  return { bytes, contentType: nextFields.photoContentType || photo.contentType, nextFields };
 }
 
 async function readLimited(response: Response, maxBytes: number): Promise<Uint8Array | null> {

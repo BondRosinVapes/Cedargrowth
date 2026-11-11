@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { assertDashboardTabs } from './crm-dashboard-tabs-selftest.ts';
-import { allowedPhotoUrl, attachPhoto, collectCapped, fetchAllowedPhoto, freshPhoto, imageType, lookupPlace, PHOTO_MAX_BYTES, photoAddressAllowed, photoBytesAbsent, photoForView, photoMediaUrl, pinnedPhotoRequest, PLACE_TTL_MS, placeCacheFresh, placeQuery, placeReadPlan, readPlacePhoto, sharePhotoLoad, type PhotoLookup, type PlaceCache, type PlaceCard } from '../src/lib/crm/places.ts';
+import { allowedPhotoUrl, collectCapped, fetchAllowedPhoto, imageType, lookupPlace, PHOTO_MAX_BYTES, PHOTO_MAX_HEIGHT_PX, PHOTO_MAX_WIDTH_PX, photoAddressAllowed, photoMediaUrl, pinnedPhotoRequest, PLACE_TTL_MS, placeCacheFresh, placeCardOnly, placeQuery, placeReadPlan, readPlacePhoto, sharePhotoLoad, type PhotoLookup, type PlaceCache } from '../src/lib/crm/places.ts';
 import { browserLink } from '../src/lib/crm/placeLinks.ts';
 import { applyWonMerge, undoWonMerge, wonMergeOnSave, type LicenseWorld } from '../src/lib/crm/distributionMerge.ts';
 import { isDispensaryAccount } from '../src/lib/crm/engine.ts';
@@ -170,7 +170,10 @@ const imgCross = authorizePlacePhoto({
 const imgNoGrant = authorizePlacePhoto({
   actorId: 'owner', grants: [], requestOrigin: origin, headerOrigin: null, headerFetchSite: 'same-origin', brandRaw: 'cedargrowth',
 });
-assert(imgDenied.ok === false && imgDenied.status === 403 && imgAllowed.ok === true && imgAllowed.brand === 'cedargrowth' && imgCross.ok === false && imgNoGrant.ok === false, 'TEST ONLY: a photo image request has no CRM header, and still requires a same-origin CedarGrowth desk');
+const imgBare = authorizePlacePhoto({
+  actorId: 'owner', grants: salesGrant, requestOrigin: origin, headerOrigin: null, headerFetchSite: null, brandRaw: 'cedargrowth',
+});
+assert(imgDenied.ok === false && imgDenied.status === 403 && imgAllowed.ok === true && imgAllowed.brand === 'cedargrowth' && imgCross.ok === false && imgNoGrant.ok === false && imgBare.ok === false && imgBare.status === 403, 'TEST ONLY: a same-origin photo image loads without the CRM header, and a request with neither site nor origin is refused');
 const bondOk = authorizeCrmRequest({
   actorId: 'owner', grants: ownerGrants, method: 'GET', requestOrigin: origin, headerOrigin: origin, headerMarker: '1', headerFetchSite: 'same-origin', brandRaw: 'bond',
 });
@@ -1602,8 +1605,8 @@ const followed = await fetchAllowedPhoto('https://lh3.googleusercontent.com/a', 
     return new Response('img', { status: 200 });
   },
 });
-assert(blockedPhoto === null && metadataPhoto === null && httpPhoto === null && localPhoto === null && metaPhoto === null && metaV6 === null && badName === null && goodName === 'https://places.googleapis.com/v1/places/ChIJtest/photos/abc/media?maxHeightPx=400&skipHttpRedirect=true' && redirected === null && photoCalls.some((href) => href.includes('169.254')) === false && photoCalls.some((href) => href.includes('127.0.0.1')) === false, 'TEST ONLY: a photo name and a photo URL stay on Google hosts');
-const specialUse = ['100.64.1.1', '100.127.255.255', '0.1.2.3', '192.0.0.1', '192.0.2.1', '192.88.99.1', '192.31.196.1', '192.52.193.1', '198.18.0.1', '198.51.100.1', '203.0.113.1', '224.0.0.1', '240.0.0.1', '255.255.255.255', '64:ff9b::8.8.8.8', '2002:0808:0808::', '2001:0:4136:e378:8000:63bf:3fff:fdd2', '::8.8.8.8', '::ffff:8.8.8.8'];
+assert(blockedPhoto === null && metadataPhoto === null && httpPhoto === null && localPhoto === null && metaPhoto === null && metaV6 === null && badName === null && goodName === `https://places.googleapis.com/v1/places/ChIJtest/photos/abc/media?maxHeightPx=${PHOTO_MAX_HEIGHT_PX}&maxWidthPx=${PHOTO_MAX_WIDTH_PX}&skipHttpRedirect=true` && redirected === null && photoCalls.some((href) => href.includes('169.254')) === false && photoCalls.some((href) => href.includes('127.0.0.1')) === false, 'TEST ONLY: a photo name and a photo URL stay on Google hosts');
+const specialUse = ['100.64.1.1', '100.127.255.255', '0.1.2.3', '192.0.0.1', '192.0.2.1', '192.88.99.1', '192.31.196.1', '192.52.193.1', '198.18.0.1', '198.51.100.1', '203.0.113.1', '224.0.0.1', '240.0.0.1', '255.255.255.255', '64:ff9b::8.8.8.8', '64:ff9b:1::1', '2002:0808:0808::', '2001:0:4136:e378:8000:63bf:3fff:fdd2', '::8.8.8.8', '::ffff:8.8.8.8', 'fec0::1', '3fff::1', '5f00::1'];
 const specialBlocked = await Promise.all(specialUse.map((address) => privatePhoto(address)));
 const photoRoute = readFileSync('src/app/api/admin/crm/places/photo/route.ts', 'utf8');
 const photoCallsForImage: string[] = [];
@@ -1650,36 +1653,22 @@ const svgPhoto = await readPlacePhoto('places/ok/photos/pic', 'server-key', {
 });
 const bin = collectCapped(4);
 const cappedPush = bin.push(Buffer.from('ab')) && bin.push(Buffer.from('cd')) && bin.push(Buffer.from('e')) === false && bin.concat().toString() === 'abcd';
-const photoNow = Date.now();
-const photoCard: PlaceCard = { name: 'TEST ONLY', rating: null, reviewCount: null, hours: [], phone: null, website: null, mapsUrl: null, photoName: 'places/ChIJtest/photos/abc', photoCredits: [] };
-const freshCache: PlaceCache = { placeId: 'p', matchStatus: 'matched', fields: photoCard, fetchedAt: new Date(photoNow).toISOString() };
-let photoReads = 0;
-const readCached = async () => {
-  photoReads += 1;
-  return { bytes: Uint8Array.from([7, 8, 9]).buffer, contentType: 'image/jpeg' };
-};
-const firstView = await photoForView({ cache: freshCache, now: photoNow, key: 'k', read: readCached });
-const secondView = await photoForView({ cache: firstView?.nextFields ? { ...freshCache, fields: firstView.nextFields } : null, now: photoNow, key: 'k', read: readCached });
-const staleView = await photoForView({ cache: { ...freshCache, fields: firstView?.nextFields || photoCard, fetchedAt: new Date(photoNow - PLACE_TTL_MS - 5000).toISOString() }, now: photoNow, key: 'k', read: readCached });
-const svgStored = attachPhoto(photoCard, Uint8Array.from([1]), 'image/svg+xml');
 const cardUi = readFileSync('src/app/admin/crm/GooglePlaceCard.tsx', 'utf8');
-assert(jpeg?.contentType === 'image/jpeg' && jpeg.bytes.byteLength === 3 && photoCallsForImage.length === 2 && photoCallsForImage.every((url) => url.includes('searchText') === false) && htmlPhoto === null && hugePhoto === null && cappedPhoto === null && slowPhoto === null && svgPhoto === null && photoRoute.includes('authorizePlacePhoto') && photoRoute.includes('readPlaceCache') && photoRoute.includes('photoForView') && photoRoute.includes('lookupPlace') === false && photoRoute.includes('searchText') === false, 'TEST ONLY: a photo view uses the cached name, times out, stays under the byte cap, and accepts only an image');
-assert(imageType('image/svg+xml') === null && imageType('image/bmp') === null && imageType('image/jpeg') === 'image/jpeg' && imageType('image/png') === 'image/png' && imageType('image/webp') === 'image/webp' && imageType('image/gif') === 'image/gif' && cappedPush && photoReads === 1 && firstView?.nextFields?.photoContentType === 'image/jpeg' && secondView?.nextFields === null && secondView?.bytes.length === 3 && freshPhoto(secondView && firstView?.nextFields ? { ...freshCache, fields: firstView.nextFields } : null, photoNow)?.contentType === 'image/jpeg' && staleView === null && svgStored === null && cardUi.includes('h-auto max-h-48 w-auto max-w-full self-start object-contain') && cardUi.includes('max-h-48 w-full') === false, 'TEST ONLY: a fresh place photo is served from the row with no second Google read, SVG is refused, and the stream stops at the byte cap');
+const placeStore = readFileSync('src/lib/crm/store.ts', 'utf8');
+const stripped = placeCardOnly({ name: 'TEST ONLY', rating: 4, reviewCount: 2, hours: ['Mon'], phone: null, website: null, mapsUrl: null, photoName: 'places/ChIJtest/photos/abc', photoCredits: [], photoBytes: 'aaaa', photoContentType: 'image/jpeg' } as PlaceCache['fields']);
+assert(jpeg?.contentType === 'image/jpeg' && jpeg.bytes.byteLength === 3 && photoCallsForImage.length === 2 && photoCallsForImage.every((url) => url.includes('searchText') === false) && htmlPhoto === null && hugePhoto === null && cappedPhoto === null && slowPhoto === null && svgPhoto === null && photoRoute.includes('authorizePlacePhoto') && photoRoute.includes('readPlaceCache') && photoRoute.includes('sharePhotoLoad') && photoRoute.includes('savePlace') === false && photoRoute.includes('photoBytes') === false && photoRoute.includes('lookupPlace') === false && photoRoute.includes('searchText') === false && photoRoute.includes('private, max-age=3600'), 'TEST ONLY: a photo view fetches the image, writes nothing, and stays under the byte cap');
+assert(imageType('image/svg+xml') === null && imageType('image/bmp') === null && imageType('image/jpeg') === 'image/jpeg' && imageType('image/png') === 'image/png' && imageType('image/webp') === 'image/webp' && imageType('image/gif') === 'image/gif' && cappedPush && PHOTO_MAX_BYTES === 524288 && stripped?.photoName === 'places/ChIJtest/photos/abc' && stripped && !('photoBytes' in stripped) && !('photoContentType' in stripped) && placeStore.includes('photo_name:fields->photoName') && placeStore.includes('photoBytes') === false && cardUi.includes('h-auto max-h-48 w-auto max-w-full self-start object-contain'), 'TEST ONLY: the card read omits photo bytes, SVG is refused, and the cap is 512 KB');
 let sharedReads = 0;
 const sharedRead = () => new Promise<{ bytes: ArrayBuffer; contentType: string }>((resolve) => {
   sharedReads += 1;
   setTimeout(() => resolve({ bytes: Uint8Array.from([4, 5]).buffer, contentType: 'image/jpeg' }), 30);
 });
 const [leftPhoto, rightPhoto] = await Promise.all([
-  sharePhotoLoad('test-only-account', () => photoForView({ cache: freshCache, now: photoNow, key: 'k', read: sharedRead })),
-  sharePhotoLoad('test-only-account', () => photoForView({ cache: freshCache, now: photoNow, key: 'k', read: sharedRead })),
+  sharePhotoLoad('test-only-account', sharedRead),
+  sharePhotoLoad('test-only-account', sharedRead),
 ]);
-let storedFields: PlaceCard | null = photoCard;
-const firstStore = photoBytesAbsent(storedFields) && !!leftPhoto?.nextFields;
-if (firstStore && leftPhoto?.nextFields) storedFields = leftPhoto.nextFields;
-const secondStore = photoBytesAbsent(storedFields);
-const placeStore = readFileSync('src/lib/crm/store.ts', 'utf8');
-assert(sharedReads === 1 && leftPhoto?.bytes.length === 2 && rightPhoto?.bytes.length === 2 && firstStore && secondStore === false && placeStore.includes("fields->>photoBytes.is.null") && photoRoute.includes('sharePhotoLoad') && photoRoute.includes('savePlacePhotoIfAbsent'), 'TEST ONLY: two first photo views share one Google read and only the empty row is stored');
+const laterPhoto = await sharePhotoLoad('test-only-account', sharedRead);
+assert(sharedReads === 2 && leftPhoto?.bytes.byteLength === 2 && rightPhoto?.bytes.byteLength === 2 && laterPhoto?.bytes.byteLength === 2, 'TEST ONLY: simultaneous photo views share one fetch and nothing is kept after it ends');
 const tlsDir = mkdtempSync(join(tmpdir(), 'cg-photo-tls-'));
 execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-keyout', join(tlsDir, 'key.pem'), '-out', join(tlsDir, 'cert.pem'), '-days', '1', '-nodes', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
 const tlsKey = readFileSync(join(tlsDir, 'key.pem'));
@@ -1725,7 +1714,7 @@ try {
 } finally {
   tlsServer.close();
 }
-assert(smallOk && cappedOk, 'TEST ONLY: a pinned https request reads a small image and stops a stream past 2 MB');
+assert(smallOk && cappedOk && photoAddressAllowed('3fff:1000::1') && photoAddressAllowed('5f01::1'), 'TEST ONLY: a pinned https request reads a small image and stops a stream past 512 KB');
 assert(browserLink('https://maps.google.com/a') === 'https://maps.google.com/a' && browserLink('http://shop.test') === 'http://shop.test/' && browserLink('javascript:alert(1)') === null && browserLink('data:text/html,hi') === null && browserLink('ftp://files.test') === null, 'TEST ONLY: a Google card link is only http or https');
 const world: LicenseWorld = {
   accounts: [

@@ -173,8 +173,8 @@ export function authorizeCrmRequest(input: {
   return { ok: true, actorId: input.actorId, brand, role: grant.role };
 }
 
-// An img request cannot send the CRM header. The photo GET still requires a
-// signed-in CedarGrowth desk and the same same-origin checks as other reads.
+// An img request cannot send the CRM header. Current Chrome, Safari, and Firefox
+// send Sec-Fetch-Site: same-origin and omit Origin. A photo GET with neither header fails closed.
 export function authorizePlacePhoto(input: {
   actorId: string | null;
   grants: readonly DeskGrant[];
@@ -183,6 +183,7 @@ export function authorizePlacePhoto(input: {
   headerFetchSite: string | null;
   brandRaw: string | null;
 }): Authz {
+  if (!input.headerFetchSite && !input.headerOrigin) return { ok: false, status: 403, reason: 'Request was rejected.' };
   return authorizeCrmRequest({
     actorId: input.actorId,
     grants: input.grants,

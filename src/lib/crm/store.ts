@@ -29,7 +29,7 @@ import { intakeTestMarker, type IntakeLead } from './intake';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
 import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
 import { wonMergeOnSave, type ContactPrior, type MergeRow } from './distributionMerge';
-import type { PlaceCache, PlaceCard } from './places';
+import { placeCardOnly, type PlaceCache } from './places';
 
 export type StoreResult<T> =
   | { state: 'ok'; value: T; mergeFailed?: boolean }
@@ -379,7 +379,6 @@ export interface CrmStore {
   readAccount(brand: CrmBrand, id: string): Promise<StoreResult<Account | null>>;
   readPlaceCache(brand: CrmBrand, accountId: string): Promise<StoreResult<PlaceCache | null>>;
   savePlaceCache(brand: CrmBrand, accountId: string, cache: PlaceCache): Promise<StoreResult<PlaceCache>>;
-  savePlacePhotoIfAbsent(brand: CrmBrand, accountId: string, fields: PlaceCard): Promise<StoreResult<boolean>>;
   readOpenMerge(brand: CrmBrand, opportunityId: string): Promise<StoreResult<MergeRow | null>>;
   readAccountMerge(brand: CrmBrand, accountId: string): Promise<StoreResult<MergeRow | null>>;
   insertMerge(brand: CrmBrand, row: Omit<MergeRow, 'id'>): Promise<StoreResult<MergeRow>>;
@@ -403,6 +402,7 @@ export function getCrmStore(): CrmStore {
 }
 
 const MERGE_COLS = 'id,account_id,opportunity_id,actor,contact_ids,prior_accounts,created_at,undone_at,undone_by';
+const PLACE_CACHE_SELECT = 'place_id,match_status,fetched_at,name:fields->name,rating:fields->rating,review_count:fields->reviewCount,hours:fields->hours,phone:fields->phone,website:fields->website,maps_url:fields->mapsUrl,photo_name:fields->photoName,photo_credits:fields->photoCredits';
 
 function mapPriors(value: unknown): ContactPrior[] {
   if (!Array.isArray(value)) return [];
@@ -1029,18 +1029,28 @@ class SupabaseCrmStore implements CrmStore {
   }
 
   async readPlaceCache(brand: CrmBrand, accountId: string): Promise<StoreResult<PlaceCache | null>> {
-    const { data, error } = await this.db.from('crm_google_places').select('place_id,match_status,fields,fetched_at').eq('account_id', accountId).eq('brand', brand).maybeSingle();
+    const { data, error } = await this.db.from('crm_google_places').select(PLACE_CACHE_SELECT).eq('account_id', accountId).eq('brand', brand).maybeSingle();
     const failed = classify(error);
     if (failed) return { state: failed };
     if (!data) return { state: 'ok', value: null };
-    const row = data as { place_id?: string | null; match_status?: string; fields?: PlaceCard | null; fetched_at?: string };
+    const row = data as { place_id?: string | null; match_status?: string; fetched_at?: string; name?: unknown; rating?: unknown; review_count?: unknown; hours?: unknown; phone?: unknown; website?: unknown; maps_url?: unknown; photo_name?: unknown; photo_credits?: unknown };
     if (row.match_status !== 'matched' && row.match_status !== 'none') return { state: 'ok', value: null };
     return {
       state: 'ok',
       value: {
         placeId: row.place_id ?? null,
         matchStatus: row.match_status,
-        fields: row.match_status === 'matched' ? row.fields ?? null : null,
+        fields: row.match_status === 'matched' ? placeCardOnly({
+          name: row.name,
+          rating: row.rating,
+          reviewCount: row.review_count,
+          hours: row.hours,
+          phone: row.phone,
+          website: row.website,
+          mapsUrl: row.maps_url,
+          photoName: row.photo_name,
+          photoCredits: row.photo_credits,
+        }) : null,
         fetchedAt: String(row.fetched_at || ''),
       },
     };
@@ -1052,21 +1062,13 @@ class SupabaseCrmStore implements CrmStore {
       brand,
       place_id: cache.placeId,
       match_status: cache.matchStatus,
-      fields: cache.fields ?? {},
+      fields: placeCardOnly(cache.fields) ?? {},
       fetched_at: cache.fetchedAt,
     }, { onConflict: 'account_id' });
     const failed = classify(error);
     if (failed) return { state: failed };
     if (error) return { state: 'unavailable' };
     return { state: 'ok', value: cache };
-  }
-
-  async savePlacePhotoIfAbsent(brand: CrmBrand, accountId: string, fields: PlaceCard): Promise<StoreResult<boolean>> {
-    const { data, error } = await this.db.from('crm_google_places').update({ fields }).eq('account_id', accountId).eq('brand', brand).or('fields->>photoBytes.is.null,fields->>photoBytes.eq.').select('account_id');
-    const failed = classify(error);
-    if (failed) return { state: failed };
-    if (error) return { state: 'unavailable' };
-    return { state: 'ok', value: Array.isArray(data) && data.length > 0 };
   }
 
   async readOpenMerge(brand: CrmBrand, opportunityId: string): Promise<StoreResult<MergeRow | null>> {
