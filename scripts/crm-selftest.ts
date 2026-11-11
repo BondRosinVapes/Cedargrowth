@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { assertDashboardTabs } from './crm-dashboard-tabs-selftest.ts';
 import { createHash } from 'node:crypto';
-import { allowedPhotoUrl, cachedPhotoName, collectCapped, currentPhotoName, fetchAllowedPhoto, imageType, loadStoredOrGooglePhoto, lookupPlace, PHOTO_CACHE_CONTROL, PHOTO_MAX_BYTES, PHOTO_MAX_HEIGHT_PX, PHOTO_MAX_WIDTH_PX, photoAddressAllowed, photoMediaUrl, photoResponseHeaders, pinnedPhotoRequest, PLACE_TTL_MS, placeCacheFresh, placeCardOnly, placePhotoObjectPath, placeQuery, placeReadPlan, readPlacePhoto, retainPlaceCache, sharePhotoLoad, shouldPurgePlaceDetails, storedPlaceCard, storesPlaceDetails, type PhotoLookup, type PlaceCache } from '../src/lib/crm/places.ts';
+import { allowedPhotoUrl, cachedPhotoName, collectCapped, currentPhotoName, fetchAllowedPhoto, imageType, loadStoredOrGooglePhoto, lookupPlace, PHOTO_CACHE_CONTROL, PHOTO_MAX_BYTES, PHOTO_MAX_HEIGHT_PX, PHOTO_MAX_WIDTH_PX, photoAddressAllowed, photoMediaUrl, photoResponseHeaders, pinnedPhotoRequest, PLACE_TTL_MS, placeCacheFresh, placeCardOnly, placePhotoObjectPath, placeQuery, placeReadPlan, readPlacePhoto, retainPlaceCache, serveStoredPhoto, sharePhotoLoad, shouldPurgePlaceDetails, storedPlaceCard, storesPlaceDetails, type PhotoLookup, type PlaceCache } from '../src/lib/crm/places.ts';
 import { browserLink, stablePhotoUrl } from '../src/lib/crm/placeLinks.ts';
 import { applyWonMerge, undoWonMerge, wonMergeOnSave, type LicenseWorld } from '../src/lib/crm/distributionMerge.ts';
 import { handleDistributionMerge, handleGooglePlace } from '../src/lib/crm/googlePlaceHandler.ts';
@@ -1893,6 +1893,17 @@ const failedUpload = await loadStoredOrGooglePhoto({
 });
 const photoBucket = readFileSync('src/lib/crm/placePhotoBucket.ts', 'utf8');
 const placeSource = readFileSync('src/lib/crm/places.ts', 'utf8');
+let nonWonGoogle = 0;
+const nonWonKept = serveStoredPhoto({ bytes: storedBytes, contentType: 'image/jpeg' });
+const nonWonServed = await loadStoredOrGooglePhoto({
+  stored: nonWonKept,
+  readGoogle: async () => { nonWonGoogle += 1; return { bytes: new Uint8Array([4]), contentType: 'image/jpeg' }; },
+  upload: async () => true,
+  log: () => undefined,
+});
+const photoGet = photoRoute.slice(photoRoute.indexOf('export async function GET'));
+const purgeBody = placeStore.slice(placeStore.indexOf('async purgePlaceDetails'), placeStore.indexOf('async clearPlaceDetailsIfNotSelling'));
+assert(storesPlaceDetails(['proposal']) === false && nonWonKept?.bytes[0] === 9 && nonWonServed?.bytes[0] === 9 && nonWonGoogle === 0 && photoGet.indexOf('serveStoredPhoto') < photoGet.indexOf('accountHasWonDeal') && photoGet.includes('not gated on a Won deal') && purgeBody.includes('removeStoredPlacePhotos') === false && purgeBody.includes('fields: {}') && placeStore.includes('leaving Won clears cached place details only') && placeStore.includes('removeStoredPlacePhotos(previousPlaceId)') && placeStore.includes('await this.removePhotosForAccount(accountId)'), 'TEST ONLY: a non-Won store keeps serving its stored photo, and leaving Won does not delete it');
 assert(photoObjectPath === `ChIJtest/${photoObjectSha}.jpg` && placePhotoObjectPath('ChIJtest', photoObjectName, 'image/png')?.endsWith('.png') === true && placePhotoObjectPath('ChIJtest', photoObjectName, 'image/webp')?.endsWith('.webp') === true && placePhotoObjectPath('ChIJtest', photoObjectName, 'image/gif') === null && firstStored?.bytes[0] === 9 && secondStored?.bytes[0] === 9 && googleReads === 1 && uploads === 1 && failedUpload?.bytes[0] === 9 && uploadLogs.length === 1 && photoBucket.includes('from(PLACE_PHOTO_BUCKET)') && photoBucket.includes('createSignedUrl') === false && photoBucket.includes('getPublicUrl') === false && photoBucket.includes('FIELD_BUCKET') === false && photoBucket.includes('COA_BUCKET') === false && placeSource.includes("PLACE_PHOTO_BUCKET = 'crm-place-photos'") && placeStore.includes('previousPlaceId !== cache.placeId') && placeStore.includes('removeStoredPlacePhotos(previousPlaceId)') && placeStore.includes('await this.removePhotosForAccount(accountId)'), 'TEST ONLY: the first photo is stored, a later view skips Google, and a failed upload still returns the bytes');
 let sharedPlaceFetches = 0;
 const sharedPlace = async () => {

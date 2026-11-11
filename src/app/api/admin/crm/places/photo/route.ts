@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { authorizePlacePhoto } from '@/lib/crm/engine';
 import { findStoredPlacePhoto, uploadStoredPlacePhoto } from '@/lib/crm/placePhotoBucket';
-import { cachedPhotoName, dnsPhotoLookup, loadStoredOrGooglePhoto, photoResponseHeaders, pinnedPhotoRequest, placeQuery, readPlacePhoto, resolvePlacePhoto, sharePhotoLoad } from '@/lib/crm/places';
+import { cachedPhotoName, dnsPhotoLookup, loadStoredOrGooglePhoto, photoResponseHeaders, pinnedPhotoRequest, placeQuery, readPlacePhoto, resolvePlacePhoto, serveStoredPhoto, sharePhotoLoad } from '@/lib/crm/places';
 import { resolveDeskAccess } from '@/lib/crm/salesSession';
 import { getCrmStore } from '@/lib/crm/store';
 
@@ -25,8 +25,8 @@ export async function GET(request: Request) {
   const key = process.env.GOOGLE_PLACES_API_KEY?.trim() || '';
   if (!key || !accountId) return new NextResponse(null, { status: 404 });
   const store = getCrmStore();
-  const selling = await store.accountHasWonDeal(auth.brand, accountId);
-  if (selling.state !== 'ok') return new NextResponse(null, { status: 404 });
+  // Gary, 11:50 PM ET on 2026-11-10: store photos for every dispensary.
+  // A stored photo is not gated on a Won deal. The Won rule covers cached place details only.
   const photo = await sharePhotoLoad(`${auth.brand}:${accountId}`, async () => {
     const account = await store.readAccount(auth.brand, accountId);
     const cache = await store.readPlaceCache(auth.brand, accountId);
@@ -34,12 +34,14 @@ export async function GET(request: Request) {
     const placeId = cache.value?.placeId ?? null;
     if (placeId) {
       try {
-        const stored = await findStoredPlacePhoto(placeId);
-        if (stored) return { bytes: stored.bytes.buffer.slice(stored.bytes.byteOffset, stored.bytes.byteOffset + stored.bytes.byteLength) as ArrayBuffer, contentType: stored.contentType };
+        const kept = serveStoredPhoto(await findStoredPlacePhoto(placeId));
+        if (kept) return { bytes: kept.bytes.buffer.slice(kept.bytes.byteOffset, kept.bytes.byteOffset + kept.bytes.byteLength) as ArrayBuffer, contentType: kept.contentType };
       } catch {
         console.error('crm place photo read failed', { accountId });
       }
     }
+    const selling = await store.accountHasWonDeal(auth.brand, accountId);
+    if (selling.state !== 'ok') return null;
     const now = Date.now();
     const known = cachedPhotoName({ sells: selling.value, cache: cache.value, now });
     const resolved = await resolvePlacePhoto({

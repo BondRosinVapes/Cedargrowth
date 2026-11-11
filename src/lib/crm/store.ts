@@ -1111,6 +1111,8 @@ class SupabaseCrmStore implements CrmStore {
     }
   }
 
+  // Gary, 11:50 PM ET on 2026-11-10: leaving Won clears cached place details only.
+  // Stored photos stay until the place_id changes or the account is deleted.
   async purgePlaceDetails(brand: CrmBrand, accountId: string): Promise<StoreResult<{ purged: true }>> {
     const { error } = await this.db.from('crm_google_places').update({ fields: {} }).eq('brand', brand).eq('account_id', accountId);
     const failed = classify(error);

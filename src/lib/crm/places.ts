@@ -230,6 +230,10 @@ export function placePhotoObjectPath(placeId: string, photoName: string, content
   return `${prefix}/${sha}.${ext}`;
 }
 
+export function serveStoredPhoto(stored: { bytes: Uint8Array; contentType: string } | null): { bytes: Uint8Array; contentType: string } | null {
+  return stored;
+}
+
 export async function loadStoredOrGooglePhoto(input: {
   stored: { bytes: Uint8Array; contentType: string } | null;
   readGoogle: () => Promise<{ bytes: Uint8Array; contentType: string } | null>;
