@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { browserLink, freshPhotoSrc } from '@/lib/crm/placeLinks';
+import { browserLink } from '@/lib/crm/placeLinks';
 
 type Card = {
   name: string;
@@ -18,11 +18,10 @@ type Card = {
 export function GooglePlaceCard({ accountId }: { accountId: string }) {
   const [state, setState] = useState<'loading' | 'not_connected' | 'no_match' | 'matched'>('loading');
   const [card, setCard] = useState<Card | null>(null);
-  const [photoSrc, setPhotoSrc] = useState<string | null>(null);
 
   useEffect(() => {
     let cancel = false;
-    setPhotoSrc(null);
+    setCard(null);
     fetch(`/api/admin/crm/places?brand=cedargrowth&accountId=${encodeURIComponent(accountId)}`, {
       headers: { 'x-cedargrowth-crm': '1' },
       credentials: 'same-origin',
@@ -30,14 +29,12 @@ export function GooglePlaceCard({ accountId }: { accountId: string }) {
       if (cancel) return;
       if (body.state === 'matched' && body.card) {
         setCard(body.card);
-        setPhotoSrc(body.card.photoUrl ? freshPhotoSrc(body.card.photoUrl, crypto.randomUUID()) : null);
         setState('matched');
         return;
       }
       setCard(null);
-      setPhotoSrc(null);
       setState(body.state === 'not_connected' ? 'not_connected' : 'no_match');
-    }).catch(() => { if (!cancel) { setPhotoSrc(null); setState('not_connected'); } });
+    }).catch(() => { if (!cancel) setState('not_connected'); });
     return () => { cancel = true; };
   }, [accountId]);
 
@@ -57,10 +54,10 @@ export function GooglePlaceCard({ accountId }: { accountId: string }) {
           {card.hours.length ? <ul className="flex flex-col gap-1">{card.hours.map((line) => <li key={line} className="text-caption text-secondary">{line}</li>)}</ul> : <p className="text-caption text-tertiary">Hours not provided.</p>}
           <p className="text-body-m text-primary">{card.phone || 'No phone'}</p>
           {website ? <a href={website} className="min-h-[44px] text-body-m text-primary underline">Website</a> : <p className="text-caption text-tertiary">No website</p>}
-          {photoSrc ? (
+          {card.photoUrl ? (
             // The photo is proxied by our server. The Google key never reaches the browser.
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={photoSrc} alt="" className="h-auto max-h-48 w-auto max-w-full self-start object-contain" />
+            <img src={card.photoUrl} alt="" className="h-auto max-h-48 w-auto max-w-full self-start object-contain" />
           ) : null}
           {card.photoCredits.length ? <p className="text-caption text-tertiary">Photo: {card.photoCredits.join(', ')}</p> : null}
           {mapsUrl ? <a href={mapsUrl} className="inline-flex min-h-[44px] items-center text-body-m text-primary underline">View on Google Maps</a> : null}

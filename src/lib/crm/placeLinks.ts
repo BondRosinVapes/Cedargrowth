@@ -13,10 +13,13 @@ export function browserLink(raw: string | null | undefined): string | null {
   return url.toString();
 }
 
-export function freshPhotoSrc(photoUrl: string, viewId: string): string | null {
-  const id = viewId.trim();
-  if (!photoUrl || !id) return null;
-  const url = new URL(photoUrl, 'https://cedargrowth.vercel.app');
-  url.searchParams.set('view', id);
-  return `${url.pathname}?${url.searchParams.toString()}`;
+export function stablePhotoUrl(accountId: string, photoName: string): string | null {
+  const account = accountId.trim();
+  const photo = photoName.trim();
+  if (!account || !photo || photo.includes('..') || /[\s?#]/.test(photo)) return null;
+  const params = new URLSearchParams();
+  params.set('brand', 'cedargrowth');
+  params.set('accountId', account);
+  params.set('photo', photo);
+  return `/api/admin/crm/places/photo?${params.toString()}`;
 }

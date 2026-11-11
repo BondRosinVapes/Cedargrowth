@@ -235,7 +235,7 @@ export function placeCardOnly(input: {
   };
 }
 
-export const PHOTO_CACHE_CONTROL = 'no-store, private';
+export const PHOTO_CACHE_CONTROL = 'private, max-age=3600';
 
 export function photoResponseHeaders(contentType: string): Record<string, string> {
   return {

@@ -1,7 +1,7 @@
 import { authorizeCrmRequest, isDispensaryAccount } from './engine';
 import type { CrmContext, CrmResult } from './handlers';
 import { loadPlace, placeQuery, placeReadPlan, retainPlaceCache, type PlaceCard } from './places';
-import { browserLink } from './placeLinks';
+import { browserLink, stablePhotoUrl } from './placeLinks';
 
 function denied(status: number, reason: string): CrmResult {
   return { status, body: { ok: false, reason } };
@@ -66,7 +66,7 @@ function publicCard(accountId: string, card: PlaceCard) {
     website: browserLink(card.website),
     mapsUrl: browserLink(card.mapsUrl),
     photoCredits: card.photoCredits,
-    photoUrl: card.photoName ? `/api/admin/crm/places/photo?brand=cedargrowth&accountId=${encodeURIComponent(accountId)}` : null,
+    photoUrl: card.photoName ? stablePhotoUrl(accountId, card.photoName) : null,
   };
 }
 
