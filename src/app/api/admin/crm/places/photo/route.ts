@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { authorizeCrmRequest } from '@/lib/crm/engine';
-import { readPlacePhoto } from '@/lib/crm/places';
+import { dnsPhotoLookup, pinnedPhotoRequest, readPlacePhoto } from '@/lib/crm/places';
 import { resolveDeskAccess } from '@/lib/crm/salesSession';
 import { getCrmStore } from '@/lib/crm/store';
 
@@ -28,7 +28,7 @@ export async function GET(request: Request) {
   const cache = await getCrmStore().readPlaceCache(auth.brand, accountId);
   const photoName = cache.state === 'ok' ? cache.value?.fields?.photoName : null;
   if (!photoName) return new NextResponse(null, { status: 404 });
-  const photo = await readPlacePhoto(photoName, key, fetch);
+  const photo = await readPlacePhoto(photoName, key, { lookup: dnsPhotoLookup, request: pinnedPhotoRequest });
   if (!photo) return new NextResponse(null, { status: 404 });
   return new NextResponse(photo.bytes, {
     status: 200,

@@ -138,6 +138,7 @@ begin
       join public.crm_accounts a on a.id = c.account_id and a.brand = c.brand
       where c.brand = 'cedargrowth'
         and a.brand = 'cedargrowth'
+        and a.account_type in ('adult_use_dispensary', 'microbusiness', 'registered_organization')
         and a.id <> v_account
         and a.license_ref is not null
         and btrim(a.license_ref) <> ''
@@ -158,7 +159,7 @@ begin
 end;
 $$;
 
-comment on function public.crm_merge_won_distribution(uuid, text) is 'One transaction. Moves CedarGrowth contacts from other accounts with the same trimmed lowercase license onto the won dispensary account and writes one audit row. A blank license matches nothing. Zero contacts still writes the audit row.';
+comment on function public.crm_merge_won_distribution(uuid, text) is 'One transaction. Moves contacts from other CedarGrowth dispensary accounts with the same trimmed lowercase license onto the won dispensary account and writes one audit row. A distributor or other account type is not a source. A blank license matches nothing. Zero contacts still writes the audit row.';
 
 create or replace function public.crm_undo_distribution_merge(p_merge_id uuid, p_actor text, p_now timestamptz)
 returns jsonb

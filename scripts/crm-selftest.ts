@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { assertDashboardTabs } from './crm-dashboard-tabs-selftest.ts';
-import { allowedPhotoUrl, fetchAllowedPhoto, lookupPlace, photoMediaUrl, PLACE_TTL_MS, placeCacheFresh, placeQuery, placeReadPlan, readPlacePhoto, type PlaceCache } from '../src/lib/crm/places.ts';
+import { allowedPhotoUrl, fetchAllowedPhoto, lookupPlace, photoAddressAllowed, photoMediaUrl, PLACE_TTL_MS, placeCacheFresh, placeQuery, placeReadPlan, readPlacePhoto, type PhotoLookup, type PlaceCache } from '../src/lib/crm/places.ts';
 import { applyWonMerge, undoWonMerge, type LicenseWorld } from '../src/lib/crm/distributionMerge.ts';
 import { isDispensaryAccount } from '../src/lib/crm/engine.ts';
 import { assertProductionForecast } from './crm-production-forecast-selftest.ts';
@@ -1532,11 +1532,15 @@ assert(placeHit?.placeId === 'ChIJtest' && placeHit.card.name === 'TEST ONLY Sho
 const none = await lookupPlace('1 Test St, Buffalo, NY', 'server-key', async () => new Response(JSON.stringify({ places: [] }), { status: 200 }));
 assert(none === null, 'TEST ONLY: an empty Google search is no match');
 const photoCalls: string[] = [];
-const blockedPhoto = await readPlacePhoto('https://127.0.0.1/secret', 'server-key', async (input) => { photoCalls.push(String(input)); return new Response('no'); });
-const metadataPhoto = await readPlacePhoto('places/ok/photos/pic', 'server-key', async (input) => {
-  photoCalls.push(String(input));
-  if (String(input).includes('places.googleapis.com')) return new Response(JSON.stringify({ photoUri: 'https://169.254.169.254/latest' }), { status: 200 });
-  return new Response('secret', { status: 200 });
+const publicLookup: PhotoLookup = async () => [{ address: '142.250.190.78', family: 4 }];
+const blockedPhoto = await readPlacePhoto('https://127.0.0.1/secret', 'server-key', { lookup: publicLookup, request: async (url) => { photoCalls.push(url); return new Response('no'); } });
+const metadataPhoto = await readPlacePhoto('places/ok/photos/pic', 'server-key', {
+  lookup: publicLookup,
+  request: async (url) => {
+    photoCalls.push(url);
+    if (url.includes('places.googleapis.com')) return new Response(JSON.stringify({ photoUri: 'https://169.254.169.254/latest' }), { status: 200 });
+    return new Response('secret', { status: 200 });
+  },
 });
 const httpPhoto = allowedPhotoUrl('http://lh3.googleusercontent.com/a');
 const localPhoto = allowedPhotoUrl('https://127.0.0.1/latest');
@@ -1544,12 +1548,43 @@ const metaPhoto = allowedPhotoUrl('https://169.254.169.254/latest');
 const metaV6 = allowedPhotoUrl('https://[fd00:ec2::254]/latest');
 const badName = photoMediaUrl('places/../photos/secret');
 const goodName = photoMediaUrl('places/ChIJtest/photos/abc');
-const redirected = await fetchAllowedPhoto('https://lh3.googleusercontent.com/a', async (input) => {
-  photoCalls.push(String(input));
-  if (String(input).includes('googleusercontent.com')) return new Response(null, { status: 302, headers: { location: 'http://169.254.170.2/meta' } });
-  return new Response('secret', { status: 200 });
+const redirected = await fetchAllowedPhoto('https://lh3.googleusercontent.com/a', {
+  lookup: publicLookup,
+  request: async (url) => {
+    photoCalls.push(url);
+    if (url.includes('googleusercontent.com')) return new Response(null, { status: 302, headers: { location: 'http://169.254.170.2/meta' } });
+    return new Response('secret', { status: 200 });
+  },
+});
+const pinned: string[] = [];
+const privatePhoto = async (address: string) => fetchAllowedPhoto('https://lh3.googleusercontent.com/a', {
+  lookup: async () => [{ address, family: address.includes(':') ? 6 : 4 }],
+  request: async (_url, resolved) => { pinned.push(resolved); return new Response('secret', { status: 200 }); },
+});
+const keptPrivate = await Promise.all(['127.0.0.1', '10.1.2.3', '192.168.1.1', '172.16.4.4', '169.254.169.254', '0.1.2.3', '::1', 'fe80::1', 'fd00:ec2::254', '::ffff:127.0.0.1', '::ffff:8.8.8.8'].map((address) => privatePhoto(address)));
+const mixedDns = await fetchAllowedPhoto('https://lh3.googleusercontent.com/a', {
+  lookup: async () => [{ address: '8.8.8.8', family: 4 }, { address: '127.0.0.1', family: 4 }],
+  request: async (_url, resolved) => { pinned.push(resolved); return new Response('secret', { status: 200 }); },
+});
+const publicPhoto = await fetchAllowedPhoto('https://lh3.googleusercontent.com/a', {
+  lookup: async () => [{ address: '142.250.190.78', family: 4 }, { address: '2001:4860:4802:32::78', family: 6 }],
+  request: async (_url, resolved) => { pinned.push(resolved); return new Response('ok', { status: 200 }); },
+});
+const hopCalls: string[] = [];
+const privateHop = await fetchAllowedPhoto('https://lh3.googleusercontent.com/a', {
+  lookup: async (host) => [{ address: host.startsWith('lh3') ? '142.250.190.78' : '10.0.0.8', family: 4 }],
+  request: async (url, resolved) => { hopCalls.push(`${resolved} ${url}`); return new Response(null, { status: 302, headers: { location: 'https://lh4.googleusercontent.com/b' } }); },
+});
+const followed = await fetchAllowedPhoto('https://lh3.googleusercontent.com/a', {
+  lookup: async (host) => [{ address: host.startsWith('lh3') ? '142.250.190.78' : '142.250.190.79', family: 4 }],
+  request: async (_url, resolved) => {
+    hopCalls.push(resolved);
+    if (resolved === '142.250.190.78') return new Response(null, { status: 302, headers: { location: 'https://lh4.googleusercontent.com/b' } });
+    return new Response('img', { status: 200 });
+  },
 });
 assert(blockedPhoto === null && metadataPhoto === null && httpPhoto === null && localPhoto === null && metaPhoto === null && metaV6 === null && badName === null && goodName === 'https://places.googleapis.com/v1/places/ChIJtest/photos/abc/media?maxHeightPx=400&skipHttpRedirect=true' && redirected === null && photoCalls.some((href) => href.includes('169.254')) === false && photoCalls.some((href) => href.includes('127.0.0.1')) === false, 'TEST ONLY: a photo name and a photo URL stay on Google hosts');
+assert(keptPrivate.every((row) => row === null) && mixedDns === null && pinned.join(',') === '142.250.190.78' && photoAddressAllowed('8.8.8.8') && photoAddressAllowed('2001:4860:4802:32::78') && privateHop === null && hopCalls[0] === '142.250.190.78 https://lh3.googleusercontent.com/a' && hopCalls[1] === '142.250.190.78' && hopCalls[2] === '142.250.190.79' && (await followed?.text()) === 'img', 'TEST ONLY: a photo connects only to a checked public address, including each redirect hop');
 const world: LicenseWorld = {
   accounts: [
     { id: 'won', brand: 'cedargrowth', accountType: 'adult_use_dispensary', licenseRef: ' OCM-123 ' },
@@ -1558,6 +1593,7 @@ const world: LicenseWorld = {
     { id: 'blank', brand: 'cedargrowth', accountType: 'adult_use_dispensary', licenseRef: '   ' },
     { id: 'bond', brand: 'bond', accountType: 'adult_use_dispensary', licenseRef: 'ocm-123' },
     { id: 'dist', brand: 'cedargrowth', accountType: 'distributor', licenseRef: 'ocm-123' },
+    { id: 'other', brand: 'cedargrowth', accountType: 'processor', licenseRef: 'ocm-123' },
   ],
   contacts: [
     { id: 'on-won', brand: 'cedargrowth', accountId: 'won' },
@@ -1565,6 +1601,8 @@ const world: LicenseWorld = {
     { id: 'from-punct', brand: 'cedargrowth', accountId: 'punct' },
     { id: 'from-blank', brand: 'cedargrowth', accountId: 'blank' },
     { id: 'from-bond', brand: 'bond', accountId: 'bond' },
+    { id: 'from-dist', brand: 'cedargrowth', accountId: 'dist' },
+    { id: 'from-other', brand: 'cedargrowth', accountId: 'other' },
   ],
   merges: [],
   notes: [{ id: 'note-1', accountId: 'dup' }],
@@ -1577,7 +1615,7 @@ const distributor = applyWonMerge(world, { opportunityId: 'deal-dist', accountId
 const blankWon = applyWonMerge({ ...world, accounts: world.accounts.map((row) => row.id === 'won' ? { ...row, licenseRef: '' } : row) }, { opportunityId: 'deal-blank', accountId: 'won', actor: 'gary@cedargrowthco.com', now: freshAt, stage: 'won' });
 const gone = undoWonMerge({ ...wonCreated.world, accounts: wonCreated.world.accounts.filter((row) => row.id !== 'dup') }, wonCreated.world.merges[0]?.id || '', 'gary@cedargrowthco.com', staleAt);
 const moved = (id: string, rows = wonCreated.world.contacts) => rows.find((row) => row.id === id)?.accountId;
-assert(wonCreated.code === 'merged' && moved('from-dup') === 'won' && moved('on-won') === 'won' && moved('from-punct') === 'punct' && moved('from-blank') === 'blank' && moved('from-bond') === 'bond' && wonCreated.world.notes[0]?.accountId === 'dup' && wonCreated.world.merges[0]?.priors[0]?.priorAccountId === 'dup', 'TEST ONLY: the same license with different spacing and case moves that contact, and punctuation, a blank license, and Bond stay put');
+assert(wonCreated.code === 'merged' && moved('from-dup') === 'won' && moved('on-won') === 'won' && moved('from-punct') === 'punct' && moved('from-blank') === 'blank' && moved('from-bond') === 'bond' && moved('from-dist') === 'dist' && moved('from-other') === 'other' && wonCreated.world.notes[0]?.accountId === 'dup' && wonCreated.world.merges[0]?.priors[0]?.priorAccountId === 'dup', 'TEST ONLY: the same license with different spacing and case moves that contact, and punctuation, a blank license, Bond, a distributor, and another account type stay put');
 assert(again.code === 'already' && again.world.merges.length === 1 && again.world.contacts.find((row) => row.id === 'from-dup')?.accountId === 'won', 'TEST ONLY: a second won on the same open merge does nothing');
 assert(undone.refused.length === 0 && undone.world.contacts.find((row) => row.id === 'from-dup')?.accountId === 'dup' && undone.world.merges[0]?.undoneAt === staleAt && undone.world.merges[0]?.undoneBy === 'gary@cedargrowthco.com', 'TEST ONLY: undo restores each prior account id');
 assert(notWon.code === 'not_won' && notWon.world.merges.length === 0 && distributor.code === 'skipped' && distributor.world.merges.length === 0 && blankWon.code === 'merged' && blankWon.world.merges[0]?.contactIds.length === 0 && blankWon.world.contacts.every((row) => row.accountId !== 'won' || row.id === 'on-won'), 'TEST ONLY: a lead does not merge, a distributor does not merge, and a blank license records that nothing moved');
@@ -1588,7 +1626,7 @@ const createOpp = storeSrc.slice(storeSrc.indexOf('async createOpportunity'), st
 const updateOpp = storeSrc.slice(storeSrc.indexOf('async updateOpportunity'), storeSrc.indexOf('private async mergeWonContacts'));
 const orderWon = storeSrc.slice(storeSrc.indexOf('async markDealWonFromOrder'), storeSrc.indexOf('async listStageEvents'));
 assert(createOpp.includes("input.stage === 'won'") && createOpp.includes('mergeWonContacts') && updateOpp.includes("patch.stage === 'won'") && updateOpp.includes('mergeWonContacts') && orderWon.includes("stage: 'won'") && storeSrc.includes('crm_merge_won_distribution') && isDispensaryAccount('adult_use_dispensary') && isDispensaryAccount('microbusiness') && isDispensaryAccount('registered_organization') && isDispensaryAccount('distributor') === false, 'TEST ONLY: creating at Won, saving as Won, and marking won from an order run the same merge');
-assert(mergeSql.includes("lower(btrim(a.license_ref)) = v_key") && mergeSql.includes("v_key <> ''") && mergeSql.includes("a.brand = 'cedargrowth'") && mergeSql.includes('for update') && mergeSql.includes('crm_notes') === false && mergeSql.includes('crm_tasks') === false && mergeSql.includes('crm_distributor_orders') === false, 'TEST ONLY: the migration matches license by trim and lowercase in one transaction and does not move notes, tasks, or orders');
+assert(mergeSql.includes("lower(btrim(a.license_ref)) = v_key") && mergeSql.includes("v_key <> ''") && mergeSql.includes("a.brand = 'cedargrowth'") && mergeSql.includes("a.account_type in ('adult_use_dispensary', 'microbusiness', 'registered_organization')") && mergeSql.includes('for update') && mergeSql.includes('crm_notes') === false && mergeSql.includes('crm_tasks') === false && mergeSql.includes('crm_distributor_orders') === false, 'TEST ONLY: the migration matches a dispensary source license by trim and lowercase in one transaction and does not move notes, tasks, or orders');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);
 

@@ -50,7 +50,7 @@ export function applyWonMerge(world: LicenseWorld, input: {
   if (world.merges.some((row) => row.opportunityId === input.opportunityId && row.undoneAt === null)) return { world, code: 'already' };
   const key = licenseKey(won.licenseRef);
   const matched = new Set(key
-    ? world.accounts.filter((account) => account.brand === 'cedargrowth' && account.id !== won.id && licenseKey(account.licenseRef) === key).map((account) => account.id)
+    ? world.accounts.filter((account) => account.brand === 'cedargrowth' && account.id !== won.id && isDispensaryAccount(account.accountType) && licenseKey(account.licenseRef) === key).map((account) => account.id)
     : []);
   const moving = world.contacts.filter((contact) => contact.brand === 'cedargrowth' && matched.has(contact.accountId));
   const priors = moving.map((contact) => ({ contactId: contact.id, priorAccountId: contact.accountId }));
