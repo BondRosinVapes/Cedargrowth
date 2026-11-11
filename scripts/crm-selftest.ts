@@ -26,7 +26,8 @@ import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmat
 import { buildDigest, hoodieSignals, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
 import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, parseCounty, regionForCounty } from '../src/lib/crm/nyRegions.ts';
 import { coverageLabel } from '../src/lib/crm/territory.ts';
-import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, cityChoices, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, framePoints, MAP_HEIGHT, MAP_WIDTH, pinCard, placePins, projectNy, unmappedAccountCount, wholeStateFrame, type MapPin } from '../src/lib/crm/nyMap.ts';
+import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, boundaryPins, boxesIntersect, cityChoices, CLOSEST_DISTINCT_PIN_UNITS, clusterFrame, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, dispensaryCard, framePoints, groupHitBox, hitAt, MAP_HEIGHT, MAP_WIDTH, markerPixels, markerUnits, mergeGap, minZoomWidth, nextZoomView, pinCard, placePins, projectNy, storefrontSeparation, unmappedAccountCount, wholeStateFrame, zoomPresses, zoomStops, type MapPin, type PlacedPin } from '../src/lib/crm/nyMap.ts';
+import { cardAccountFields, cardContactFields, contactMailHref, contactTelHref, mailtoHref, telHref } from '../src/lib/crm/pinCard.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
@@ -80,6 +81,7 @@ import {
 } from '../src/lib/crm/engine.ts';
 import {
   handleAccountCollection,
+  handleAccountRead,
   handleContactCollection,
   handleCounts,
   handleExport,
@@ -463,6 +465,9 @@ class MemoryCrm implements CrmStore {
   async listAccounts(brand: 'cedargrowth' | 'bond', filter: { q: string | null; status: Account['status'] | null }) {
     return { state: 'ok' as const, value: this.accounts.filter((row) => row.brand === brand && (!filter.status || row.status === filter.status) && (!filter.q || row.displayName.toLowerCase().includes(filter.q))) };
   }
+  async readAccount(brand: 'cedargrowth' | 'bond', id: string) {
+    return { state: 'ok' as const, value: this.accounts.find((row) => row.id === id && row.brand === brand) ?? null };
+  }
   async createAccount(brand: 'cedargrowth' | 'bond', actor: string, input: { displayName: string; status: Account['status']; city: string | null; county?: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: Account['accountType']; leadSource?: Account['leadSource']; distributor?: Account['distributor']; distributorAccountRef?: string | null }) {
     const row: Account = { id: this.id(), publicId: `test-only:${brand}:account`, brand, displayName: input.displayName, status: input.status, city: input.city, county: input.county ?? null, notes: input.notes, licenseRef: input.licenseRef ?? null, facilityRef: input.facilityRef ?? null, licenseJurisdiction: input.licenseJurisdiction ?? null, licenseExpiry: input.licenseExpiry ?? null, assignedRep: input.assignedRep ?? null, accountType: input.accountType ?? null, leadSource: input.leadSource ?? null, distributor: input.distributor ?? null, distributorAccountRef: input.distributorAccountRef ?? null, createdAt: 'test-only', updatedAt: 'test-only', createdBy: actor, updatedBy: actor };
     this.accounts.push(row);
@@ -478,7 +483,7 @@ class MemoryCrm implements CrmStore {
     return { state: 'ok' as const, value: row };
   }
   async updateAccount() { return { state: 'missing' as const }; }
-  async listContacts(brand: 'cedargrowth' | 'bond') { return { state: 'ok' as const, value: this.contacts.filter((row) => row.brand === brand) }; }
+  async listContacts(brand: 'cedargrowth' | 'bond', accountId?: string | null) { return { state: 'ok' as const, value: this.contacts.filter((row) => row.brand === brand && (!accountId || row.accountId === accountId)) }; }
   async createContact(brand: 'cedargrowth' | 'bond', _actor: string, input: { accountId: string; name: string; preference?: Contact['preference']; email?: string | null; title?: string | null; phone?: string | null; notes?: string }) {
     const account = this.accounts.find((row) => row.id === input.accountId && row.brand === brand);
     if (!account) return { state: 'rejected' as const };
@@ -1511,6 +1516,74 @@ const placed = placePins([testPin('north', 42.89, -78.88), testPin('south', 42.8
 assert(clusterPins(placed, 40).clusters.length === 1 && clusterPins(placed, 0.05).singles.length === 2, 'nearby TEST ONLY pins cluster, then split when the cell is smaller');
 const card = pinCard(testPin('card', 42.89, -78.88));
 assert(card.some((row) => row.label === 'Rep' && row.value === 'No rep') && card.some((row) => row.mono && row.value === 'TEST-ONLY-LIC') && card.some((row) => row.label === 'Distributor' && row.value === 'Nabis') && card.some((row) => row.label === 'Contacts' && row.value === '2'), 'a pin card shows the dispensary fields and No rep');
+const withContacts = dispensaryCard({ displayName: 'TEST ONLY Shop', licenseRef: 'TEST-ONLY-LIC', accountType: 'adult_use_dispensary', ocmStatus: 'verified', street: '1 Test St', city: 'Buffalo', postalCode: '14201', county: 'Erie', status: 'active', assignedRep: 'Ada' }, [{ id: 'c1', name: 'Ada Buyer', title: 'Buyer', email: 'ada@test.only', phone: '5550100' }]);
+const withoutContacts = dispensaryCard({ displayName: 'TEST ONLY Bare', licenseRef: ' ', accountType: null, ocmStatus: null, street: '', city: null, postalCode: null, county: null, status: null, assignedRep: ' ' }, []);
+assert(withContacts.name === 'TEST ONLY Shop' && withContacts.lines.map((row) => row.label).join(',') === 'License,Account type,OCM status,Street,City,ZIP,County,Status,Rep' && withContacts.contacts.length === 1 && withContacts.contacts[0].email === 'ada@test.only' && withContacts.contacts[0].phone === '5550100' && withoutContacts.contacts.length === 0 && withoutContacts.lines.length === 0 && withoutContacts.lines.some((row) => row.value === 'Not set') === false, 'TEST ONLY: a dispensary card keeps stored fields and contacts, and an empty card invents none');
+const olderId = '11111111-1111-4111-8111-111111111111';
+const newestHundred = Array.from({ length: 100 }, (_, index) => `new-${index}`);
+const olderAccount = {
+  id: olderId,
+  publicId: 'test-only:older',
+  brand: 'cedargrowth' as const,
+  displayName: 'TEST ONLY older shop',
+  status: 'active' as const,
+  city: 'Buffalo',
+  county: 'Erie',
+  notes: 'secret note',
+  licenseRef: 'TEST-ONLY-LIC',
+  facilityRef: null,
+  licenseJurisdiction: null,
+  licenseExpiry: null,
+  assignedRep: 'Ada',
+  accountType: 'adult_use_dispensary' as const,
+  leadSource: null,
+  street: '1 Test St',
+  postalCode: '14201',
+  consentVersion: 'v9',
+  consentReceivedAt: '2020-01-01',
+  ocmStatus: 'verified' as const,
+  distributor: null,
+  distributorAccountRef: null,
+  createdAt: 'test-only',
+  updatedAt: 'test-only',
+  createdBy: 'test-only',
+  updatedBy: 'test-only',
+};
+const olderContact = { id: 'c-old', publicId: 'test-only:contact', brand: 'cedargrowth' as const, accountId: olderId, name: 'Ada Buyer', title: 'Buyer', email: 'ada+buyer@test.only', phone: '(716) 555-0100', notes: 'secret contact note', preference: 'do_not_contact' as const, createdAt: 'test-only', updatedAt: 'test-only' };
+const storeOnlyContact = { ...olderContact, id: 'c-store', email: 'store@test.only', phone: '716.555.0100', preference: 'store_only' as const };
+let sawAccountList = false;
+const cardStore = {
+  async listAccounts() { sawAccountList = true; return { state: 'ok' as const, value: newestHundred.map((id) => ({ ...olderAccount, id, displayName: id })) }; },
+  async readAccount(brand: 'cedargrowth' | 'bond', id: string) {
+    if (brand !== 'cedargrowth' || id !== olderId) return { state: 'ok' as const, value: null };
+    return { state: 'ok' as const, value: olderAccount };
+  },
+  async listContacts(brand: 'cedargrowth' | 'bond', accountId: string | null) {
+    if (brand !== 'cedargrowth' || accountId !== olderId) return { state: 'ok' as const, value: [] };
+    return { state: 'ok' as const, value: [olderContact, storeOnlyContact] };
+  },
+};
+const olderRead = await handleAccountRead({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', `/api/admin/crm/accounts/${olderId}?brand=cedargrowth`), store: cardStore as unknown as typeof memory }, olderId);
+const olderAccountBody = olderRead.body.account as Record<string, unknown>;
+const olderContacts = await handleContactCollection({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', `/api/admin/crm/contacts?brand=cedargrowth&accountId=${olderId}&card=1`), store: cardStore as unknown as typeof memory }, 'GET');
+const olderPeople = (olderContacts.body.contacts as Record<string, unknown>[]) || [];
+const deniedCard = await handleAccountRead({ actorId: null, grants: owner, request: crmReq('GET', `/api/admin/crm/accounts/${olderId}?brand=cedargrowth`), store: cardStore as unknown as typeof memory }, olderId);
+assert(newestHundred.includes(olderId) === false && sawAccountList === false && olderRead.status === 200 && olderAccountBody.displayName === 'TEST ONLY older shop' && olderAccountBody.street === '1 Test St' && !('notes' in olderAccountBody) && !('consentVersion' in olderAccountBody) && !('consentReceivedAt' in olderAccountBody) && olderPeople.length === 2 && olderPeople.every((row) => !('notes' in row) && typeof row.email === 'string') && deniedCard.status === 404, 'TEST ONLY: a pin card reads one account by id outside the newest 100 and omits notes and consent');
+const heldContact = cardContactFields(olderContact);
+const storeOnlyFields = cardContactFields(storeOnlyContact);
+const openContact = cardContactFields({ ...olderContact, id: 'c-open', preference: 'unspecified', email: 'ada+buyer@test.only', phone: '(716) 555-0100' });
+assert(mailtoHref('ada+buyer@test.only') === 'mailto:ada%2Bbuyer%40test.only' && telHref('(716) 555-0100') === 'tel:(716) 555-0100' && telHref('+1 (716) 555-0100') === 'tel:+1 (716) 555-0100' && telHref('716.555.0100') === 'tel:716.555.0100' && telHref('555-0100 ext 12') === null && telHref('javascript:alert(1)') === null && contactMailHref(openContact.email, openContact.preference) === 'mailto:ada%2Bbuyer%40test.only' && contactTelHref(openContact.phone, openContact.preference) === 'tel:(716) 555-0100' && !('preference' in heldContact) && contactMailHref(heldContact.email, 'do_not_contact') === 'mailto:ada%2Bbuyer%40test.only' && contactTelHref(heldContact.phone, 'do_not_contact') === 'tel:(716) 555-0100' && !('preference' in storeOnlyFields) && contactMailHref(storeOnlyFields.email, 'store_only') === 'mailto:store%40test.only' && contactTelHref(storeOnlyFields.phone, 'store_only') === 'tel:716.555.0100' && cardAccountFields(olderAccount).notes === undefined, 'TEST ONLY: open, do not contact, and store only contacts all keep encoded mailto and sanitized tel');
+const crowd = new MemoryCrm();
+const crowdShop = await crowd.createAccount('cedargrowth', 'gary@cedargrowthco.com', { displayName: 'TEST ONLY crowd', status: 'prospect', city: 'Buffalo', notes: '' });
+const crowdId = crowdShop.value?.id || '';
+for (let n = 0; n < 120; n += 1) await crowd.createContact('cedargrowth', 'gary@cedargrowthco.com', { accountId: crowdId, name: `Person ${n}`, email: `p${n}@test.only`, phone: '(716) 555-0100' });
+const otherShop = await crowd.createAccount('cedargrowth', 'gary@cedargrowthco.com', { displayName: 'TEST ONLY other crowd', status: 'prospect', city: 'Albany', notes: '' });
+await crowd.createContact('cedargrowth', 'gary@cedargrowthco.com', { accountId: otherShop.value?.id || '', name: 'Other person', email: 'other@test.only' });
+const crowdList = await handleContactCollection({ actorId: 'gary@cedargrowthco.com', grants: owner, request: crmReq('GET', `/api/admin/crm/contacts?brand=cedargrowth&accountId=${crowdId}&card=1`), store: crowd }, 'GET');
+const crowdPeople = (crowdList.body.contacts as Record<string, unknown>[]) || [];
+const contactSql = readFileSync('src/lib/crm/store.ts', 'utf8');
+const contactFn = contactSql.slice(contactSql.indexOf('listContacts(brand'), contactSql.indexOf('async createContact'));
+assert(crowdList.status === 200 && crowdPeople.length === 120 && crowdPeople.every((row) => !('preference' in row) && !('notes' in row) && typeof row.email === 'string') && contactMailHref(String(crowdPeople[0]?.email || ''), 'store_only') === `mailto:${encodeURIComponent(String(crowdPeople[0]?.email || ''))}` && contactFn.includes("if (accountId) query = query.eq('account_id', accountId)") && contactFn.includes('else query = query.limit(100)'), 'TEST ONLY: one account returns all 120 contacts, and the desk list stays at 100');
 assert(unmappedAccountCount([{ latitude: null, longitude: null }, { latitude: 42.8, longitude: -78.8 }, { latitude: 10, longitude: -78.8 }, { latitude: 10, longitude: -78.8, recordMarker: 'test' }]) === 2, 'accounts without a New York coordinate stay off the map');
 const menuPins = [testPin('north', 42.89, -78.88), { ...testPin('south', 40.75, -73.99), city: 'New York', county: 'New York' }];
 const cities = cityChoices(menuPins, '');
@@ -1525,7 +1598,7 @@ const cityFrame = framePoints(placePins(menuPins.filter((pin) => pin.city === 'B
 assert(!!erieFrame && buffalo.x >= erieFrame.x && buffalo.x <= erieFrame.x + erieFrame.w && buffalo.y >= erieFrame.y && buffalo.y <= erieFrame.y + erieFrame.h && !!cityFrame && cityFrame.w < 1000, 'a county frame contains the county and a city frame fits its pins');
 const opening = wholeStateFrame();
 const mapUi = readFileSync('src/app/admin/crm/NyDispensaryMap.tsx', 'utf8');
-assert(CITY_MENU_LABEL === 'Search cities' && COUNTY_MENU_LABEL === 'Search counties' && opening.w > (erieFrame?.w ?? opening.w) && opening.h > (erieFrame?.h ?? opening.h) && opening.x <= 0 && opening.y <= 0 && opening.x + opening.w >= MAP_WIDTH && opening.y + opening.h >= MAP_HEIGHT && mapUi.includes('label={CITY_MENU_LABEL}') && mapUi.includes('label={COUNTY_MENU_LABEL}') && mapUi.includes('const WHOLE = wholeStateFrame()') && mapUi.includes('useState(WHOLE)') && mapUi.includes('preserveAspectRatio="xMidYMid meet"') && mapUi.includes('aspectRatio') && mapUi.includes('onWheel') === false && mapUi.includes('gesturestart') && mapUi.includes('declutterPins'), 'TEST ONLY: the map opens on the whole state, the menus stay labeled Search cities and Search counties, and zoom is not on the wheel');
+assert(CITY_MENU_LABEL === 'Search cities' && COUNTY_MENU_LABEL === 'Search counties' && opening.w > (erieFrame?.w ?? opening.w) && opening.h > (erieFrame?.h ?? opening.h) && opening.x <= 0 && opening.y <= 0 && opening.x + opening.w >= MAP_WIDTH && opening.y + opening.h >= MAP_HEIGHT && mapUi.includes('label={CITY_MENU_LABEL}') && mapUi.includes('label={COUNTY_MENU_LABEL}') && mapUi.includes('const WHOLE = wholeStateFrame()') && mapUi.includes('useState(WHOLE)') && mapUi.includes('preserveAspectRatio="xMidYMid meet"') && mapUi.includes('aspectRatio') && mapUi.includes('onWheel') === false && mapUi.includes('gesturestart') && mapUi.includes('declutterPins') && mapUi.includes('aria-label="Zoom in"') && mapUi.includes('aria-label="Zoom out"') && mapUi.includes('nextZoomView') && mapUi.includes('clusterFrame') && mapUi.includes('Math.max(view.w / 90, 4)') === false && mapUi.includes('y: cy - next / 2') === false, 'TEST ONLY: the map opens on the whole state, the menus stay labeled Search cities and Search counties, and zoom is not on the wheel');
 const closePins = placePins([testPin('near-a', 40.75, -73.99), testPin('near-b', 40.751, -73.989)]).placed;
 const farPins = placePins([testPin('west', 42.89, -78.88), testPin('east', 44.7, -73.45)]).placed;
 const merged = declutterPins(closePins, 40);
@@ -1533,6 +1606,123 @@ const split = declutterPins(closePins, 0.01);
 const apart = declutterPins(farPins, 40);
 const members = merged.clusters[0]?.pins ?? [];
 assert(merged.clusters.length === 1 && members.length === 2 && members[0].latitude === closePins[0].latitude && members[0].x === closePins[0].x && members[1].x === closePins[1].x && Math.abs((merged.clusters[0]?.x ?? 0) - (closePins[0].x + closePins[1].x) / 2) < 0.001 && split.singles.length === 2 && apart.singles.length === 2, 'TEST ONLY: overlapping pins share a centroid chip and keep their coordinates');
+const cityA = placePins([testPin('city-a', 40.75, -73.99)]).placed[0];
+const cityB = placePins([testPin('city-b', 40.7501, -73.99)]).placed[0];
+const sameB = placePins([testPin('same-b', 40.75, -73.99)]).placed[0];
+const floorGap = mergeGap(minZoomWidth(opening.w));
+const splitStorefront = declutterPins([cityA, cityB], floorGap);
+const identical = declutterPins([cityA, sameB], floorGap);
+const framed = clusterFrame([cityA, cityB], opening);
+const wideFrame = clusterFrame([placed[0], placePins([testPin('east', 40.75, -73.99)]).placed[0]], opening);
+const narrowMark = markerPixels(opening.w, 390);
+const wideMark = markerPixels(opening.w, 1440);
+const wheelBlock = mapUi.slice(mapUi.indexOf('const blockCtrlWheel'), mapUi.indexOf('const measure'));
+const doubleClick = mapUi.slice(mapUi.indexOf('onDoubleClick'), mapUi.indexOf('onPointerDown'));
+const escapeBlock = mapUi.slice(mapUi.indexOf("event.key !== 'Escape'"), mapUi.indexOf('function onDown'));
+assert(splitStorefront.singles.length === 2 && splitStorefront.clusters.length === 0 && splitStorefront.singles[0].x === cityA.x && splitStorefront.singles[0].latitude === 40.75 && splitStorefront.singles[1].latitude === 40.7501, 'TEST ONLY: pins 0.0001 degrees apart are separate markers at maximum zoom');
+assert(identical.clusters.length === 1 && identical.singles.length === 0 && identical.clusters[0]?.pins[0]?.x === cityA.x && identical.clusters[0]?.pins[1]?.x === sameB.x, 'TEST ONLY: pins at identical coordinates stay one chip');
+assert(framed.w + 1e-9 >= minZoomWidth(opening.w) && Math.abs(framed.w - minZoomWidth(opening.w)) < 1e-6 && wideFrame.w <= opening.w + 1e-6 && wideFrame.w + 1e-9 >= minZoomWidth(opening.w), 'TEST ONLY: a chip frame is clamped to the deepest zoom and never past it');
+const closeBlock = mapUi.slice(mapUi.indexOf('function closeList'), mapUi.indexOf('function zoomBy'));
+assert(wheelBlock.includes('setView') === false && wheelBlock.includes('preventDefault') && doubleClick.includes('setView') === false && doubleClick.includes('preventDefault') && escapeBlock.includes('setView') === false && escapeBlock.includes('setOpenCluster(null)') && escapeBlock.includes('queueReturn(ids)') && mapUi.includes('window.setTimeout') && mapUi.includes("document.addEventListener('click', onDown)") && closeBlock.includes('queueReturn(ids)'), 'TEST ONLY: the wheel, a double click, and Escape leave the map view unchanged, and focus returns after the click');
+const phoneMark = markerPixels(opening.w, 430);
+const tabletMark = markerPixels(opening.w, 768);
+const nycPair = placePins([testPin('nyc-a', 40.75, -73.99), testPin('nyc-b', 40.751, -73.989)]).placed;
+const nycGap = mergeGap(minZoomWidth(opening.w));
+const nycSplit = declutterPins(nycPair, nycGap);
+const chainSeed = { ...cityA, id: 'seed', x: 0, y: 0 };
+const chainMid = { ...cityA, id: 'mid', x: 1, y: 0 };
+const chainFar = { ...cityA, id: 'far', x: 2.2, y: 0 };
+const chain = declutterPins([chainSeed, chainMid, chainFar] as PlacedPin[], 1.5);
+function centerHit(svgWidth: number, pins: PlacedPin[]) {
+  const units = markerUnits(opening.w, svgWidth);
+  const half = units.target / 2;
+  const markers = pins.map((pin) => ({ id: pin.id, x: pin.x, y: pin.y, halfW: half, halfH: half }));
+  return pins.map((pin) => hitAt(markers, pin.x, pin.y));
+}
+assert(Math.abs(mergeGap(opening.w) - opening.w / 90 * 2.8) < 1e-9 && Math.abs(nycGap - minZoomWidth(opening.w) / 90 * 2.8) < 1e-9 && nycGap < Math.hypot(nycPair[0].x - nycPair[1].x, nycPair[0].y - nycPair[1].y) && nycSplit.singles.length === 2 && chain.clusters.length === 1 && chain.clusters[0]?.count === 2 && chain.singles.length === 1 && chain.singles[0]?.id === 'far', 'TEST ONLY: the merge gap is the zoom fraction, the NYC pair splits at the stop, and a chain does not become one chip');
+assert(centerHit(390, nycPair).join(',') === 'nyc-a,nyc-b' && centerHit(1440, nycPair).join(',') === 'nyc-a,nyc-b', 'TEST ONLY: a click on a pin center returns that pin at 390 and 1440');
+const areaPins = placePins([
+  testPin('buffalo', 42.886, -78.878),
+  testPin('rochester', 43.156, -77.608),
+  testPin('syracuse', 43.048, -76.147),
+  testPin('utica', 43.1, -75.233),
+  testPin('ithaca', 42.444, -76.501),
+  testPin('binghamton', 42.099, -75.918),
+  testPin('wide-a', 40.75, -73.99),
+  testPin('wide-b', 40.752, -73.985),
+]).placed;
+function hitRects(svgWidth: number, viewWidth = opening.w, pins = areaPins) {
+  const screen = { viewWidth, svgClientWidth: svgWidth };
+  const grouped = declutterPins(pins, mergeGap(viewWidth, svgWidth), screen);
+  return [
+    ...grouped.singles.map((pin) => groupHitBox(1, pin.x, pin.y, viewWidth, svgWidth)),
+    ...grouped.clusters.map((cluster) => groupHitBox(cluster.count, cluster.x, cluster.y, viewWidth, svgWidth)),
+  ];
+}
+function rectsOverlap(rects: { x: number; y: number; w: number; h: number }[]) {
+  for (let i = 0; i < rects.length; i += 1) {
+    for (let j = i + 1; j < rects.length; j += 1) {
+      if (boxesIntersect(rects[i], rects[j])) return true;
+    }
+  }
+  return false;
+}
+const phoneFloorGap = mergeGap(minZoomWidth(opening.w, 390), 390);
+const mapStops = zoomStops(opening.w, 390);
+const floorWidth = mapStops[mapStops.length - 1];
+const shopRows = placePins([
+  testPin('syracuse', 43.048, -76.147),
+  testPin('ithaca', 42.444, -76.501),
+  testPin('shop-a', 43.049, -76.15),
+  testPin('shop-b', 43.0494, -76.1495),
+  testPin('shop-c', 43.0486, -76.1504),
+  testPin('shop-d', 43.0501, -76.1488),
+  testPin('pair-a', 40.75, -73.99),
+  testPin('pair-b', 40.7501, -73.99),
+]).placed;
+const realPins = [...boundaryPins(), ...shopRows];
+const closestA = { ...cityA, id: 'closest-a', x: 20, y: 20 };
+const closestB = { ...cityA, id: 'closest-b', x: 20 + CLOSEST_DISTINCT_PIN_UNITS, y: 20 };
+const closestDiagonal = { ...cityA, id: 'closest-d', x: 20 + CLOSEST_DISTINCT_PIN_UNITS / Math.SQRT2, y: 20 + CLOSEST_DISTINCT_PIN_UNITS / Math.SQRT2 };
+const stopsClear = mapStops.length > 0 && [390, 430, 768].every((svg) => mapStops.every((width) => rectsOverlap(hitRects(svg, width, realPins)) === false));
+const floorSplits = [390, 430, 768].every((svg) => {
+  const screen = { viewWidth: floorWidth, svgClientWidth: svg };
+  const gap = mergeGap(floorWidth, svg);
+  const shops = declutterPins([cityA, cityB], gap, screen);
+  const shopBoxes = shops.singles.map((pin) => groupHitBox(1, pin.x, pin.y, floorWidth, svg));
+  const along = declutterPins([closestA, closestB], gap, screen);
+  const diagonal = declutterPins([closestA, closestDiagonal], gap, screen);
+  const same = declutterPins([closestA, { ...closestA, id: 'closest-same' }], gap, screen);
+  const alongBoxes = along.singles.map((pin) => groupHitBox(1, pin.x, pin.y, floorWidth, svg));
+  const diagonalBoxes = diagonal.singles.map((pin) => groupHitBox(1, pin.x, pin.y, floorWidth, svg));
+  return shops.singles.length === 2 && shops.clusters.length === 0 && shopBoxes.length === 2 && !boxesIntersect(shopBoxes[0], shopBoxes[1]) && along.singles.length === 2 && along.clusters.length === 0 && diagonal.singles.length === 2 && !boxesIntersect(alongBoxes[0], alongBoxes[1]) && !boxesIntersect(diagonalBoxes[0], diagonalBoxes[1]) && same.clusters.length === 1 && same.singles.length === 0;
+});
+let zoomCenter = { x: 120, y: 80, w: opening.w, h: opening.h };
+const zoomCx = zoomCenter.x + zoomCenter.w / 2;
+const zoomCy = zoomCenter.y + zoomCenter.h / 2;
+let centerHeld = true;
+for (let press = 0; press < zoomPresses(opening.w) + 2; press += 1) {
+  const next = nextZoomView(zoomCenter, 1, opening);
+  centerHeld = centerHeld && Math.abs(next.x + next.w / 2 - zoomCx) < 1e-6 && Math.abs(next.y + next.h / 2 - zoomCy) < 1e-6;
+  if (Math.abs(next.w - zoomCenter.w) < 1e-6) centerHeld = centerHeld && next.x === zoomCenter.x && next.y === zoomCenter.y && next.h === zoomCenter.h;
+  zoomCenter = next;
+}
+const back = nextZoomView(zoomCenter, -1, opening);
+centerHeld = centerHeld && Math.abs(back.x + back.w / 2 - zoomCx) < 1e-6 && Math.abs(back.y + back.h / 2 - zoomCy) < 1e-6;
+const frameWidths = [284, 314, 354, 316, 580, 1400];
+const frameSplits = frameWidths.every((svg) => {
+  const stops = zoomStops(opening.w, svg);
+  const floor = stops[stops.length - 1];
+  const screen = { viewWidth: floor, svgClientWidth: svg };
+  const shops = declutterPins([cityA, cityB], mergeGap(floor, svg), screen);
+  const boxes = shops.singles.map((pin) => groupHitBox(1, pin.x, pin.y, floor, svg));
+  const clear = stops.every((width) => rectsOverlap(hitRects(svg, width, realPins)) === false);
+  return stops[0] === opening.w && Math.abs(floor - minZoomWidth(opening.w, svg)) < 1e-6 && shops.singles.length === 2 && shops.clusters.length === 0 && boxes.length === 2 && !boxesIntersect(boxes[0], boxes[1]) && clear;
+});
+assert([390, 430, 768].every((svg) => rectsOverlap(hitRects(svg)) === false) && stopsClear && floorSplits && frameSplits && phoneFloorGap < storefrontSeparation() && Math.abs(minZoomWidth(opening.w, 390) - 0.14059686581934208) < 1e-9 && zoomPresses(opening.w, 390) === 12 && Math.abs(mergeGap(opening.w, 390) - Math.max(opening.w / 90 * 2.8, (44 / 390) * opening.w)) < 1e-6 && centerHeld, 'TEST ONLY: hit rects do not intersect at every zoom stop, and the 11 m pair splits at the deepest stop for each rendered map width');
+assert(narrowMark.visible === 8 && narrowMark.target === 44 && phoneMark.target === 44 && tabletMark.target === 44 && wideMark.visible === 1440 / 90 && wideMark.target === 24 && zoomPresses(opening.w, 390) === 12 && mapUi.includes("touchAction: zoomed ? 'none' : 'pan-y'") && mapUi.includes('aria-label="Close"') && mapUi.includes('grid-cols-2') && mapUi.includes('hitAt') && mapUi.includes('max-md:fixed max-md:inset-x-4 max-md:w-auto') && mapUi.includes('break-all') && mapUi.includes('nextZoomView(current, direction, WHOLE, svgWidth)'), 'TEST ONLY: touch marks are at least 8px with a 44px target, and a click uses the nearest center');
+assert(mapUi.includes('openDispensary(pin.id)') && mapUi.includes('openDispensary(row.id)') && mapUi.includes('onOpenAccount(cardId)') && mapUi.includes('Open record') && mapUi.includes('No contacts yet') && mapUi.includes('contactMailHref') && mapUi.includes('contactTelHref') && mapUi.includes('accounts/${encodeURIComponent(cardId)}') && mapUi.includes('accountId=${encodeURIComponent(cardId)}') && mapUi.includes('card=1') && mapUi.includes('/api/admin/crm/accounts?brand=') === false && mapUi.includes('aria-label="Close"'), 'TEST ONLY: a pin and a chip row open the dispensary card, and Open record uses the account handler');
+
 const freshAt = new Date(Date.now()).toISOString();
 const staleAt = new Date(Date.now() - PLACE_TTL_MS - 1000).toISOString();
 const matchedCache: PlaceCache = { placeId: 'places/test', matchStatus: 'matched', fields: { name: 'TEST ONLY Shop', rating: 4, reviewCount: 2, hours: [], phone: null, website: null, mapsUrl: 'https://maps.google.com', photoName: null, photoCredits: [] }, fetchedAt: freshAt };

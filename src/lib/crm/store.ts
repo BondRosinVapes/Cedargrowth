@@ -318,6 +318,7 @@ function asBrand(value: unknown): CrmBrand | null {
 export interface CrmStore {
   counts(brand: CrmBrand): Promise<StoreResult<Counts>>;
   listAccounts(brand: CrmBrand, filter: { q: string | null; status: AccountStatus | null }): Promise<StoreResult<Account[]>>;
+  readAccount(brand: CrmBrand, id: string): Promise<StoreResult<Account | null>>;
   createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; county?: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>>;
   listNotes(brand: CrmBrand, accountId: string | null): Promise<StoreResult<Note[]>>;
   createNote(brand: CrmBrand, actor: string, input: { accountId: string; body: string }): Promise<StoreResult<Note>>;
@@ -376,7 +377,6 @@ export interface CrmStore {
   deleteBondInquiry(inquiryId: string): Promise<StoreResult<{ deleted: boolean }>>;
   purgeBondInquiries(nowIso: string): Promise<StoreResult<{ purged: number }>>;
   receiveAgentRecords(input: { requestId: string; receivedAt: string; ops: AgentOp[] }): Promise<StoreResult<{ code: 'replay' } | { code: 'rate'; retryAfter: number } | { code: 'ok'; created: { accounts: number; contacts: number; notes: number }; skipped: { index: number; reason: string }[]; failed: AgentRowFailure[] }>>;
-  readAccount(brand: CrmBrand, id: string): Promise<StoreResult<Account | null>>;
   readPlaceCache(brand: CrmBrand, accountId: string): Promise<StoreResult<PlaceCache | null>>;
   savePlaceCache(brand: CrmBrand, accountId: string, cache: PlaceCache): Promise<StoreResult<PlaceCache>>;
   accountHasWonDeal(brand: CrmBrand, accountId: string): Promise<StoreResult<boolean>>;
@@ -861,6 +861,15 @@ class SupabaseCrmStore implements CrmStore {
     return this.rows(brand, query, mapAccount);
   }
 
+  async readAccount(brand: CrmBrand, id: string): Promise<StoreResult<Account | null>> {
+    const { data, error } = await this.db.from('crm_accounts').select(ACCOUNT_COLS).eq('id', id).eq('brand', brand).maybeSingle();
+    const failed = classify(error);
+    if (failed) return { state: failed };
+    if (!data) return { state: 'ok', value: null };
+    const account = mapAccount(data as Record<string, unknown>);
+    return { state: 'ok', value: account && account.brand === brand ? account : null };
+  }
+
   async createAccount(brand: CrmBrand, actor: string, input: { displayName: string; status: AccountStatus; city: string | null; county?: string | null; notes: string; licenseRef?: string | null; facilityRef?: string | null; licenseJurisdiction?: string | null; licenseExpiry?: string | null; assignedRep?: string | null; accountType?: AccountType | null; leadSource?: LeadSource | null; distributor?: Distributor | null; distributorAccountRef?: string | null }): Promise<StoreResult<Account>> {
     const { data, error } = await this.db.from('crm_accounts').insert({
       brand,
@@ -910,8 +919,9 @@ class SupabaseCrmStore implements CrmStore {
   }
 
   listContacts(brand: CrmBrand, accountId: string | null) {
-    let query = this.db.from('crm_contacts').select(CONTACT_COLS).eq('brand', brand).order('updated_at', { ascending: false }).limit(100);
+    let query = this.db.from('crm_contacts').select(CONTACT_COLS).eq('brand', brand).order('updated_at', { ascending: false });
     if (accountId) query = query.eq('account_id', accountId);
+    else query = query.limit(100);
     return this.rows(brand, query, mapContact);
   }
 
@@ -1027,15 +1037,6 @@ class SupabaseCrmStore implements CrmStore {
       return false;
     }
     return true;
-  }
-
-  async readAccount(brand: CrmBrand, id: string): Promise<StoreResult<Account | null>> {
-    const { data, error } = await this.db.from('crm_accounts').select(ACCOUNT_COLS).eq('id', id).eq('brand', brand).maybeSingle();
-    const failed = classify(error);
-    if (failed) return { state: failed };
-    if (!data) return { state: 'ok', value: null };
-    const account = mapAccount(data as Record<string, unknown>);
-    return { state: 'ok', value: account && account.brand === brand ? account : null };
   }
 
   async readPlaceCache(brand: CrmBrand, accountId: string): Promise<StoreResult<PlaceCache | null>> {
