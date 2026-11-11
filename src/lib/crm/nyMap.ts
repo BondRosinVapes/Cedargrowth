@@ -151,9 +151,14 @@ export function storefrontSeparation(): number {
   return Math.hypot(origin.x - shifted.x, origin.y - shifted.y);
 }
 
+// Closest pair of CedarGrowth pins with different coordinates, read on 11 Nov 2026.
+// 1040 pinned accounts, and no two share a coordinate. The value is map units.
+export const CLOSEST_DISTINCT_PIN_UNITS = 0.08783995047322923;
+
 export function minZoomWidth(wholeWidth: number): number {
-  const separation = storefrontSeparation();
-  const coefficient = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, TOUCH_TARGET_PX / 390);
+  const separation = CLOSEST_DISTINCT_PIN_UNITS;
+  const touch = TOUCH_TARGET_PX / 390;
+  const coefficient = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, touch * Math.SQRT2);
   return Math.min(wholeWidth, (separation * 0.95) / coefficient);
 }
 

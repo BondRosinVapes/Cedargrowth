@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { X } from 'lucide-react';
 import { NY_REGIONS, type NyRegion } from '@/lib/crm/nyRegions';
 import {
   cityChoices,
@@ -170,9 +171,9 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
         </div>
         {openCluster ? (
           <div ref={listRef} role="dialog" aria-label={`${openCluster.count} dispensaries`} className="fixed inset-x-0 bottom-0 z-30 max-h-[70vh] overflow-y-auto border-t border-ink bg-clinical p-3 md:absolute md:inset-x-auto md:bottom-auto md:left-2 md:top-16 md:z-10 md:max-h-64 md:w-[min(18rem,calc(100%-1rem))] md:border md:p-0">
-            <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="mb-2 flex items-start justify-between gap-2">
               <p className="font-mono text-specimen uppercase text-tertiary">{openCluster.count} dispensaries</p>
-              <button type="button" aria-label="Close" onClick={closeList} className="min-h-[44px] min-w-[44px] border border-ink px-3 font-mono text-specimen uppercase text-primary">Close</button>
+              <button type="button" aria-label="Close" onClick={closeList} className="flex min-h-[44px] min-w-[44px] items-center justify-center border border-ink text-primary"><X strokeWidth={1.5} className="h-4 w-4" aria-hidden="true" /></button>
             </div>
             <ul>
               {clusterMembers(openCluster.pins).map((row) => (
@@ -308,7 +309,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
         </svg>
       </div>
       <aside className="flex flex-col gap-3 border border-hairline bg-clinical p-3">
-        {active ? <PinCard pin={active} onOpen={() => openDispensary(active.id)} /> : <p className="text-body-m text-secondary">Hover or focus a dispensary to see its record. Select it to open the account.</p>}
+        {active ? <PinCard pin={active} onOpen={() => openDispensary(active.id)} onClose={() => { const id = active.id; setActiveId(null); queueReturn([id]); }} /> : <p className="text-body-m text-secondary">Hover or focus a dispensary to see its record. Select it to open the account.</p>}
         <p className="text-caption text-tertiary">{unmapped} accounts not yet on the map.</p>
       </aside>
     </div>
@@ -406,10 +407,13 @@ function MapMenu({ id, label, placeholder, options, onPick }: { id: string; labe
   );
 }
 
-function PinCard({ pin, onOpen }: { pin: PlacedPin; onOpen: () => void }) {
+function PinCard({ pin, onOpen, onClose }: { pin: PlacedPin; onOpen: () => void; onClose: () => void }) {
   return (
     <article className="flex flex-col gap-2">
-      <h3 className="font-sans text-body-m text-primary">{pin.displayName}</h3>
+      <div className="flex items-start justify-between gap-2">
+        <h3 className="font-sans text-body-m text-primary">{pin.displayName}</h3>
+        <button type="button" aria-label="Close" onClick={onClose} className="flex min-h-[44px] min-w-[44px] items-center justify-center border border-ink text-primary"><X strokeWidth={1.5} className="h-4 w-4" aria-hidden="true" /></button>
+      </div>
       <dl className="flex flex-col gap-1">
         {pinCard(pin).map((row) => (
           <div key={row.label}>
