@@ -209,12 +209,15 @@ export function placeCardOnly(input: {
   };
 }
 
-export const PHOTO_CACHE_CONTROL = 'no-store, private';
+export function photoCacheControl(sells: boolean): string {
+  if (sells) return 'private, max-age=3600';
+  return 'no-store, private';
+}
 
-export function photoResponseHeaders(contentType: string): Record<string, string> {
+export function photoResponseHeaders(contentType: string, sells: boolean): Record<string, string> {
   return {
     'content-type': contentType,
-    'cache-control': PHOTO_CACHE_CONTROL,
+    'cache-control': photoCacheControl(sells),
     'x-content-type-options': 'nosniff',
   };
 }

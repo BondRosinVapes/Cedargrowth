@@ -24,11 +24,12 @@ export async function GET(request: Request) {
   const key = process.env.GOOGLE_PLACES_API_KEY?.trim() || '';
   if (!key || !accountId) return new NextResponse(null, { status: 404 });
   const store = getCrmStore();
+  const selling = await store.accountHasWonDeal(auth.brand, accountId);
+  if (selling.state !== 'ok') return new NextResponse(null, { status: 404 });
   const photo = await sharePhotoLoad(`${auth.brand}:${accountId}`, async () => {
     const account = await store.readAccount(auth.brand, accountId);
-    const selling = await store.accountHasWonDeal(auth.brand, accountId);
     const cache = await store.readPlaceCache(auth.brand, accountId);
-    if (account.state !== 'ok' || !account.value || selling.state !== 'ok' || cache.state !== 'ok') return null;
+    if (account.state !== 'ok' || !account.value || cache.state !== 'ok') return null;
     const photoName = await currentPhotoName({
       sells: selling.value,
       cache: cache.value,
@@ -43,6 +44,6 @@ export async function GET(request: Request) {
   if (!photo) return new NextResponse(null, { status: 404 });
   return new NextResponse(photo.bytes, {
     status: 200,
-    headers: photoResponseHeaders(photo.contentType),
+    headers: photoResponseHeaders(photo.contentType, selling.value),
   });
 }
