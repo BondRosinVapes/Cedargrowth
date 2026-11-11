@@ -44,7 +44,7 @@ export async function handleGooglePlace(ctx: CrmContext, now = Date.now()): Prom
   if (plan.action === 'no_address') return { status: 200, body: { ok: true, state: 'no_match' } };
   if (plan.action === 'use_cache') {
     if (plan.cache.matchStatus === 'none' || !plan.cache.fields) return { status: 200, body: { ok: true, state: 'no_match' } };
-    return { status: 200, body: { ok: true, state: 'matched', card: publicCard(accountId, plan.cache.fields, selling.value) } };
+    return { status: 200, body: { ok: true, state: 'matched', card: publicCard(accountId, plan.cache.fields) } };
   }
   const found = await loadPlace({ placeId: cacheResult.value?.placeId ?? null, query, key, fetchImpl: fetch });
   const fetchedAt = new Date(now).toISOString();
@@ -53,10 +53,10 @@ export async function handleGooglePlace(ctx: CrmContext, now = Date.now()): Prom
     : { placeId: cacheResult.value?.placeId ?? null, matchStatus: 'none', fields: null, fetchedAt }, plan.retain));
   if (saved.state !== 'ok') return denied(503, 'CRM storage could not be read.');
   if (!found) return { status: 200, body: { ok: true, state: 'no_match' } };
-  return { status: 200, body: { ok: true, state: 'matched', card: publicCard(accountId, found.card, selling.value) } };
+  return { status: 200, body: { ok: true, state: 'matched', card: publicCard(accountId, found.card) } };
 }
 
-function publicCard(accountId: string, card: PlaceCard, sells: boolean) {
+function publicCard(accountId: string, card: PlaceCard) {
   return {
     name: card.name,
     rating: card.rating,
@@ -66,7 +66,6 @@ function publicCard(accountId: string, card: PlaceCard, sells: boolean) {
     website: browserLink(card.website),
     mapsUrl: browserLink(card.mapsUrl),
     photoCredits: card.photoCredits,
-    sells,
     photoUrl: card.photoName ? `/api/admin/crm/places/photo?brand=cedargrowth&accountId=${encodeURIComponent(accountId)}` : null,
   };
 }

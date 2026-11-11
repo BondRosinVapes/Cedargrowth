@@ -44,6 +44,6 @@ export async function GET(request: Request) {
   if (!photo) return new NextResponse(null, { status: 404 });
   return new NextResponse(photo.bytes, {
     status: 200,
-    headers: photoResponseHeaders(photo.contentType, selling.value),
+    headers: photoResponseHeaders(photo.contentType),
   });
 }

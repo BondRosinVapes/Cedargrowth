@@ -20,9 +20,3 @@ export function freshPhotoSrc(photoUrl: string, viewId: string): string | null {
   url.searchParams.set('view', id);
   return `${url.pathname}?${url.searchParams.toString()}`;
 }
-
-export function photoSrcForView(photoUrl: string | null, sells: boolean, viewId: string): string | null {
-  if (!photoUrl) return null;
-  if (sells) return photoUrl;
-  return freshPhotoSrc(photoUrl, viewId);
-}

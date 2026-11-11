@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { browserLink, photoSrcForView } from '@/lib/crm/placeLinks';
+import { browserLink, freshPhotoSrc } from '@/lib/crm/placeLinks';
 
 type Card = {
   name: string;
@@ -13,7 +13,6 @@ type Card = {
   mapsUrl: string | null;
   photoCredits: string[];
   photoUrl: string | null;
-  sells?: boolean;
 };
 
 export function GooglePlaceCard({ accountId }: { accountId: string }) {
@@ -31,7 +30,7 @@ export function GooglePlaceCard({ accountId }: { accountId: string }) {
       if (cancel) return;
       if (body.state === 'matched' && body.card) {
         setCard(body.card);
-        setPhotoSrc(photoSrcForView(body.card.photoUrl, body.card.sells === true, crypto.randomUUID()));
+        setPhotoSrc(body.card.photoUrl ? freshPhotoSrc(body.card.photoUrl, crypto.randomUUID()) : null);
         setState('matched');
         return;
       }
