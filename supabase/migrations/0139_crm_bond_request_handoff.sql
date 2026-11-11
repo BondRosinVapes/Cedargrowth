@@ -290,6 +290,7 @@ begin
        or exists (select 1 from pg_catalog.jsonb_object_keys(v_item) as extra(key) where extra.key not in ('sku', 'qty'))
        or not (v_item ? 'sku' and v_item ? 'qty')
        or (v_item->>'sku') not in ('vape-05g', 'vape-1g', 'preroll-1g', 'preroll-5pk', 'dog-walker-5pk', 'gummies-10ct-100', 'gummies-10ct-200', 'gummies-20ct-200')
+       or pg_catalog.jsonb_typeof(v_item->'qty') is distinct from 'number'
        or (v_item->>'qty') !~ '^[1-5]$' then
       return pg_catalog.jsonb_build_object('result', 'rejected:items');
     end if;
