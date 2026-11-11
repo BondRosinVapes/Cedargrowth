@@ -130,12 +130,57 @@ export function markerSpan(viewWidth: number): number {
   return viewWidth * MARKER_FRACTION;
 }
 
-export function mergeGap(viewWidth: number): number {
-  return markerSpan(viewWidth) * MERGE_MULTIPLE;
+export function mergeGap(viewWidth: number, svgClientWidth = 0): number {
+  const fractional = markerSpan(viewWidth) * MERGE_MULTIPLE;
+  if (svgClientWidth <= 0) return fractional;
+  return Math.max(fractional, (MIN_TARGET_PX / svgClientWidth) * viewWidth);
+}
+
+// 0.0001 degrees of latitude near the city, about 11 m.
+export function storefrontSeparation(): number {
+  const origin = projectNy(-73.99, 40.75);
+  const shifted = projectNy(-73.99, 40.7501);
+  return Math.hypot(origin.x - shifted.x, origin.y - shifted.y);
 }
 
 export function minZoomWidth(wholeWidth: number): number {
-  return wholeWidth / 14;
+  const separation = storefrontSeparation();
+  const narrow = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, MIN_TARGET_PX / 390);
+  return Math.min(wholeWidth, (separation * 0.8) / narrow);
+}
+
+export function zoomInFactor(currentWidth: number, wholeWidth: number): number {
+  const ratio = currentWidth / minZoomWidth(wholeWidth);
+  if (ratio > 80) return 2;
+  if (ratio > 12) return 2.5;
+  return 3;
+}
+
+export function zoomStops(wholeWidth: number): number[] {
+  const floor = minZoomWidth(wholeWidth);
+  const stops = [wholeWidth];
+  let width = wholeWidth;
+  while (width > floor + 1e-6 && stops.length < 40) {
+    width = Math.max(floor, width / zoomInFactor(width, wholeWidth));
+    stops.push(width);
+  }
+  return stops;
+}
+
+export function zoomPresses(wholeWidth: number): number {
+  return Math.max(0, zoomStops(wholeWidth).length - 1);
+}
+
+export function clusterFrame(points: readonly { x: number; y: number }[], whole: { x: number; y: number; w: number; h: number }): { x: number; y: number; w: number; h: number } {
+  const floor = minZoomWidth(whole.w);
+  const left = Math.min(...points.map((point) => point.x));
+  const right = Math.max(...points.map((point) => point.x));
+  const top = Math.min(...points.map((point) => point.y));
+  const bottom = Math.max(...points.map((point) => point.y));
+  const span = Math.max(right - left, bottom - top);
+  const w = Math.min(whole.w, Math.max(span * 1.8, floor));
+  const h = w * (whole.h / whole.w);
+  return { x: (left + right) / 2 - w / 2, y: (top + bottom) / 2 - h / 2, w, h };
 }
 
 // Visible size and hit target in CSS pixels. The drawn mark uses the SVG client width.

@@ -11,10 +11,11 @@ import {
   framePoints,
   CITY_MENU_LABEL,
   COUNTY_MENU_LABEL,
+  clusterFrame,
   clusterMembers,
   markerUnits,
   mergeGap,
-  minZoomWidth,
+  zoomStops,
   nycFrame,
   pinCard,
   placePins,
@@ -41,7 +42,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   const [openCluster, setOpenCluster] = useState<PinCluster | null>(null);
   const placed = useMemo(() => placePins(pins).placed, [pins]);
   const units = markerUnits(view.w, svgWidth);
-  const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w)), [placed, view.w]);
+  const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w, svgWidth)), [placed, view.w, svgWidth]);
   const active = placed.find((pin) => pin.id === activeId) ?? null;
   const zoomed = view.w < WHOLE.w - 0.5;
 
@@ -93,16 +94,24 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   function showCluster(cluster: PinCluster, button: SVGRectElement) {
     clusterButton.current = button;
     setOpenCluster(cluster);
+    setView(clusterFrame(cluster.pins, WHOLE));
   }
 
-  function zoomAt(factor: number) {
+  function zoomBy(direction: 1 | -1) {
     setView((current) => {
-      const nextW = Math.min(WHOLE.w, Math.max(minZoomWidth(WHOLE.w), current.w / factor));
-      if (nextW >= WHOLE.w - 0.5) return WHOLE;
-      const nextH = nextW * (WHOLE.h / WHOLE.w);
+      const stops = zoomStops(WHOLE.w);
+      let nearest = 0;
+      let best = Infinity;
+      stops.forEach((stop, index) => {
+        const delta = Math.abs(stop - current.w);
+        if (delta < best) { best = delta; nearest = index; }
+      });
+      const next = stops[Math.min(stops.length - 1, Math.max(0, nearest + direction))];
+      if (next >= WHOLE.w - 0.5) return WHOLE;
+      const h = next * (WHOLE.h / WHOLE.w);
       const cx = current.x + current.w / 2;
       const cy = current.y + current.h / 2;
-      return { x: cx - nextW / 2, y: cy - nextH / 2, w: nextW, h: nextH };
+      return { x: cx - next / 2, y: cy - next / 2, w: next, h };
     });
   }
 
@@ -110,8 +119,8 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="relative min-w-0 border border-hairline bg-parchment">
         <div className="flex flex-wrap gap-2 p-2">
-          <button type="button" aria-label="Zoom in" onClick={() => zoomAt(1.4)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">+</button>
-          <button type="button" aria-label="Zoom out" onClick={() => zoomAt(1 / 1.4)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">-</button>
+          <button type="button" aria-label="Zoom in" onClick={() => zoomBy(1)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">+</button>
+          <button type="button" aria-label="Zoom out" onClick={() => zoomBy(-1)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">-</button>
           <MapMenu
             id="city-menu"
             label={CITY_MENU_LABEL}
