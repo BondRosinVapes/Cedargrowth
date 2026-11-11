@@ -2,7 +2,7 @@
 // definer functions. This module does not log bodies or secrets.
 
 import { getSupabaseServerClient } from '@/lib/supabase';
-import { emptyHandoffBook, SHARE_CONSENT_VERSION, type AccountView, type HandoffDeps, type HandoffRow, type HandoffStatus, type SendLogRow, type VisitPreference } from './requestHandoff';
+import { emptyHandoffBook, SHARE_CONSENT_VERSION, STORE_LIST_KEYS, type AccountView, type HandoffDeps, type HandoffRow, type HandoffStatus, type SendLogRow, type VisitPreference } from './requestHandoff';
 
 type HandoffDb = {
   rpc: (fn: string, args?: Record<string, unknown>) => PromiseLike<{ data: unknown }>;
@@ -54,6 +54,25 @@ export function handoffDeps(db: HandoffDb | null = getSupabaseServerClient() as 
       if (!db) return null;
       const { data } = await db.rpc('crm_bond_request_handoff_row', { p_handoff_id: id });
       return handoffRowFromRecord(data);
+    },
+    async remoteStores(sku: string) {
+      if (!db) return [];
+      const { data } = await db.rpc('crm_bond_request_store_list', { p_sku: sku });
+      if (!Array.isArray(data)) return [];
+      return data.flatMap((row) => {
+        if (!row || typeof row !== 'object') return [];
+        const record = row as Record<string, unknown>;
+        if (typeof record.id !== 'string' || typeof record.display_name !== 'string') return [];
+        const mapped = {
+          id: record.id,
+          display_name: record.display_name,
+          city: record.city == null ? null : String(record.city),
+          latitude: record.latitude == null ? null : Number(record.latitude),
+          longitude: record.longitude == null ? null : Number(record.longitude),
+        };
+        const keys = Object.keys(mapped).sort().join(',');
+        return keys === [...STORE_LIST_KEYS].sort().join(',') ? [mapped] : [];
+      });
     },
     async remoteMark(id: string, status: HandoffStatus, send: Omit<SendLogRow, 'handoffId'> | null) {
       if (!db) return;

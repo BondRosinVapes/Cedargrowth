@@ -5,6 +5,7 @@
 -- It restores crm_private.guard_account to the 0138 body, including source_event.
 -- It does not drop source_event. That column belongs to 0138.
 
+drop function if exists public.crm_bond_request_failed_sends();
 drop function if exists public.crm_bond_request_handoff_row(uuid);
 drop function if exists public.crm_bond_request_purge_scheduled();
 drop function if exists public.crm_bond_request_admin_view(text);

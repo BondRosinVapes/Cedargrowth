@@ -452,6 +452,7 @@ export function CrmConsole({
         <div className="flex flex-wrap items-end justify-between gap-4">
           <h1 className="font-display text-heading-m-m md:text-heading-m text-primary">{WINGS.find((item) => item.id === wing)?.label}</h1>
           <p className="font-mono text-specimen text-tertiary">{roleLabel} {sessionLabel}</p>
+          {roleLabel !== 'Sales' ? <Link href="/admin/crm/failed-sends" className="font-mono text-specimen uppercase text-primary">Failed withdrawal sends</Link> : null}
         </div>
         <div className="flex flex-wrap gap-2" role="group" aria-label="Brand">
           {brands.map((item) => (

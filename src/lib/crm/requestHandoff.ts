@@ -91,7 +91,17 @@ export type SendLogRow = {
 };
 
 export type AuditRow = { handoffId: string; status: string; recordedAt: string };
-export type AlertRow = { accountId: string; count: number };
+export type AlertRow = { accountId: string; count: number; recordedAt: string };
+
+export type FailedBondSend = {
+  handoffId: string;
+  template: 'B';
+  templateVersion: string;
+  renderedSha256: string;
+  providerMessageId: string | null;
+  sentAt: string | null;
+  status: 'failed';
+};
 
 export type HandoffBook = {
   rows: HandoffRow[];
@@ -128,6 +138,10 @@ export function textVersion(text: string): string {
 
 export function sha256Hex(text: string): string {
   return createHash('sha256').update(text).digest('hex');
+}
+
+export function renderedPartHash(text: string, html: string): string {
+  return sha256Hex(`${text}\n--bond-part--\n${html}`);
 }
 
 export function pinnedTexts(): { consent: string; privacy: string; aSubject: string; aBody: string; bSubject: string; bBody: string } {
@@ -169,9 +183,12 @@ function safeEqual(given: string, expected: string): boolean {
   return timingSafeEqual(left, right);
 }
 
+const SENDER_DENY = new RegExp(['reserv' + 'ation', 'reser' + 've', 'disc' + 'ount', 'coup' + 'on', 'fr' + 'ee', 'met' + 'rc'].join('|'), 'i');
+
 export function fromAddressOk(value: string | null | undefined): boolean {
   const text = value?.trim() || '';
-  return FROM_RE.test(text);
+  const local = text.split('@')[0] || '';
+  return FROM_RE.test(text) && !SENDER_DENY.test(local);
 }
 
 export function postalOk(value: string | null | undefined): boolean {
@@ -256,7 +273,7 @@ function parseItems(value: unknown): HandoffItem[] | null {
     const record = row as Record<string, unknown>;
     if (Object.keys(record).some((key) => key !== 'sku' && key !== 'qty')) return null;
     if (typeof record.sku !== 'string' || !SKUS.has(record.sku)) return null;
-    if (typeof record.qty !== 'number' || !Number.isInteger(record.qty) || record.qty < 1) return null;
+    if (typeof record.qty !== 'number' || !Number.isSafeInteger(record.qty) || record.qty < 1 || record.qty > 5) return null;
     units += record.qty;
     items.push({ sku: record.sku, qty: record.qty });
   }
@@ -283,7 +300,8 @@ export function receiveHandoff(book: HandoffBook, account: AccountView | null, i
   const windowStart = Date.parse(nowIso) - 24 * 60 * 60 * 1000;
   const accepted = book.rows.filter((row) => row.dispensaryAccountId === input.dispensaryRef && Date.parse(row.receivedAt) > windowStart).length;
   if (accepted >= HANDOFF_CAP) {
-    book.alerts.push({ accountId: input.dispensaryRef, count: HANDOFF_CAP });
+    const recent = book.alerts.some((row) => row.accountId === input.dispensaryRef && Date.parse(row.recordedAt) > windowStart);
+    if (!recent) book.alerts.push({ accountId: input.dispensaryRef, count: HANDOFF_CAP, recordedAt: nowIso });
     return { result: 'rejected:rate' };
   }
   const row: HandoffRow = {
@@ -353,6 +371,7 @@ export function purgeHandoffs(book: HandoffBook, nowIso: string): { cleared: num
   book.rows = book.rows.filter((row) => !dueIds.has(row.handoffId));
   book.sends = book.sends.filter((row) => !dueIds.has(row.handoffId));
   book.audits = book.audits.filter((row) => !dueIds.has(row.handoffId));
+  book.alerts = book.alerts.filter((row) => Date.parse(row.recordedAt) > cutoff - 365 * 24 * 60 * 60 * 1000);
   return { cleared, purged: before - book.rows.length };
 }
 
@@ -383,9 +402,6 @@ export function renderTemplate(kind: 'A' | 'B', fields: { dispensaryName: string
     .replaceAll('{visit_preference}', fields.visitPreference)
     .replaceAll('{request_date}', fields.requestDate)
     .replaceAll('{postal_address}', fields.postal);
-  const expected = createHash('sha256').update(text).digest('hex');
-  const again = createHash('sha256').update(text).digest('hex');
-  if (expected !== again) return null;
   const html = text.split('\n').map((line) => {
     const warning = /21 years|health risks|HOPEline|OCM-PROC|postal|Poison Center/.test(line) || line === fields.postal;
     const size = warning ? '12px' : '16px';
@@ -398,7 +414,7 @@ export function renderTemplate(kind: 'A' | 'B', fields: { dispensaryName: string
     html,
     subjectVersion: textVersion(kind === 'A' ? texts.aSubject : texts.bSubject),
     bodyVersion: textVersion(kind === 'A' ? texts.aBody : texts.bBody),
-    renderedSha256: expected,
+    renderedSha256: renderedPartHash(text, html),
   };
 }
 
@@ -431,7 +447,7 @@ export function markHandoff(book: HandoffBook, handoffId: string, status: Handof
 }
 
 export function storeList(accounts: AccountView[], sku: string): Record<(typeof STORE_LIST_KEYS)[number], string | number | null>[] {
-  const rows = accounts.filter((account) => account.brand === 'cedargrowth' && account.accountType === 'adult_use_dispensary' && !account.requestOptOut && !account.doNotContact && account.carriedSkus.includes(sku));
+  const rows = accounts.filter((account) => account.brand === 'cedargrowth' && account.accountType === 'adult_use_dispensary' && account.requestContactEmail && !account.requestOptOut && !account.doNotContact && account.carriedSkus.includes(sku));
   return [...rows].sort((a, b) => a.displayName.localeCompare(b.displayName)).map((account) => ({
     id: account.id,
     display_name: account.displayName,
@@ -535,6 +551,7 @@ export type HandoffDeps = {
   remoteErase?(id: string): Promise<{ status: HandoffStatus | null; withdrawal: boolean }>;
   remoteRow?(id: string): Promise<HandoffRow | null>;
   remoteMark?(id: string, status: HandoffStatus, send: Omit<SendLogRow, 'handoffId'> | null): Promise<void>;
+  remoteStores?(sku: string): Promise<Record<(typeof STORE_LIST_KEYS)[number], string | number | null>[]>;
 };
 
 export type HandoffHttp = { status: number; body: Record<string, unknown> | null };
@@ -577,7 +594,7 @@ export async function handleBondRequestHttp(
   if (kind === 'stores') {
     const url = new URL(request.url);
     const sku = url.searchParams.get('sku') || '';
-    const rows = storeList(await deps.accounts(), sku);
+    const rows = deps.remoteStores ? await deps.remoteStores(sku) : storeList(await deps.accounts(), sku);
     return { status: 200, body: { ok: true, stores: rows } };
   }
   if (kind === 'status') {
@@ -672,7 +689,7 @@ async function dispatch(deps: HandoffDeps, row: HandoffRow, account: AccountView
     requestDate: row.receivedAt.slice(0, 10),
     postal: gates.postal,
   });
-  if (!rendered || rendered.renderedSha256 !== sha256Hex(rendered.text)) {
+  if (!rendered || rendered.renderedSha256 !== renderedPartHash(rendered.text, rendered.html)) {
     await noted('failed', null);
     return;
   }

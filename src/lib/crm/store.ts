@@ -27,6 +27,7 @@ import { confirmationFor, currentReleased, defaultExpiry, hashReorderToken, link
 import { knownEmailEvent, type EmailEvent } from './emailStatus';
 import { intakeTestMarker, type IntakeLead } from './intake';
 import type { SupplierLead } from './supplierIntake';
+import type { FailedBondSend } from './requestHandoff';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
 import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
 import { wonMergeOnSave, type ContactPrior, type MergeRow } from './distributionMerge';
@@ -381,6 +382,7 @@ export interface CrmStore {
   upsertDismissal(brand: CrmBrand, repActor: string, actionKey: string, until: string): Promise<StoreResult<{ id: string; brand: CrmBrand; repActor: string; actionKey: string; until: string }>>;
   receiveBondInquiry(lead: IntakeLead, receivedAt: string): Promise<StoreResult<{ duplicate: boolean }>>;
   receiveSupplierInquiry(lead: SupplierLead, receivedAt: string): Promise<StoreResult<{ duplicate: boolean }>>;
+  listFailedBondSends(): Promise<StoreResult<FailedBondSend[]>>;
   deleteBondInquiry(inquiryId: string): Promise<StoreResult<{ deleted: boolean }>>;
   purgeBondInquiries(nowIso: string): Promise<StoreResult<{ purged: number }>>;
   receiveAgentRecords(input: { requestId: string; receivedAt: string; ops: AgentOp[] }): Promise<StoreResult<{ code: 'replay' } | { code: 'rate'; retryAfter: number } | { code: 'ok'; created: { accounts: number; contacts: number; notes: number }; skipped: { index: number; reason: string }[]; failed: AgentRowFailure[] }>>;
@@ -1822,6 +1824,28 @@ class SupabaseCrmStore implements CrmStore {
     const payload = data as { ok?: boolean; duplicate?: boolean } | null;
     if (error || !payload || payload.ok !== true) return { state: 'unavailable' as const };
     return { state: 'ok' as const, value: { duplicate: payload.duplicate === true } };
+  }
+
+  async listFailedBondSends() {
+    const { data, error } = await this.db.rpc('crm_bond_request_failed_sends');
+    if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
+    if (error || !Array.isArray(data)) return { state: 'unavailable' as const };
+    const value: FailedBondSend[] = data.flatMap((row) => {
+      if (!row || typeof row !== 'object') return [];
+      const record = row as Record<string, unknown>;
+      if (record.template !== 'B' || record.status !== 'failed' || typeof record.handoff_id !== 'string') return [];
+      if (typeof record.template_version !== 'string' || typeof record.rendered_sha256 !== 'string') return [];
+      return [{
+        handoffId: record.handoff_id,
+        template: 'B' as const,
+        templateVersion: record.template_version,
+        renderedSha256: record.rendered_sha256,
+        providerMessageId: record.provider_message_id == null ? null : String(record.provider_message_id),
+        sentAt: record.sent_at == null ? null : String(record.sent_at),
+        status: 'failed' as const,
+      }];
+    });
+    return { state: 'ok' as const, value };
   }
 
   async deleteBondInquiry(inquiryId: string) {

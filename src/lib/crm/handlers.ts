@@ -45,7 +45,7 @@ import { coordinatesInRange, unmappedAccountCount, type MapPin } from './nyMap';
 import { nextBestActions, snoozeUntil } from './nextAction';
 import { INTAKE_MAX_BYTES, intakeSecrets, parseIntake, signIntake, signaturesMatch, takeIntakeRate, timestampFresh } from './intake';
 import { parseSupplierIntake, signSupplierIntake, supplierSecrets, supplierSignaturesMatch, supplierTimestampFresh } from './supplierIntake';
-import { assignRequestEmail, type AccountView } from './requestHandoff';
+import { assignRequestEmail, type AccountView, type FailedBondSend } from './requestHandoff';
 import { AGENT_ACTOR, AGENT_MAX_BYTES, AGENT_ROW_LIMIT, agentReady, agentSecret, agentSignatureOk, agentTimestampFresh, parseAgentEnvelope, parseAgentRow, type AgentOp } from './agentIntake';
 import { readResendEvent, sendDigestEmail, sendReorderLink } from '@/lib/email';
 import { FIELD_BUCKET, READ_URL_SECONDS, isProductLine, isVisitOutcome, mediaPath, roundLocation, validateMediaUpload } from './field';
@@ -1821,6 +1821,25 @@ export async function handleRequestContactEmail(ctx: CrmContext): Promise<CrmRes
     if (saved.error) return { status: 400, body: { ok: false, reason: 'Request contact email was not stored.' } };
   }
   return { status: 200, body: { ok: true } };
+}
+
+export async function handleFailedBondSends(ctx: CrmContext): Promise<CrmResult> {
+  const url = new URL(ctx.request.url);
+  const auth = await gate(ctx, url.searchParams.get('brand'));
+  if (isResult(auth)) return auth;
+  if (!canExport(auth.role)) return { status: 403, body: { ok: false, reason: 'Only an owner or administrator can read failed withdrawal sends.' } };
+  const rows = await ctx.store.listFailedBondSends();
+  if (rows.state !== 'ok') return storageBody(auth.brand, rows.state === 'absent' ? 'absent' : 'unavailable');
+  const sends: FailedBondSend[] = rows.value.filter((row) => row.template === 'B' && row.status === 'failed').map((row) => ({
+    handoffId: row.handoffId,
+    template: 'B',
+    templateVersion: row.templateVersion,
+    renderedSha256: row.renderedSha256,
+    providerMessageId: row.providerMessageId,
+    sentAt: row.sentAt,
+    status: 'failed',
+  }));
+  return { status: 200, body: { ok: true, sends } };
 }
 
 export function staffAudience(hasCedarSalesMembership: boolean): Audience {

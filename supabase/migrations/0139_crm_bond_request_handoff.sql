@@ -243,6 +243,11 @@ begin
   if v_event is not null and v_event !~ '^[a-z0-9-]{1,64}$' then
     return pg_catalog.jsonb_build_object('result', 'rejected:source');
   end if;
+  if not (p_payload ? 'handoff_id') or not (p_payload ? 'submitted_at')
+     or nullif(pg_catalog.btrim(p_payload->>'handoff_id'), '') is null
+     or nullif(pg_catalog.btrim(p_payload->>'submitted_at'), '') is null then
+    return pg_catalog.jsonb_build_object('result', 'rejected:schema');
+  end if;
   begin
     v_submitted := (p_payload->>'submitted_at')::timestamptz;
     v_id := (p_payload->>'handoff_id')::uuid;
@@ -282,8 +287,10 @@ begin
   for v_item in select value from pg_catalog.jsonb_array_elements(v_items) loop
     v_lines := v_lines + 1;
     if pg_catalog.jsonb_typeof(v_item) <> 'object'
+       or exists (select 1 from pg_catalog.jsonb_object_keys(v_item) as extra(key) where extra.key not in ('sku', 'qty'))
+       or not (v_item ? 'sku' and v_item ? 'qty')
        or (v_item->>'sku') not in ('vape-05g', 'vape-1g', 'preroll-1g', 'preroll-5pk', 'dog-walker-5pk', 'gummies-10ct-100', 'gummies-10ct-200', 'gummies-20ct-200')
-       or (v_item->>'qty') !~ '^[1-9][0-9]*$' then
+       or (v_item->>'qty') !~ '^[1-5]$' then
       return pg_catalog.jsonb_build_object('result', 'rejected:items');
     end if;
     v_units := v_units + (v_item->>'qty')::integer;
@@ -307,13 +314,19 @@ begin
   if not v_carries then
     return pg_catalog.jsonb_build_object('result', 'rejected:dispensary');
   end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('crm-bond-request-cap:' || v_account::text));
   select count(*) into v_accepted
   from public.crm_bond_request_handoffs
   where dispensary_account_id = v_account
     and received_at > v_now - interval '24 hours';
   if v_accepted >= 50 then
     insert into public.crm_bond_request_alerts (dispensary_account_id, accepted_count)
-    values (v_account, 50);
+    select v_account, 50
+    where not exists (
+      select 1 from public.crm_bond_request_alerts
+      where dispensary_account_id = v_account
+        and created_at > v_now - interval '24 hours'
+    );
     return pg_catalog.jsonb_build_object('result', 'rejected:rate');
   end if;
   begin
@@ -459,12 +472,14 @@ begin
   delete from public.crm_bond_request_handoffs
   where received_at <= v_cutoff - interval '12 months';
   get diagnostics v_purged = row_count;
+  delete from public.crm_bond_request_alerts
+  where created_at <= v_cutoff - interval '12 months';
   return pg_catalog.jsonb_build_object('ok', true, 'cleared', v_cleared, 'purged', v_purged);
 end;
 $$;
 
 comment on function public.crm_purge_bond_request_handoffs(timestamptz) is
-  'Clears consumer fields on the retention windows, then deletes the non-personal row, the send log, and the audit rows 12 months after received_at. Uses least of the caller clock and the server clock. Not scheduled.';
+  'Clears consumer fields on the retention windows, then deletes the non-personal row, the send log, the audit rows, and alert rows 12 months old. Uses least of the caller clock and the server clock. Not scheduled.';
 
 drop function if exists public.crm_bond_request_store_list(text, text, double precision, double precision);
 
@@ -481,6 +496,7 @@ begin
   where a.brand = 'cedargrowth'
     and a.account_type = 'adult_use_dispensary'
     and a.request_opt_out = false
+    and a.request_contact_email is not null
     and p_sku = any (a.bond_carried_skus)
     and not exists (
       select 1 from public.crm_contacts c
@@ -566,6 +582,33 @@ begin
 end;
 $$;
 
+create or replace function public.crm_bond_request_failed_sends()
+returns table (
+  handoff_id uuid,
+  template text,
+  template_version text,
+  rendered_sha256 text,
+  provider_message_id text,
+  sent_at timestamptz,
+  status text
+)
+language plpgsql
+security definer
+set search_path = pg_catalog
+as $$
+begin
+  return query
+  select s.handoff_id, s.template, s.template_version, s.rendered_sha256, s.provider_message_id, s.sent_at, s.status
+  from public.crm_bond_request_send_log s
+  where s.template = 'B'
+    and s.status = 'failed'
+  order by s.handoff_id;
+end;
+$$;
+
+comment on function public.crm_bond_request_failed_sends() is
+  'Failed withdrawal sends for the owner and administrator screen. No consumer fields and no role argument. The app derives the role before it calls this function.';
+
 create or replace function public.crm_bond_request_purge_scheduled()
 returns boolean
 language sql
@@ -584,6 +627,7 @@ revoke all on function public.crm_bond_request_store_list(text) from public, ano
 revoke all on function public.crm_bond_request_handoff_row(uuid) from public, anon, authenticated;
 revoke all on function public.crm_bond_request_admin_view(text) from public, anon, authenticated;
 revoke all on function public.crm_bond_request_purge_scheduled() from public, anon, authenticated;
+revoke all on function public.crm_bond_request_failed_sends() from public, anon, authenticated;
 
 grant execute on function public.crm_receive_bond_request_handoff(jsonb) to service_role;
 grant execute on function public.crm_bond_request_handoff_status(uuid) to service_role;
@@ -594,3 +638,4 @@ grant execute on function public.crm_bond_request_store_list(text) to service_ro
 grant execute on function public.crm_bond_request_handoff_row(uuid) to service_role;
 grant execute on function public.crm_bond_request_admin_view(text) to service_role;
 grant execute on function public.crm_bond_request_purge_scheduled() to service_role;
+grant execute on function public.crm_bond_request_failed_sends() to service_role;
