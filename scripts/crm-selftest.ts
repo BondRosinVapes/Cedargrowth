@@ -1332,6 +1332,7 @@ function intakePayload(overrides: Record<string, unknown> = {}) {
     business_name: 'North Store',
     contact_name: 'Ada Buyer',
     contact_email: 'ada@northstore.test',
+    contact_phone: '(716) 555-0100',
     street: '1 Main',
     city: 'Buffalo',
     state: 'NY',
@@ -1370,6 +1371,8 @@ assert(intakeUnconfigured.status === 503 && rotated.status === 200 && rotated.bo
 assert(badSig.status === 401 && stale.status === 401 && JSON.stringify(badSig.body) === '{"ok":false}' && intakeStore.intakeLogs.length === 1, 'a bad or stale signature stores nothing');
 assert(rotated.status === 200 && rotated.body.ok === true && replay.status === 200 && replay.body.duplicate === true && intakeStore.accounts.filter((row) => row.brand === 'bond').length === 1, 'the rotation secret is accepted and a replay creates nothing');
 assert(rotatedAccount?.status === 'prospect' && rotatedAccount.leadSource === 'bond_inquiry' && rotatedAccount.county === 'Erie' && rotatedAccount.ocmStatus === 'unverified' && rotatedAccount.consentVersion === 'v1:46652a17994f78d1' && regionForCounty(rotatedAccount.county) === 'Western New York', 'one bond lead keeps the county and stays unverified');
+const northContact = intakeStore.contacts.find((row) => row.accountId === rotatedAccount?.id);
+assert(northContact?.phone === '+17165550100', 'an order lead stores the work phone as E.164');
 const leadOpp = intakeStore.opportunities.find((row) => row.accountId === rotatedAccount?.id);
 const leadNote = intakeStore.notes.find((row) => row.accountId === rotatedAccount?.id);
 const leadActivity = intakeStore.activity.find((row) => row.accountId === rotatedAccount?.id && row.kind === 'inquiry_received');
@@ -1446,6 +1449,16 @@ const intakeSql = readFileSync('supabase/migrations/0138_crm_card_and_supplier_i
 const intakeLogInserts = intakeSql.split('insert into public.crm_intake_log').slice(1).join('\n');
 assert(cardLead.status === 200 && cardAccount?.leadSource === 'bond_inquiry' && cardAccount.sourceEvent === 'nyc-2026' && cardLog?.sourceRoute === '/card' && cardLog.sourceEvent === 'nyc-2026' && rotatedAccount?.sourceEvent == null && cardMissing.status === 400 && orderEvent.status === 400 && orderNull.status === 200 && badEvent.status === 400 && spaceEvent.status === 400 && numericRoute.status === 400 && objectEvent.status === 400 && visitorRejected.every(Boolean) && intakeStore.accounts.every((row) => row.displayName !== 'No Event' && row.displayName !== 'Order Event' && row.displayName !== 'Bad Event' && row.displayName !== 'Visitor Shop' && row.displayName !== 'TEST ONLY Space Event' && row.displayName !== 'TEST ONLY Numeric Route' && row.displayName !== 'TEST ONLY Object Event') && bondIntakeBody.includes('user-agent') === false && bondIntakeBody.includes('x-forwarded-for') === false && intakeLogInserts.includes('user_agent') === false && intakeLogInserts.includes(' ip') === false, 'a card lead stores its event, and an order lead cannot carry one');
 clearIntakeRates();
+const orderMissingPhoneBody = intakePayload({ inquiry_id: '71717171-7171-4171-8171-717171717171', business_name: 'No Phone Shop', license_number: 'NO-PHONE', contact_email: 'none@phone.test' });
+delete orderMissingPhoneBody.contact_phone;
+const orderMissingPhone = await handleBondIntake(intakeStore, intakeRequest(orderMissingPhoneBody), { nowMs: intakeNow, env: intakeEnv });
+const orderEmptyPhone = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '72727272-7272-4272-8272-727272727272', business_name: 'Empty Phone Shop', license_number: 'EMPTY-PHONE', contact_email: 'empty@phone.test', contact_phone: '' })), { nowMs: intakeNow, env: intakeEnv });
+const orderBadPhone = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '73737373-7373-4373-8373-737373737373', business_name: 'Bad Phone Shop', license_number: 'BAD-PHONE', contact_email: 'bad@phone.test', contact_phone: '555-0100' })), { nowMs: intakeNow, env: intakeEnv });
+const orderExtPhone = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '74747474-7474-4474-8474-747474747474', business_name: 'Ext Phone Shop', license_number: 'EXT-PHONE', contact_email: 'ext@phone.test', source_route: '/card', source_event: 'nyc-2026', contact_phone: '(716) 555-0100 ext 12' })), { nowMs: intakeNow, env: intakeEnv });
+const orderCardPhone = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '75757575-7575-4575-8575-757575757575', business_name: 'Phone Card Shop', license_number: 'CARD-PHONE', contact_email: 'card@phone.test', source_route: '/card', source_event: 'nyc-2026', contact_phone: '+1 (716) 555-0199' })), { nowMs: intakeNow, env: intakeEnv });
+const orderCardPhoneContact = intakeStore.contacts.find((row) => row.email === 'card@phone.test');
+const orderPhoneRejected = [orderMissingPhone, orderEmptyPhone, orderBadPhone, orderExtPhone].every((result) => result.status === 400 && Array.isArray(result.body.fields) && result.body.fields.includes('contact_phone'));
+assert(orderPhoneRejected && orderCardPhone.status === 200 && orderCardPhoneContact?.phone === '+17165550199' && intakeStore.accounts.every((row) => row.displayName !== 'No Phone Shop' && row.displayName !== 'Empty Phone Shop' && row.displayName !== 'Bad Phone Shop' && row.displayName !== 'Ext Phone Shop'), 'a dispensary work phone is required on /order and /card and is stored as E.164');
 for (let hit = 0; hit < 30; hit += 1) takeIntakeRate('/order', intakeNow);
 const limited = await handleBondIntake(intakeStore, intakeRequest(intakePayload({ inquiry_id: '20202020-2020-4202-8202-202020202020', business_name: 'Late Shop', license_number: 'LATE-1', contact_email: 'late@late.test' })), { nowMs: intakeNow, env: intakeEnv });
 function supplierPayload(overrides: Record<string, unknown> = {}) {

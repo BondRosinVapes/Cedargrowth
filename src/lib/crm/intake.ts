@@ -32,7 +32,7 @@ export const INTAKE_KEYS = [
   'source_event',
 ] as const;
 
-const OPTIONAL = new Set(['contact_phone', 'license_number', 'county', 'message', 'source_event']);
+const OPTIONAL = new Set(['license_number', 'county', 'message', 'source_event']);
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const EVENT_RE = /^[a-z0-9-]{1,64}$/;
 const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
@@ -44,7 +44,7 @@ export type IntakeLead = {
   businessName: string;
   contactName: string;
   contactEmail: string;
-  contactPhone: string | null;
+  contactPhone: string;
   licenseNumber: string | null;
   street: string;
   city: string;
@@ -114,8 +114,8 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
   if (!contactName) fields.push('contact_name');
   const contactEmail = typeof record.contact_email === 'string' && record.contact_email.length <= 200 && EMAIL_RE.test(record.contact_email) ? record.contact_email : null;
   if (!contactEmail) fields.push('contact_email');
-  const contactPhone = optionalText(record.contact_phone, 40);
-  if (contactPhone === 'invalid') fields.push('contact_phone');
+  const contactPhone = parseDispensaryPhone(record.contact_phone);
+  if (!contactPhone) fields.push('contact_phone');
   const licenseNumber = optionalText(record.license_number, 40);
   if (licenseNumber === 'invalid') fields.push('license_number');
   const street = text(record.street, 1, 120);
@@ -142,7 +142,7 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
   } else if (sourceRoute === '/order' && eventKey && eventRaw !== null && eventRaw !== undefined) {
     fields.push('source_event');
   }
-  if (fields.length || !inquiryId || !submittedAt || !businessName || !contactName || !contactEmail || !street || !city || !postalCode || !consentVersion || !county.ok || !sourceRoute || (sourceRoute === '/card' && !sourceEvent)) {
+  if (fields.length || !inquiryId || !submittedAt || !businessName || !contactName || !contactEmail || !contactPhone || !street || !city || !postalCode || !consentVersion || !county.ok || !sourceRoute || (sourceRoute === '/card' && !sourceEvent)) {
     return { ok: false, fields };
   }
   return {
@@ -153,7 +153,7 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
       businessName,
       contactName,
       contactEmail,
-      contactPhone: contactPhone || null,
+      contactPhone,
       licenseNumber: licenseNumber || null,
       street,
       city,
@@ -166,6 +166,18 @@ export function parseIntake(value: unknown): { ok: true; lead: IntakeLead } | { 
       sourceEvent,
     },
   };
+}
+
+function parseDispensaryPhone(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 40) return null;
+  if (/(?:ext\.?|extension|(?:^|\s)x)\s*\d*\s*$/i.test(trimmed)) return null;
+  if (!/^[+0-9().\s-]+$/.test(trimmed)) return null;
+  let digits = trimmed.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
+  if (digits.length !== 10) return null;
+  return `+1${digits}`;
 }
 
 function text(value: unknown, min: number, max: number): string | null {

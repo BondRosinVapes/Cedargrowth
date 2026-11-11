@@ -172,7 +172,24 @@ declare
   v_license text;
   v_route text;
   v_event text;
+  v_phone text;
+  v_digits text;
 begin
+  v_phone := btrim(coalesce(p_contact_phone, ''));
+  if v_phone = '' or v_phone ~* '(ext\.?|extension|(^|[[:space:]])x)' then
+    raise exception 'contact_phone is not a US number';
+  end if;
+  if v_phone !~ '^[+0-9().[:space:]-]+$' then
+    raise exception 'contact_phone is not a US number';
+  end if;
+  v_digits := regexp_replace(v_phone, '[^0-9]', '', 'g');
+  if char_length(v_digits) = 11 and left(v_digits, 1) = '1' then
+    v_digits := substring(v_digits from 2);
+  end if;
+  if char_length(v_digits) <> 10 then
+    raise exception 'contact_phone is not a US number';
+  end if;
+  v_phone := '+1' || v_digits;
   v_route := nullif(btrim(p_source_route), '');
   v_event := nullif(btrim(p_source_event), '');
   if v_route is distinct from '/order' and v_route is distinct from '/card' then
@@ -233,7 +250,7 @@ begin
     v_event, 'bond_inquiry', 'bond-intake', 'bond-intake'
   ) returning id into account_id;
   insert into public.crm_contacts (brand, account_id, name, email, phone, notes, created_by, updated_by, source_inquiry_id)
-  values ('bond', account_id, p_contact_name, p_contact_email, nullif(p_contact_phone, ''), '', 'bond-intake', 'bond-intake', p_inquiry_id);
+  values ('bond', account_id, p_contact_name, p_contact_email, v_phone, '', 'bond-intake', 'bond-intake', p_inquiry_id);
   insert into public.crm_opportunities (brand, account_id, name, stage, forecast_cents, notes, created_by, updated_by, source_inquiry_id)
   values ('bond', account_id, p_business_name, 'lead', null, '', 'bond-intake', 'bond-intake', p_inquiry_id);
   if p_message is not null and p_message <> '' then
@@ -401,8 +418,6 @@ alter table public.crm_supplier_inquiries enable row level security;
 alter table public.crm_supplier_inquiries force row level security;
 revoke all on table public.crm_supplier_inquiries from public, anon, authenticated;
 revoke all on table public.crm_supplier_inquiries from service_role;
-grant select, insert on table public.crm_supplier_inquiries to service_role;
-revoke update, delete, truncate, references, trigger on table public.crm_supplier_inquiries from service_role, anon, authenticated, public;
 
 alter table public.crm_supplier_intake_deletions enable row level security;
 alter table public.crm_supplier_intake_deletions force row level security;
@@ -533,7 +548,7 @@ begin
     replied_at
   ) values (
     p_inquiry_id,
-    least(p_submitted_at, pg_catalog.now() + interval '5 minutes'),
+    greatest(least(p_submitted_at, pg_catalog.now() + interval '5 minutes'), pg_catalog.now() - interval '2 days'),
     p_business_name,
     v_trade,
     p_supply_type,
@@ -614,10 +629,9 @@ set search_path = pg_catalog
 as $$
 declare
   v_count integer;
-  v_replied timestamptz := least(pg_catalog.now(), pg_catalog.now() + interval '5 minutes');
 begin
   update public.crm_supplier_inquiries
-  set replied_at = v_replied
+  set replied_at = pg_catalog.now()
   where inquiry_id = p_inquiry_id;
   get diagnostics v_count = row_count;
   return pg_catalog.jsonb_build_object('ok', true, 'updated', v_count > 0);
