@@ -125,15 +125,22 @@ const MARKER_FRACTION = 1 / 90;
 const MERGE_MULTIPLE = 2.8;
 const MIN_MARK_PX = 8;
 const MIN_TARGET_PX = 24;
+const TOUCH_TARGET_PX = 44;
+const TOUCH_MAP_PX = 768;
 
 export function markerSpan(viewWidth: number): number {
   return viewWidth * MARKER_FRACTION;
 }
 
+export function hitTargetPx(svgClientWidth: number): number {
+  if (svgClientWidth > 0 && svgClientWidth <= TOUCH_MAP_PX) return TOUCH_TARGET_PX;
+  return MIN_TARGET_PX;
+}
+
 export function mergeGap(viewWidth: number, svgClientWidth = 0): number {
   const fractional = markerSpan(viewWidth) * MERGE_MULTIPLE;
   if (svgClientWidth <= 0) return fractional;
-  return Math.max(fractional, (MIN_TARGET_PX / svgClientWidth) * viewWidth);
+  return Math.max(fractional, (hitTargetPx(svgClientWidth) / svgClientWidth) * viewWidth);
 }
 
 // 0.0001 degrees of latitude near the city, about 11 m.
@@ -145,7 +152,7 @@ export function storefrontSeparation(): number {
 
 export function minZoomWidth(wholeWidth: number): number {
   const separation = storefrontSeparation();
-  const narrow = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, MIN_TARGET_PX / 390);
+  const narrow = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, TOUCH_TARGET_PX / 390);
   return Math.min(wholeWidth, (separation * 0.8) / narrow);
 }
 
@@ -183,12 +190,11 @@ export function clusterFrame(points: readonly { x: number; y: number }[], whole:
   return { x: (left + right) / 2 - w / 2, y: (top + bottom) / 2 - h / 2, w, h };
 }
 
-// Visible size and hit target in CSS pixels. The drawn mark uses the SVG client width.
-// The merge gap does not use these floors.
+// Visible size and hit target in CSS pixels. Touch widths use a 44px target.
 export function markerPixels(viewWidth: number, svgClientWidth: number): { visible: number; target: number } {
   const fractional = svgClientWidth > 0 ? svgClientWidth * MARKER_FRACTION : markerSpan(viewWidth);
   const visible = Math.max(fractional, MIN_MARK_PX);
-  return { visible, target: Math.max(visible, MIN_TARGET_PX) };
+  return { visible, target: Math.max(visible, hitTargetPx(svgClientWidth)) };
 }
 
 export function markerUnits(viewWidth: number, svgClientWidth: number): { visible: number; target: number } {

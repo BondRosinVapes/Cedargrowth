@@ -122,9 +122,9 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="relative min-w-0 border border-hairline bg-parchment">
-        <div className="flex flex-wrap gap-2 p-2">
-          <button type="button" aria-label="Zoom in" onClick={() => zoomBy(1)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">+</button>
-          <button type="button" aria-label="Zoom out" onClick={() => zoomBy(-1)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">-</button>
+        <div className="grid grid-cols-2 gap-2 p-2 md:flex md:flex-wrap">
+          <button type="button" aria-label="Zoom in" onClick={() => zoomBy(1)} className="min-h-[44px] min-w-[44px] w-full border border-ink bg-clinical font-mono text-specimen text-primary md:w-auto">+</button>
+          <button type="button" aria-label="Zoom out" onClick={() => zoomBy(-1)} className="min-h-[44px] min-w-[44px] w-full border border-ink bg-clinical font-mono text-specimen text-primary md:w-auto">-</button>
           <MapMenu
             id="city-menu"
             label={CITY_MENU_LABEL}
@@ -162,7 +162,11 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
           />
         </div>
         {openCluster ? (
-          <div ref={listRef} role="dialog" aria-label={`${openCluster.count} dispensaries`} className="absolute left-2 top-16 z-10 max-h-64 w-[min(18rem,calc(100%-1rem))] overflow-y-auto border border-ink bg-clinical">
+          <div ref={listRef} role="dialog" aria-label={`${openCluster.count} dispensaries`} className="fixed inset-x-0 bottom-0 z-30 max-h-[70vh] overflow-y-auto border-t border-ink bg-clinical p-3 md:absolute md:inset-x-auto md:bottom-auto md:left-2 md:top-16 md:z-10 md:max-h-64 md:w-[min(18rem,calc(100%-1rem))] md:border md:p-0">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="font-mono text-specimen uppercase text-tertiary">{openCluster.count} dispensaries</p>
+              <button type="button" aria-label="Close" onClick={() => { setOpenCluster(null); clusterButton.current?.focus(); }} className="min-h-[44px] min-w-[44px] border border-ink px-3 font-mono text-specimen uppercase text-primary">Close</button>
+            </div>
             <ul>
               {clusterMembers(openCluster.pins).map((row) => (
                 <li key={row.id}>
@@ -182,7 +186,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
           role="img"
           aria-label="New York dispensary map"
           className="block w-full min-w-0 bg-parchment"
-          style={{ aspectRatio: `${WHOLE.w} / ${WHOLE.h}`, touchAction: 'pan-y' }}
+          style={{ aspectRatio: `${WHOLE.w} / ${WHOLE.h}`, touchAction: zoomed ? 'none' : 'pan-y' }}
           onDoubleClick={(event) => event.preventDefault()}
           onPointerDown={(event) => {
             if (!zoomed || (event.target as Element).closest('[data-pin]')) return;
@@ -338,8 +342,8 @@ function MapMenu({ id, label, placeholder, options, onPick }: { id: string; labe
   }
 
   return (
-    <div ref={root} className="relative">
-      <button ref={button} type="button" aria-label={label} aria-haspopup="listbox" aria-expanded={open} aria-controls={`${id}-list`} onClick={() => (open ? hide() : show())} className="min-h-[44px] border border-ink bg-clinical px-3 font-mono text-specimen uppercase text-primary">{label}</button>
+    <div ref={root} className="relative w-full md:w-auto">
+      <button ref={button} type="button" aria-label={label} aria-haspopup="listbox" aria-expanded={open} aria-controls={`${id}-list`} onClick={() => (open ? hide() : show())} className="min-h-[44px] w-full border border-ink bg-clinical px-3 font-mono text-specimen uppercase text-primary md:w-auto">{label}</button>
       {open ? (
         <div className="absolute left-0 z-10 mt-1 w-[min(18rem,calc(100vw-2rem))] border border-ink bg-clinical">
           <input
