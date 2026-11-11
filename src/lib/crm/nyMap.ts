@@ -1,6 +1,7 @@
 // New York county shapes and pin placement. Coordinates stay in the browser.
 // The county file is a Census cartographic boundary, generalized from TIGER/Line.
 
+import { ACCOUNT_TYPE_LABELS } from './engine';
 import { DISTRIBUTOR_LABELS, type Distributor } from './distributor';
 import { COUNTY_REGION, NY_COUNTIES, regionForCounty, type NyRegion } from './nyRegions';
 import shapes from './nyCounties.json' with { type: 'json' };
@@ -383,6 +384,55 @@ export function clusterPins(pins: readonly PlacedPin[], cell: number): { singles
     }
   }
   return { singles, clusters };
+}
+
+export type DispensaryContact = { id: string; name: string; title?: string | null; email?: string | null; phone?: string | null };
+
+export type DispensaryRecord = {
+  displayName?: string | null;
+  licenseRef?: string | null;
+  accountType?: string | null;
+  ocmStatus?: 'verified' | 'unverified' | null;
+  street?: string | null;
+  city?: string | null;
+  postalCode?: string | null;
+  county?: string | null;
+  status?: string | null;
+  assignedRep?: string | null;
+};
+
+const STATUS_LABEL: Record<string, string> = { prospect: 'Prospect', active: 'Active', paused: 'Paused', closed: 'Closed' };
+
+function stored(value: string | null | undefined): string | null {
+  const text = value?.trim();
+  return text ? text : null;
+}
+
+export function dispensaryCard(account: DispensaryRecord, contacts: readonly DispensaryContact[]): { name: string; lines: { label: string; value: string }[]; contacts: { id: string; name: string; title: string | null; email: string | null; phone: string | null }[] } {
+  const lines: { label: string; value: string }[] = [];
+  const license = stored(account.licenseRef);
+  if (license) lines.push({ label: 'License', value: license });
+  const type = account.accountType && (ACCOUNT_TYPE_LABELS as Record<string, string>)[account.accountType];
+  if (type) lines.push({ label: 'Account type', value: type });
+  if (account.ocmStatus === 'verified' || account.ocmStatus === 'unverified') lines.push({ label: 'OCM status', value: account.ocmStatus === 'verified' ? 'Verified' : 'Unverified' });
+  const street = stored(account.street);
+  if (street) lines.push({ label: 'Street', value: street });
+  const city = stored(account.city);
+  if (city) lines.push({ label: 'City', value: city });
+  const zip = stored(account.postalCode);
+  if (zip) lines.push({ label: 'ZIP', value: zip });
+  const county = stored(account.county);
+  if (county) lines.push({ label: 'County', value: county });
+  const status = account.status ? STATUS_LABEL[account.status] : undefined;
+  if (status) lines.push({ label: 'Status', value: status });
+  const rep = stored(account.assignedRep);
+  if (rep) lines.push({ label: 'Rep', value: rep });
+  const people = contacts.flatMap((row) => {
+    const name = stored(row.name);
+    if (!name) return [];
+    return [{ id: row.id, name, title: stored(row.title), email: stored(row.email), phone: stored(row.phone) }];
+  });
+  return { name: stored(account.displayName) || 'Dispensary', lines, contacts: people };
 }
 
 export function pinCard(pin: MapPin): { label: string; value: string; mono?: boolean }[] {

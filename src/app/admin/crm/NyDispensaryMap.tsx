@@ -19,7 +19,7 @@ import {
   mergeGap,
   nextZoomView,
   nycFrame,
-  pinCard,
+  dispensaryCard,
   placePins,
   wholeStateFrame,
   type MapChoice,
@@ -31,7 +31,7 @@ import {
 const REGION_TONE = [0.06, 0.09, 0.12, 0.15, 0.18, 0.22, 0.26, 0.3, 0.34, 0.4];
 const WHOLE = wholeStateFrame();
 
-export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPin[]; unmapped: number; onOpenAccount: (id: string) => void }) {
+export function NyDispensaryMap({ pins, unmapped, brand = 'cedargrowth', onOpenAccount }: { pins: MapPin[]; unmapped: number; brand?: 'cedargrowth' | 'bond'; onOpenAccount: (id: string) => void }) {
   const [view, setView] = useState(WHOLE);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [litIds, setLitIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -41,10 +41,14 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   const listRef = useRef<HTMLDivElement>(null);
   const [svgWidth, setSvgWidth] = useState(0);
   const [openCluster, setOpenCluster] = useState<PinCluster | null>(null);
+  const [cardId, setCardId] = useState<string | null>(null);
+  const [cardToken, setCardToken] = useState(0);
+  const [record, setRecord] = useState<ReturnType<typeof dispensaryCard> | null>(null);
+  const [recordNote, setRecordNote] = useState('');
+  const cardRef = useRef<HTMLDivElement>(null);
   const placed = useMemo(() => placePins(pins).placed, [pins]);
   const units = markerUnits(view.w, svgWidth);
   const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w, svgWidth), svgWidth > 0 ? { viewWidth: view.w, svgClientWidth: svgWidth } : undefined), [placed, view.w, svgWidth]);
-  const active = placed.find((pin) => pin.id === activeId) ?? null;
   const zoomed = view.w < WHOLE.w - 0.5;
 
   useEffect(() => {
@@ -109,8 +113,63 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   }, [openCluster, grouped, queueReturn]);
 
   function openDispensary(id: string) {
-    onOpenAccount(id);
+    setOpenCluster(null);
+    setCardToken((value) => value + 1);
+    setCardId(id);
   }
+
+  function closeCard() {
+    const id = cardId;
+    setCardId(null);
+    setRecord(null);
+    if (id) queueReturn([id]);
+  }
+
+  useEffect(() => {
+    if (!cardId) return;
+    let cancel = false;
+    setRecord(null);
+    setRecordNote('');
+    const headers = { 'x-cedargrowth-crm': '1' };
+    Promise.all([
+      fetch(`/api/admin/crm/accounts?brand=${brand}`, { headers, credentials: 'same-origin' }).then((res) => res.json()),
+      fetch(`/api/admin/crm/contacts?brand=${brand}`, { headers, credentials: 'same-origin' }).then((res) => res.json()),
+    ]).then(([accountsBody, contactsBody]: [{ accounts?: AccountRow[] }, { contacts?: ContactRow[] }]) => {
+      if (cancel) return;
+      const account = (accountsBody.accounts || []).find((row) => row.id === cardId);
+      if (!account) { setRecordNote('This dispensary could not be read.'); return; }
+      const people = (contactsBody.contacts || []).filter((row) => row.accountId === cardId);
+      setRecord(dispensaryCard(account, people));
+    }).catch(() => { if (!cancel) setRecordNote('This dispensary could not be read.'); });
+    return () => { cancel = true; };
+  }, [cardId, cardToken, brand]);
+
+  useEffect(() => {
+    if (!cardId) return;
+    const id = cardId;
+    cardRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    function onKey(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setCardId(null);
+      setRecord(null);
+      queueReturn([id]);
+    }
+    function onClick(event: MouseEvent) {
+      const target = event.target;
+      if (cardRef.current?.contains(target as Node)) return;
+      if (target instanceof Element && target.closest('[data-pin]')) return;
+      setCardId(null);
+      setRecord(null);
+      queueReturn([id]);
+    }
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('click', onClick);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('click', onClick);
+    };
+  }, [cardId, queueReturn]);
 
   function showCluster(cluster: PinCluster) {
     setOpenCluster(cluster);
@@ -185,6 +244,17 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
                 </li>
               ))}
             </ul>
+          </div>
+        ) : null}
+        {cardId ? (
+          <div ref={cardRef} role="dialog" aria-label={record?.name || 'Dispensary'} className="fixed inset-x-0 bottom-0 z-30 max-h-[70vh] overflow-y-auto border-t border-ink bg-clinical p-3 md:absolute md:inset-x-auto md:bottom-auto md:left-2 md:top-16 md:z-10 md:max-h-80 md:w-[min(22rem,calc(100%-1rem))] md:border md:p-3">
+            <div className="mb-2 flex items-start justify-between gap-2">
+              <h2 className="font-display text-body-l text-primary">{record?.name || 'Dispensary'}</h2>
+              <button type="button" aria-label="Close" onClick={closeCard} className="flex min-h-[44px] min-w-[44px] items-center justify-center border border-ink text-primary"><X strokeWidth={1.5} className="h-4 w-4" aria-hidden="true" /></button>
+            </div>
+            {recordNote ? <p className="text-body-m text-secondary">{recordNote}</p> : null}
+            {!record && !recordNote ? <p className="text-caption text-tertiary">Loading the dispensary.</p> : null}
+            {record ? <DispensaryInfoCard model={record} onOpen={() => onOpenAccount(cardId)} /> : null}
           </div>
         ) : null}
         <svg
@@ -309,7 +379,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
         </svg>
       </div>
       <aside className="flex flex-col gap-3 border border-hairline bg-clinical p-3">
-        {active ? <PinCard pin={active} onOpen={() => openDispensary(active.id)} onClose={() => { const id = active.id; setActiveId(null); queueReturn([id]); }} /> : <p className="text-body-m text-secondary">Hover or focus a dispensary to see its record. Select it to open the account.</p>}
+        <p className="text-body-m text-secondary">Select a dispensary to open its card.</p>
         <p className="text-caption text-tertiary">{unmapped} accounts not yet on the map.</p>
       </aside>
     </div>
@@ -407,22 +477,34 @@ function MapMenu({ id, label, placeholder, options, onPick }: { id: string; labe
   );
 }
 
-function PinCard({ pin, onOpen, onClose }: { pin: PlacedPin; onOpen: () => void; onClose: () => void }) {
+export function DispensaryInfoCard({ model, onOpen }: { model: ReturnType<typeof dispensaryCard>; onOpen: () => void }) {
   return (
-    <article className="flex flex-col gap-2">
-      <div className="flex items-start justify-between gap-2">
-        <h3 className="font-sans text-body-m text-primary">{pin.displayName}</h3>
-        <button type="button" aria-label="Close" onClick={onClose} className="flex min-h-[44px] min-w-[44px] items-center justify-center border border-ink text-primary"><X strokeWidth={1.5} className="h-4 w-4" aria-hidden="true" /></button>
-      </div>
-      <dl className="flex flex-col gap-1">
-        {pinCard(pin).map((row) => (
-          <div key={row.label}>
-            <dt className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{row.label}</dt>
-            <dd className={row.mono ? 'font-mono text-specimen text-primary' : 'text-caption text-primary'}>{row.value}</dd>
+    <div className="flex flex-col gap-3">
+      <dl className="flex flex-col gap-2">
+        {model.lines.map((line) => (
+          <div key={line.label}>
+            <dt className="font-mono text-specimen uppercase tracking-specimen text-tertiary">{line.label}</dt>
+            <dd className="text-body-m text-primary">{line.value}</dd>
           </div>
         ))}
       </dl>
-      <button type="button" onClick={onOpen} className="min-h-[44px] border border-ink px-3 py-2 font-mono text-specimen uppercase text-primary">Open account</button>
-    </article>
+      <h3 className="font-display text-body-l text-primary">Contacts</h3>
+      {model.contacts.length === 0 ? <p className="text-body-m text-secondary">No contacts yet</p> : (
+        <ul className="flex flex-col gap-3">
+          {model.contacts.map((person) => (
+            <li key={person.id} className="flex flex-col gap-1">
+              <p className="text-body-m text-primary">{person.name}</p>
+              {person.title ? <p className="text-caption text-secondary">{person.title}</p> : null}
+              {person.email ? <a href={`mailto:${person.email}`} className="min-h-[44px] text-body-m text-primary underline">{person.email}</a> : null}
+              {person.phone ? <a href={`tel:${person.phone}`} className="min-h-[44px] text-body-m text-primary underline">{person.phone}</a> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      <button type="button" onClick={onOpen} className="min-h-[44px] border border-ink px-3 py-2 font-mono text-specimen uppercase text-primary">Open record</button>
+    </div>
   );
 }
+
+type AccountRow = { id: string; displayName?: string | null; licenseRef?: string | null; accountType?: string | null; ocmStatus?: 'verified' | 'unverified' | null; street?: string | null; city?: string | null; postalCode?: string | null; county?: string | null; status?: string | null; assignedRep?: string | null };
+type ContactRow = { id: string; accountId: string; name: string; title?: string | null; email?: string | null; phone?: string | null };
