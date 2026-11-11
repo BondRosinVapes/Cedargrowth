@@ -2587,6 +2587,16 @@ delete missingAtBody.submitted_at;
 const missingId = await handleBondRequestHttp(handoffRequest(missingIdBody, 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
 const missingAt = await handleBondRequestHttp(handoffRequest(missingAtBody, 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
 assert(priceItem.body?.result === 'rejected:items' && noteItem.body?.result === 'rejected:items' && hugeQty.body?.result === 'rejected:items' && stringQtyOne.body?.result === 'rejected:items' && stringQtyFive.body?.result === 'rejected:items' && handoffBook.rows.every((row) => row.handoffId !== handoffId(460) && row.handoffId !== handoffId(461) && row.handoffId !== handoffId(462) && row.handoffId !== handoffId(465) && row.handoffId !== handoffId(466)), 'K1 a price key, a note key, a string qty, or an overflowing qty is rejected and nothing is stored');
+function rawQty(n: number, token: string) {
+  return JSON.stringify(handoffBody(n, sendShop.id)).replace('"qty":1', `"qty":${token}`);
+}
+const wholeOne = await handleBondRequestHttp(handoffRequest(rawQty(467, '1.0'), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const wholeFive = await handleBondRequestHttp(handoffRequest(rawQty(468, '5.0'), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const halfQty = await handleBondRequestHttp(handoffRequest(rawQty(469, '1.5'), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const sixQty = await handleBondRequestHttp(handoffRequest(rawQty(470, '6.0'), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const storedOne = handoffBook.rows.find((row) => row.handoffId === handoffId(467));
+const storedFive = handoffBook.rows.find((row) => row.handoffId === handoffId(468));
+assert(wholeOne.body?.result === 'accepted' && storedOne?.items[0].qty === 1 && Number.isInteger(storedOne.items[0].qty) && wholeFive.body?.result === 'accepted' && storedFive?.items[0].qty === 5 && Number.isInteger(storedFive.items[0].qty) && halfQty.body?.result === 'rejected:items' && sixQty.body?.result === 'rejected:items' && handoffBook.rows.every((row) => row.handoffId !== handoffId(469) && row.handoffId !== handoffId(470)), 'K1 1.0 and 5.0 are accepted as integers, and 1.5 and 6.0 are rejected');
 assert(missingId.body?.result === 'rejected:schema' && missingAt.body?.result === 'rejected:schema' && handoffBook.rows.every((row) => row.handoffId !== handoffId(463) && row.handoffId !== handoffId(464)), 'a missing handoff id or submitted time is rejected:schema');
 const renderedA = renderTemplate('B', { dispensaryName: 'North', memberFirstName: 'Ada', memberContact: 'ada@member.test', itemLines: '1 x Bond', visitPreference: 'Today', requestDate: '2026-11-11', postal: handoffEnv.CG_BOND_REQUEST_POSTAL_ADDRESS });
 assert(renderedA !== null && renderedA.renderedSha256 === renderedPartHash(renderedA.text, renderedA.html) && renderedA.renderedSha256 !== sha256Hex(renderedA.text) && renderedA.renderedSha256 !== sha256Hex(renderedA.html), 'K5 the rendered hash covers the text and the html, and a text-only hash does not match');

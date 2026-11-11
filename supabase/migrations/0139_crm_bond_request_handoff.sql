@@ -210,6 +210,8 @@ declare
   v_account uuid;
   v_items jsonb;
   v_item jsonb;
+  v_norm jsonb := '[]'::jsonb;
+  v_qty numeric;
   v_units integer := 0;
   v_lines integer := 0;
   v_contact text;
@@ -291,10 +293,14 @@ begin
        or not (v_item ? 'sku' and v_item ? 'qty')
        or (v_item->>'sku') not in ('vape-05g', 'vape-1g', 'preroll-1g', 'preroll-5pk', 'dog-walker-5pk', 'gummies-10ct-100', 'gummies-10ct-200', 'gummies-20ct-200')
        or pg_catalog.jsonb_typeof(v_item->'qty') is distinct from 'number'
-       or (v_item->>'qty') !~ '^[1-5]$' then
+       or (v_item->>'qty')::numeric <> trunc((v_item->>'qty')::numeric)
+       or (v_item->>'qty')::numeric < 1
+       or (v_item->>'qty')::numeric > 5 then
       return pg_catalog.jsonb_build_object('result', 'rejected:items');
     end if;
-    v_units := v_units + (v_item->>'qty')::integer;
+    v_qty := (v_item->>'qty')::numeric;
+    v_units := v_units + v_qty::integer;
+    v_norm := v_norm || pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object('sku', v_item->>'sku', 'qty', v_qty::integer));
   end loop;
   if v_lines < 1 or v_lines > 10 or v_units > 5 then
     return pg_catalog.jsonb_build_object('result', 'rejected:items');
@@ -336,7 +342,7 @@ begin
       member_first_name, member_contact, contact_kind, visit_preference, share_consent_version,
       source, source_event, status
     ) values (
-      v_id, p_payload->>'bond_request_id', v_now, v_submitted, v_account, v_items,
+      v_id, p_payload->>'bond_request_id', v_now, v_submitted, v_account, v_norm,
       v_name, v_contact, v_kind, v_visit, 'v1:898aa08ccea983db',
       'bond-haus', v_event, 'queued'
     );

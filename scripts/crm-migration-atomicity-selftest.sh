@@ -452,6 +452,17 @@ if [ "$PRICE_ITEM" != "rejected:items" ] || [ "$NOTE_ITEM" != "rejected:items" ]
   exit 1
 fi
 echo 'ok: a price key, a note key, a string qty, an overflowing qty, or a missing id or time stores nothing'
+QTY_ONE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','91919191-9191-4919-8919-919191919191','bond_request_id','one','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":\"vape-1g\",\"qty\":1.0}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+QTY_FIVE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','92929292-9292-4929-8929-929292929292','bond_request_id','five','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":\"vape-1g\",\"qty\":5.0}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+QTY_STORED=$(sudo -u postgres psql -d "$DB" -tA -c "select (select items::text from public.crm_bond_request_handoffs where handoff_id = '91919191-9191-4919-8919-919191919191') || '|' || (select items::text from public.crm_bond_request_handoffs where handoff_id = '92929292-9292-4929-8929-929292929292');")
+QTY_HALF=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','93939393-9393-4939-8939-939393939393','bond_request_id','half','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":\"vape-1g\",\"qty\":1.5}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+QTY_SIX=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','94949494-9494-4949-8949-949494949494','bond_request_id','six','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":\"vape-1g\",\"qty\":6.0}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+QTY_LEFT=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_handoffs where handoff_id in ('93939393-9393-4939-8939-939393939393', '94949494-9494-4949-8949-949494949494');")
+if [ "$QTY_ONE" != "accepted" ] || [ "$QTY_FIVE" != "accepted" ] || [ "$QTY_STORED" != '[{"qty": 1, "sku": "vape-1g"}]|[{"qty": 5, "sku": "vape-1g"}]' ] || [ "$QTY_HALF" != "rejected:items" ] || [ "$QTY_SIX" != "rejected:items" ] || [ "$QTY_LEFT" != "0" ]; then
+  echo "FAIL: whole number qty one=${QTY_ONE} five=${QTY_FIVE} stored=${QTY_STORED} half=${QTY_HALF} six=${QTY_SIX} left=${QTY_LEFT}"
+  exit 1
+fi
+echo 'ok: 1.0 and 5.0 are stored as integers, and 1.5 and 6.0 are rejected'
 FAIL_LIST=$(sudo -u postgres psql -d "$DB" -tA -c "select handoff_id::text || '|' || template || '|' || status from public.crm_bond_request_failed_sends();")
 if [ "$FAIL_LIST" != "82828282-8282-4282-8282-828282828282|B|failed" ] || printf '%s' "$FAIL_LIST" | grep -q 'ada@member.test'; then
   echo "FAIL: failed send list ${FAIL_LIST}"
