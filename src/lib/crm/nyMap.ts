@@ -385,7 +385,7 @@ export function clusterPins(pins: readonly PlacedPin[], cell: number): { singles
   return { singles, clusters };
 }
 
-export type DispensaryContact = { id: string; name: string; title?: string | null; email?: string | null; phone?: string | null };
+export type DispensaryContact = { id: string; name: string; title?: string | null; email?: string | null; phone?: string | null; preference?: string | null };
 
 export type DispensaryRecord = {
   displayName?: string | null;
@@ -407,7 +407,7 @@ function stored(value: string | null | undefined): string | null {
   return text ? text : null;
 }
 
-export function dispensaryCard(account: DispensaryRecord, contacts: readonly DispensaryContact[]): { name: string; lines: { label: string; value: string }[]; contacts: { id: string; name: string; title: string | null; email: string | null; phone: string | null }[] } {
+export function dispensaryCard(account: DispensaryRecord, contacts: readonly DispensaryContact[]): { name: string; lines: { label: string; value: string }[]; contacts: { id: string; name: string; title: string | null; email: string | null; phone: string | null; preference: 'unspecified' | 'store_only' | 'do_not_contact' }[] } {
   const lines: { label: string; value: string }[] = [];
   const license = stored(account.licenseRef);
   if (license) lines.push({ label: 'License', value: license });
@@ -429,7 +429,8 @@ export function dispensaryCard(account: DispensaryRecord, contacts: readonly Dis
   const people = contacts.flatMap((row) => {
     const name = stored(row.name);
     if (!name) return [];
-    return [{ id: row.id, name, title: stored(row.title), email: stored(row.email), phone: stored(row.phone) }];
+    const preference: 'unspecified' | 'store_only' | 'do_not_contact' = row.preference === 'store_only' || row.preference === 'do_not_contact' ? row.preference : 'unspecified';
+    return [{ id: row.id, name, title: stored(row.title), email: stored(row.email), phone: stored(row.phone), preference }];
   });
   return { name: stored(account.displayName) || 'Dispensary', lines, contacts: people };
 }

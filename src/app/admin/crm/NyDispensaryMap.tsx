@@ -27,7 +27,7 @@ import {
   type PinCluster,
   type PlacedPin,
 } from '@/lib/crm/nyMap';
-import { mailtoHref, telHref } from '@/lib/crm/pinCard';
+import { contactMailHref, contactTelHref } from '@/lib/crm/pinCard';
 
 const REGION_TONE = [0.06, 0.09, 0.12, 0.15, 0.18, 0.22, 0.26, 0.3, 0.34, 0.4];
 const WHOLE = wholeStateFrame();
@@ -494,14 +494,14 @@ export function DispensaryInfoCard({ model, onOpen }: { model: ReturnType<typeof
       {model.contacts.length === 0 ? <p className="text-body-m text-secondary">No contacts yet</p> : (
         <ul className="flex flex-col gap-3">
           {model.contacts.map((person) => {
-            const mail = person.email ? mailtoHref(person.email) : null;
-            const phone = person.phone ? telHref(person.phone) : null;
+            const mail = contactMailHref(person.email, person.preference);
+            const phone = contactTelHref(person.phone, person.preference);
             return (
               <li key={person.id} className="flex flex-col gap-1">
                 <p className="text-body-m text-primary">{person.name}</p>
                 {person.title ? <p className="text-caption text-secondary">{person.title}</p> : null}
-                {mail ? <a href={mail} className="min-h-[44px] text-body-m text-primary underline">{person.email}</a> : null}
-                {phone ? <a href={phone} className="min-h-[44px] text-body-m text-primary underline">{person.phone}</a> : (person.phone ? <p className="min-h-[44px] text-body-m text-primary">{person.phone}</p> : null)}
+                {person.email ? (mail ? <a href={mail} className="min-h-[44px] text-body-m text-primary underline">{person.email}</a> : <p className="min-h-[44px] text-body-m text-primary">{person.email}</p>) : null}
+                {person.phone ? (phone ? <a href={phone} className="min-h-[44px] text-body-m text-primary underline">{person.phone}</a> : <p className="min-h-[44px] text-body-m text-primary">{person.phone}</p>) : null}
               </li>
             );
           })}
@@ -513,4 +513,4 @@ export function DispensaryInfoCard({ model, onOpen }: { model: ReturnType<typeof
 }
 
 type AccountRow = { id: string; displayName?: string | null; licenseRef?: string | null; accountType?: string | null; ocmStatus?: 'verified' | 'unverified' | null; street?: string | null; city?: string | null; postalCode?: string | null; county?: string | null; status?: string | null; assignedRep?: string | null };
-type ContactRow = { id: string; accountId: string; name: string; title?: string | null; email?: string | null; phone?: string | null };
+type ContactRow = { id: string; accountId: string; name: string; title?: string | null; email?: string | null; phone?: string | null; preference?: string | null };

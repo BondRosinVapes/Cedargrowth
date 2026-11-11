@@ -1,4 +1,5 @@
-// Fields the map pin card is allowed to show. Notes, consent, and contact preference stay off this payload.
+// Fields the map pin card is allowed to show. Notes and consent stay off this payload.
+// Preference is kept only so do not contact and store only stay plain text.
 
 export type CardAccount = {
   id: string;
@@ -48,6 +49,7 @@ export type CardContact = {
   title: string | null;
   email: string | null;
   phone: string | null;
+  preference: 'unspecified' | 'store_only' | 'do_not_contact';
 };
 
 export function cardContactFields(contact: {
@@ -56,14 +58,29 @@ export function cardContactFields(contact: {
   title: string | null;
   email: string | null;
   phone: string | null;
+  preference?: string | null;
 }): CardContact {
+  const preference = contact.preference === 'store_only' || contact.preference === 'do_not_contact' ? contact.preference : 'unspecified';
   return {
     id: contact.id,
     name: contact.name,
     title: contact.title,
     email: contact.email,
     phone: contact.phone,
+    preference,
   };
+}
+
+export function contactMailHref(email: string | null | undefined, preference: string | null | undefined): string | null {
+  if (preference === 'do_not_contact' || preference === 'store_only') return null;
+  if (!email) return null;
+  return mailtoHref(email);
+}
+
+export function contactTelHref(phone: string | null | undefined, preference: string | null | undefined): string | null {
+  if (preference === 'do_not_contact' || preference === 'store_only') return null;
+  if (!phone) return null;
+  return telHref(phone);
 }
 
 export function mailtoHref(email: string): string | null {
