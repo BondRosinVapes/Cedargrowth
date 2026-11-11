@@ -86,3 +86,141 @@ alter table public.crm_distribution_merges force row level security;
 revoke all on table public.crm_distribution_merges from public, anon, authenticated;
 grant select, insert, update on table public.crm_distribution_merges to service_role;
 revoke delete on table public.crm_distribution_merges from service_role, anon, authenticated, public;
+
+create or replace function public.crm_merge_won_distribution(p_opportunity_id uuid, p_actor text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_brand text;
+  v_account uuid;
+  v_type text;
+  v_license text;
+  v_key text;
+  v_open uuid;
+  v_id uuid;
+  v_ids uuid[] := '{}';
+  v_priors jsonb := '[]'::jsonb;
+  rec record;
+begin
+  if p_actor is null or char_length(btrim(p_actor)) < 3 or char_length(btrim(p_actor)) > 200 then
+    return jsonb_build_object('ok', false, 'code', 'actor');
+  end if;
+  select brand, account_id into v_brand, v_account
+  from public.crm_opportunities
+  where id = p_opportunity_id
+  for update;
+  if v_brand is null then
+    return jsonb_build_object('ok', false, 'code', 'missing');
+  end if;
+  if v_brand <> 'cedargrowth' then
+    return jsonb_build_object('ok', true, 'code', 'skipped');
+  end if;
+  select id into v_open
+  from public.crm_distribution_merges
+  where opportunity_id = p_opportunity_id and undone_at is null;
+  if v_open is not null then
+    return jsonb_build_object('ok', true, 'code', 'already');
+  end if;
+  select account_type, license_ref into v_type, v_license
+  from public.crm_accounts
+  where id = v_account and brand = 'cedargrowth';
+  if v_type is null or v_type not in ('adult_use_dispensary', 'microbusiness', 'registered_organization') then
+    return jsonb_build_object('ok', true, 'code', 'skipped');
+  end if;
+  v_key := lower(btrim(coalesce(v_license, '')));
+  if v_key <> '' then
+    for rec in
+      select c.id as contact_id, c.account_id as prior_account_id
+      from public.crm_contacts c
+      join public.crm_accounts a on a.id = c.account_id and a.brand = c.brand
+      where c.brand = 'cedargrowth'
+        and a.brand = 'cedargrowth'
+        and a.id <> v_account
+        and a.license_ref is not null
+        and btrim(a.license_ref) <> ''
+        and lower(btrim(a.license_ref)) = v_key
+      order by c.id
+    loop
+      update public.crm_contacts
+      set account_id = v_account, updated_by = btrim(p_actor)
+      where id = rec.contact_id and brand = 'cedargrowth';
+      v_ids := v_ids || rec.contact_id;
+      v_priors := v_priors || jsonb_build_array(jsonb_build_object('contactId', rec.contact_id, 'priorAccountId', rec.prior_account_id));
+    end loop;
+  end if;
+  insert into public.crm_distribution_merges (brand, account_id, opportunity_id, actor, contact_ids, prior_accounts)
+  values ('cedargrowth', v_account, p_opportunity_id, btrim(p_actor), v_ids, v_priors)
+  returning id into v_id;
+  return jsonb_build_object('ok', true, 'code', 'merged', 'id', v_id, 'moved', coalesce(cardinality(v_ids), 0));
+end;
+$$;
+
+comment on function public.crm_merge_won_distribution(uuid, text) is 'One transaction. Moves CedarGrowth contacts from other accounts with the same trimmed lowercase license onto the won dispensary account and writes one audit row. A blank license matches nothing. Zero contacts still writes the audit row.';
+
+create or replace function public.crm_undo_distribution_merge(p_merge_id uuid, p_actor text, p_now timestamptz)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row public.crm_distribution_merges%rowtype;
+  v_item jsonb;
+  v_contact uuid;
+  v_prior uuid;
+  v_brand text;
+  v_refused jsonb := '[]'::jsonb;
+begin
+  if p_actor is null or char_length(btrim(p_actor)) < 3 or char_length(btrim(p_actor)) > 200 then
+    return jsonb_build_object('ok', false);
+  end if;
+  select * into v_row
+  from public.crm_distribution_merges
+  where id = p_merge_id and brand = 'cedargrowth' and undone_at is null
+  for update;
+  if not found then
+    return jsonb_build_object('ok', false);
+  end if;
+  for v_item in select value from jsonb_array_elements(coalesce(v_row.prior_accounts, '[]'::jsonb))
+  loop
+    v_contact := nullif(v_item->>'contactId', '')::uuid;
+    v_prior := nullif(v_item->>'priorAccountId', '')::uuid;
+    select brand into v_brand from public.crm_accounts where id = v_prior;
+    if v_brand is distinct from 'cedargrowth' then
+      v_refused := v_refused || jsonb_build_array(v_item->>'contactId');
+    else
+      update public.crm_contacts
+      set account_id = v_prior, updated_by = btrim(p_actor)
+      where id = v_contact and brand = 'cedargrowth';
+    end if;
+  end loop;
+  update public.crm_distribution_merges
+  set undone_at = p_now, undone_by = btrim(p_actor)
+  where id = p_merge_id and undone_at is null;
+  return jsonb_build_object(
+    'ok', true,
+    'refused', v_refused,
+    'merge', jsonb_build_object(
+      'id', v_row.id,
+      'account_id', v_row.account_id,
+      'opportunity_id', v_row.opportunity_id,
+      'actor', v_row.actor,
+      'contact_ids', to_jsonb(v_row.contact_ids),
+      'prior_accounts', v_row.prior_accounts,
+      'created_at', v_row.created_at,
+      'undone_at', p_now,
+      'undone_by', btrim(p_actor)
+    )
+  );
+end;
+$$;
+
+comment on function public.crm_undo_distribution_merge(uuid, text, timestamptz) is 'One transaction. Restores each contact to its prior account. A missing or non CedarGrowth prior account is refused and reported. The audit row is marked undone.';
+
+revoke all on function public.crm_merge_won_distribution(uuid, text) from public, anon, authenticated;
+grant execute on function public.crm_merge_won_distribution(uuid, text) to service_role;
+revoke all on function public.crm_undo_distribution_merge(uuid, text, timestamptz) from public, anon, authenticated;
+grant execute on function public.crm_undo_distribution_merge(uuid, text, timestamptz) to service_role;

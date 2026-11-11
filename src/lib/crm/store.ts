@@ -14,7 +14,6 @@ import {
   type TaskStatus,
   type TaskWrite,
   ACCOUNT_TYPES,
-  isDispensaryAccount,
   LEAD_SOURCES,
   OPEN_STAGES,
   type AccountType,
@@ -29,7 +28,7 @@ import { knownEmailEvent, type EmailEvent } from './emailStatus';
 import { intakeTestMarker, type IntakeLead } from './intake';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
 import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
-import { dispensaryContacts, planDistributionMerge, undoAssignments, type ContactPrior, type MergeRow } from './distributionMerge';
+import { type ContactPrior, type MergeRow } from './distributionMerge';
 import type { PlaceCache, PlaceCard } from './places';
 
 export type StoreResult<T> =
@@ -383,7 +382,7 @@ export interface CrmStore {
   readOpenMerge(brand: CrmBrand, opportunityId: string): Promise<StoreResult<MergeRow | null>>;
   readAccountMerge(brand: CrmBrand, accountId: string): Promise<StoreResult<MergeRow | null>>;
   insertMerge(brand: CrmBrand, row: Omit<MergeRow, 'id'>): Promise<StoreResult<MergeRow>>;
-  undoMerge(brand: CrmBrand, mergeId: string, actor: string, now: string): Promise<StoreResult<MergeRow>>;
+  undoMerge(brand: CrmBrand, mergeId: string, actor: string, now: string): Promise<StoreResult<{ merge: MergeRow; refused: string[] }>>;
 }
 
 const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,street,state,postal_code,consent_version,consent_received_at,intake_submitted_at,ocm_status,record_marker,source_inquiry_id,latitude,longitude,geocode_source,geocode_match,geocoded_at,created_at,updated_at,created_by,updated_by';
@@ -991,29 +990,9 @@ class SupabaseCrmStore implements CrmStore {
   }
 
   private async mergeWonContacts(brand: CrmBrand, actor: string, opportunity: Opportunity) {
-    const account = await this.readAccount(brand, opportunity.accountId);
-    if (account.state !== 'ok' || !account.value || !isDispensaryAccount(account.value.accountType)) return;
-    const contacts = await this.db.from('crm_contacts').select('id,account_id').eq('brand', brand).eq('account_id', opportunity.accountId);
-    if (classify(contacts.error)) return;
-    const priors = dispensaryContacts(((contacts.data || []) as { id?: string; account_id?: string }[]).flatMap((row) => (
-      typeof row.id === 'string' && typeof row.account_id === 'string' ? [{ id: row.id, accountId: row.account_id }] : []
-    )), opportunity.accountId);
-    const open = await this.readOpenMerge(brand, opportunity.id);
-    if (open.state !== 'ok') return;
-    const plan = planDistributionMerge({
-      openMerge: open.value,
-      opportunityId: opportunity.id,
-      accountId: opportunity.accountId,
-      actor,
-      priors,
-      now: new Date().toISOString(),
-    });
-    if (plan.action === 'skip') return;
-    for (const assignment of plan.assignments) {
-      const moved = await this.db.from('crm_contacts').update({ account_id: assignment.accountId, updated_by: actor }).eq('id', assignment.contactId).eq('brand', brand);
-      if (classify(moved.error) || moved.error) return;
-    }
-    await this.insertMerge(brand, plan.row);
+    if (brand !== 'cedargrowth') return;
+    const { error } = await this.db.rpc('crm_merge_won_distribution', { p_opportunity_id: opportunity.id, p_actor: actor });
+    if (classify(error) || error) return;
   }
 
   async readAccount(brand: CrmBrand, id: string): Promise<StoreResult<Account | null>> {
@@ -1091,22 +1070,16 @@ class SupabaseCrmStore implements CrmStore {
     return { state: 'ok', value: mapped };
   }
 
-  async undoMerge(brand: CrmBrand, mergeId: string, actor: string, now: string): Promise<StoreResult<MergeRow>> {
-    const current = await this.db.from('crm_distribution_merges').select(MERGE_COLS).eq('id', mergeId).eq('brand', brand).is('undone_at', null).maybeSingle();
-    const currentFailed = classify(current.error);
-    if (currentFailed) return { state: currentFailed };
-    const open = current.data ? mapMerge(current.data as Record<string, unknown>) : null;
-    if (current.error || !open) return { state: 'rejected' };
-    for (const assignment of undoAssignments(open.priors)) {
-      const restored = await this.db.from('crm_contacts').update({ account_id: assignment.accountId, updated_by: actor }).eq('id', assignment.contactId).eq('brand', brand);
-      if (classify(restored.error) || restored.error) return { state: 'unavailable' };
-    }
-    const { data, error } = await this.db.from('crm_distribution_merges').update({ undone_at: now, undone_by: actor }).eq('id', mergeId).eq('brand', brand).is('undone_at', null).select(MERGE_COLS).maybeSingle();
+  async undoMerge(brand: CrmBrand, mergeId: string, actor: string, now: string): Promise<StoreResult<{ merge: MergeRow; refused: string[] }>> {
+    if (brand !== 'cedargrowth') return { state: 'rejected' };
+    const { data, error } = await this.db.rpc('crm_undo_distribution_merge', { p_merge_id: mergeId, p_actor: actor, p_now: now });
     const failed = classify(error);
     if (failed) return { state: failed };
-    const mapped = data ? mapMerge(data as Record<string, unknown>) : null;
-    if (!mapped) return { state: 'rejected' };
-    return { state: 'ok', value: mapped };
+    const payload = data as { ok?: boolean; refused?: unknown; merge?: Record<string, unknown> } | null;
+    const mapped = payload?.merge ? mapMerge(payload.merge) : null;
+    if (error || !payload || payload.ok !== true || !mapped) return { state: 'rejected' };
+    const refused = Array.isArray(payload.refused) ? payload.refused.filter((id): id is string => typeof id === 'string') : [];
+    return { state: 'ok', value: { merge: mapped, refused } };
   }
 
   listTasks(brand: CrmBrand, status: TaskStatus | null) {

@@ -92,5 +92,5 @@ export async function handleDistributionMerge(ctx: CrmContext): Promise<CrmResul
   if (!auth.actorId) return denied(401, 'Sign in required.');
   const undone = await ctx.store.undoMerge(auth.brand, String(body.mergeId || ''), auth.actorId, new Date().toISOString());
   if (undone.state !== 'ok') return denied(400, 'That merge was not undone.');
-  return { status: 200, body: { ok: true, merge: undone.value } };
+  return { status: 200, body: { ok: true, merge: undone.value.merge, refused: undone.value.refused } };
 }

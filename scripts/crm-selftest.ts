@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { buildDashboard } from '../src/lib/crm/dashboard.ts';
 import { assertDashboardTabs } from './crm-dashboard-tabs-selftest.ts';
 import { allowedPhotoUrl, fetchAllowedPhoto, lookupPlace, photoMediaUrl, PLACE_TTL_MS, placeCacheFresh, placeQuery, placeReadPlan, readPlacePhoto, type PlaceCache } from '../src/lib/crm/places.ts';
-import { planDistributionMerge, planUndoMerge, undoAssignments, type MergeRow } from '../src/lib/crm/distributionMerge.ts';
+import { applyWonMerge, undoWonMerge, type LicenseWorld } from '../src/lib/crm/distributionMerge.ts';
 import { isDispensaryAccount } from '../src/lib/crm/engine.ts';
 import { assertProductionForecast } from './crm-production-forecast-selftest.ts';
 import { IMPORT_BATCH, IMPORT_MAX_ROWS, chunkImportRows, mapRows, mergeBatchOutcomes, parseCsv, parseDate, parseMoney, skipRepeatedImportRows } from '../src/lib/crm/importer.ts';
@@ -1550,19 +1550,45 @@ const redirected = await fetchAllowedPhoto('https://lh3.googleusercontent.com/a'
   return new Response('secret', { status: 200 });
 });
 assert(blockedPhoto === null && metadataPhoto === null && httpPhoto === null && localPhoto === null && metaPhoto === null && metaV6 === null && badName === null && goodName === 'https://places.googleapis.com/v1/places/ChIJtest/photos/abc/media?maxHeightPx=400&skipHttpRedirect=true' && redirected === null && photoCalls.some((href) => href.includes('169.254')) === false && photoCalls.some((href) => href.includes('127.0.0.1')) === false, 'TEST ONLY: a photo name and a photo URL stay on Google hosts');
-const deal = 'deal-1';
-const priors = [{ contactId: 'c1', priorAccountId: 'shop-1' }, { contactId: 'c2', priorAccountId: 'shop-1' }];
-const openMerge: MergeRow = { id: 'merge-1', opportunityId: deal, accountId: 'acct-1', actor: 'gary@cedargrowthco.com', contactIds: ['c1'], priors: [{ contactId: 'c1', priorAccountId: 'shop-1' }], createdAt: freshAt, undoneAt: null, undoneBy: null };
-const first = planDistributionMerge({ openMerge: null, opportunityId: deal, accountId: 'acct-1', actor: 'gary@cedargrowthco.com', priors, now: freshAt });
-const again = planDistributionMerge({ openMerge, opportunityId: deal, accountId: 'acct-1', actor: 'gary@cedargrowthco.com', priors, now: freshAt });
-const restored = first.action === 'insert' ? undoAssignments(first.row.priors) : [];
-assert(first.action === 'insert' && first.assignments.map((row) => row.accountId).join(',') === 'acct-1,acct-1' && first.row.priors[0]?.priorAccountId === 'shop-1' && restored[0]?.accountId === 'shop-1' && again.action === 'skip', 'TEST ONLY: marking a deal won assigns the dispensary contacts and a second won does nothing');
-const undone = planUndoMerge(openMerge, 'gary@cedargrowthco.com', staleAt);
-assert(undone.undoneAt === staleAt && undone.undoneBy === 'gary@cedargrowthco.com' && undone.contactIds.join(',') === 'c1' && undone.priors[0]?.priorAccountId === 'shop-1' && openMerge.undoneAt === null, 'TEST ONLY: undoing a merge keeps the contacts and marks the audit row');
+const world: LicenseWorld = {
+  accounts: [
+    { id: 'won', brand: 'cedargrowth', accountType: 'adult_use_dispensary', licenseRef: ' OCM-123 ' },
+    { id: 'dup', brand: 'cedargrowth', accountType: 'adult_use_dispensary', licenseRef: 'ocm-123' },
+    { id: 'punct', brand: 'cedargrowth', accountType: 'adult_use_dispensary', licenseRef: 'OCM 123' },
+    { id: 'blank', brand: 'cedargrowth', accountType: 'adult_use_dispensary', licenseRef: '   ' },
+    { id: 'bond', brand: 'bond', accountType: 'adult_use_dispensary', licenseRef: 'ocm-123' },
+    { id: 'dist', brand: 'cedargrowth', accountType: 'distributor', licenseRef: 'ocm-123' },
+  ],
+  contacts: [
+    { id: 'on-won', brand: 'cedargrowth', accountId: 'won' },
+    { id: 'from-dup', brand: 'cedargrowth', accountId: 'dup' },
+    { id: 'from-punct', brand: 'cedargrowth', accountId: 'punct' },
+    { id: 'from-blank', brand: 'cedargrowth', accountId: 'blank' },
+    { id: 'from-bond', brand: 'bond', accountId: 'bond' },
+  ],
+  merges: [],
+  notes: [{ id: 'note-1', accountId: 'dup' }],
+};
+const wonCreated = applyWonMerge(world, { opportunityId: 'deal-1', accountId: 'won', actor: 'gary@cedargrowthco.com', now: freshAt, stage: 'won' });
+const again = applyWonMerge(wonCreated.world, { opportunityId: 'deal-1', accountId: 'won', actor: 'gary@cedargrowthco.com', now: staleAt, stage: 'won' });
+const undone = undoWonMerge(wonCreated.world, wonCreated.world.merges[0]?.id || '', 'gary@cedargrowthco.com', staleAt);
+const notWon = applyWonMerge(world, { opportunityId: 'deal-lead', accountId: 'won', actor: 'gary@cedargrowthco.com', now: freshAt, stage: 'lead' });
+const distributor = applyWonMerge(world, { opportunityId: 'deal-dist', accountId: 'dist', actor: 'gary@cedargrowthco.com', now: freshAt, stage: 'won' });
+const blankWon = applyWonMerge({ ...world, accounts: world.accounts.map((row) => row.id === 'won' ? { ...row, licenseRef: '' } : row) }, { opportunityId: 'deal-blank', accountId: 'won', actor: 'gary@cedargrowthco.com', now: freshAt, stage: 'won' });
+const gone = undoWonMerge({ ...wonCreated.world, accounts: wonCreated.world.accounts.filter((row) => row.id !== 'dup') }, wonCreated.world.merges[0]?.id || '', 'gary@cedargrowthco.com', staleAt);
+const moved = (id: string, rows = wonCreated.world.contacts) => rows.find((row) => row.id === id)?.accountId;
+assert(wonCreated.code === 'merged' && moved('from-dup') === 'won' && moved('on-won') === 'won' && moved('from-punct') === 'punct' && moved('from-blank') === 'blank' && moved('from-bond') === 'bond' && wonCreated.world.notes[0]?.accountId === 'dup' && wonCreated.world.merges[0]?.priors[0]?.priorAccountId === 'dup', 'TEST ONLY: the same license with different spacing and case moves that contact, and punctuation, a blank license, and Bond stay put');
+assert(again.code === 'already' && again.world.merges.length === 1 && again.world.contacts.find((row) => row.id === 'from-dup')?.accountId === 'won', 'TEST ONLY: a second won on the same open merge does nothing');
+assert(undone.refused.length === 0 && undone.world.contacts.find((row) => row.id === 'from-dup')?.accountId === 'dup' && undone.world.merges[0]?.undoneAt === staleAt && undone.world.merges[0]?.undoneBy === 'gary@cedargrowthco.com', 'TEST ONLY: undo restores each prior account id');
+assert(notWon.code === 'not_won' && notWon.world.merges.length === 0 && distributor.code === 'skipped' && distributor.world.merges.length === 0 && blankWon.code === 'merged' && blankWon.world.merges[0]?.contactIds.length === 0 && blankWon.world.contacts.every((row) => row.accountId !== 'won' || row.id === 'on-won'), 'TEST ONLY: a lead does not merge, a distributor does not merge, and a blank license records that nothing moved');
+assert(gone.refused.join(',') === 'from-dup' && gone.world.contacts.find((row) => row.id === 'from-dup')?.accountId === 'won' && gone.world.merges[0]?.undoneAt === staleAt, 'TEST ONLY: undo refuses a contact whose prior account is gone and reports it');
 const storeSrc = readFileSync('src/lib/crm/store.ts', 'utf8');
+const mergeSql = readFileSync('supabase/migrations/0136_crm_google_places.sql', 'utf8');
 const createOpp = storeSrc.slice(storeSrc.indexOf('async createOpportunity'), storeSrc.indexOf('async updateOpportunity'));
 const updateOpp = storeSrc.slice(storeSrc.indexOf('async updateOpportunity'), storeSrc.indexOf('private async mergeWonContacts'));
-assert(createOpp.includes("input.stage === 'won'") && createOpp.includes('mergeWonContacts') && updateOpp.includes("patch.stage === 'won'") && updateOpp.includes('mergeWonContacts') && storeSrc.includes('account_id: assignment.accountId') && isDispensaryAccount('adult_use_dispensary') && isDispensaryAccount('microbusiness') && isDispensaryAccount('registered_organization') && isDispensaryAccount('distributor') === false && isDispensaryAccount(null) === false, 'TEST ONLY: creating or saving a won deal runs the same contact assignment, and only a dispensary account qualifies');
+const orderWon = storeSrc.slice(storeSrc.indexOf('async markDealWonFromOrder'), storeSrc.indexOf('async listStageEvents'));
+assert(createOpp.includes("input.stage === 'won'") && createOpp.includes('mergeWonContacts') && updateOpp.includes("patch.stage === 'won'") && updateOpp.includes('mergeWonContacts') && orderWon.includes("stage: 'won'") && storeSrc.includes('crm_merge_won_distribution') && isDispensaryAccount('adult_use_dispensary') && isDispensaryAccount('microbusiness') && isDispensaryAccount('registered_organization') && isDispensaryAccount('distributor') === false, 'TEST ONLY: creating at Won, saving as Won, and marking won from an order run the same merge');
+assert(mergeSql.includes("lower(btrim(a.license_ref)) = v_key") && mergeSql.includes("v_key <> ''") && mergeSql.includes("a.brand = 'cedargrowth'") && mergeSql.includes('for update') && mergeSql.includes('crm_notes') === false && mergeSql.includes('crm_tasks') === false && mergeSql.includes('crm_distributor_orders') === false, 'TEST ONLY: the migration matches license by trim and lowercase in one transaction and does not move notes, tasks, or orders');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);
 
