@@ -23,6 +23,7 @@ import { DISTRIBUTOR_LABELS } from '@/lib/crm/distributor';
 import { VISIT_OUTCOME_LABELS, type VisitOutcome } from '@/lib/crm/field';
 import { NY_COUNTIES, regionForCounty } from '@/lib/crm/nyRegions';
 import { DashboardWing } from './DashboardWing';
+import { GooglePlaceCard } from './GooglePlaceCard';
 import { BatchesWing } from './BatchesWing';
 
 type Wing = 'dashboard' | 'accounts' | 'batches' | 'pipeline' | 'tasks' | 'activity' | 'reports' | 'health' | 'signals' | 'canix';
@@ -211,6 +212,7 @@ export function CrmConsole({
   const [desk, setDesk] = useState<DeskEvaluation | null>(null);
   const [canixLabel, setCanixLabel] = useState('Canix not connected');
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [refresh, setRefresh] = useState(0);
 
@@ -411,6 +413,8 @@ export function CrmConsole({
   }
 
   const selected = accounts.find((row) => row.id === selectedAccountId) ?? null;
+  const selectedContact = contacts.find((row) => row.id === selectedContactId) ?? null;
+  const contactAccount = selectedContact ? accounts.find((row) => row.id === selectedContact.accountId) ?? null : null;
   const accountContacts = selected ? contacts.filter((row) => row.accountId === selected.id) : [];
   const label = brandLabel(brand);
   const lines = desk ? signalLines(desk) : [];
@@ -536,14 +540,29 @@ export function CrmConsole({
                   <FieldMedia key={row.id} brand={brand} id={row.id} kind={row.kind} />
                 ))}
               </ul>
+              {brand === 'cedargrowth' ? <GooglePlaceCard accountId={selected.id} /> : null}
+              <h3 className="font-display text-body-l text-primary">Contacts</h3>
               <ul className="flex flex-col gap-2">
                 {accountContacts.length === 0 ? <li className="text-caption text-tertiary">No contacts on this account.</li> : accountContacts.map((row) => (
-                  <li key={row.id} className="text-body-m text-primary">{row.name}. {row.email || 'No email'}. Preference: {row.preference || 'unspecified'}.</li>
+                  <li key={row.id}>
+                    <button type="button" onClick={() => setSelectedContactId(row.id)} className="min-h-[44px] w-full border border-hairline px-3 py-2 text-left text-body-m text-primary">{row.name}</button>
+                  </li>
                 ))}
               </ul>
             </article>
           ) : null}
-          <RecordList rows={contacts.map((row) => ({ id: row.id, title: row.name, meta: row.email || 'No email' }))} />
+          <RecordList rows={contacts.map((row) => ({ id: row.id, title: row.name, meta: row.email || 'No email' }))} onSelect={setSelectedContactId} />
+          {selectedContact ? (
+            <article className="flex w-full max-w-editorial flex-col gap-2 border border-hairline bg-clinical p-4">
+              <h2 className="font-display text-heading-s text-primary">{selectedContact.name}</h2>
+              {contactAccount ? (
+                <div className="flex flex-col gap-2">
+                  <button type="button" onClick={() => setSelectedAccountId(contactAccount.id)} className="min-h-[44px] border border-ink px-3 py-2 text-left text-body-m text-primary">Dispensary: {contactAccount.displayName}</button>
+                  <button type="button" onClick={() => setSelectedAccountId(contactAccount.id)} className="min-h-[44px] border border-ink px-3 py-2 text-left text-body-m text-primary">Account: {contactAccount.displayName}</button>
+                </div>
+              ) : <p className="text-caption text-tertiary">No linked account.</p>}
+            </article>
+          ) : null}
           <AddPanel label="Add contact">
             <form onSubmit={(event) => { event.preventDefault(); createContact(new FormData(event.currentTarget)); }} className="grid grid-cols-1 gap-3 border-t border-hairline p-4">
               <label className="flex flex-col gap-1 text-caption text-tertiary">Account

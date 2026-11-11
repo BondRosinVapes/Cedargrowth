@@ -28,6 +28,8 @@ import { knownEmailEvent, type EmailEvent } from './emailStatus';
 import { intakeTestMarker, type IntakeLead } from './intake';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
 import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
+import { planDistributionMerge, type MergeRow } from './distributionMerge';
+import type { PlaceCache, PlaceCard } from './places';
 
 export type StoreResult<T> =
   | { state: 'ok'; value: T }
@@ -374,6 +376,13 @@ export interface CrmStore {
   deleteBondInquiry(inquiryId: string): Promise<StoreResult<{ deleted: boolean }>>;
   purgeBondInquiries(nowIso: string): Promise<StoreResult<{ purged: number }>>;
   receiveAgentRecords(input: { requestId: string; receivedAt: string; ops: AgentOp[] }): Promise<StoreResult<{ code: 'replay' } | { code: 'rate'; retryAfter: number } | { code: 'ok'; created: { accounts: number; contacts: number; notes: number }; skipped: { index: number; reason: string }[]; failed: AgentRowFailure[] }>>;
+  readAccount(brand: CrmBrand, id: string): Promise<StoreResult<Account | null>>;
+  readPlaceCache(brand: CrmBrand, accountId: string): Promise<StoreResult<PlaceCache | null>>;
+  savePlaceCache(brand: CrmBrand, accountId: string, cache: PlaceCache): Promise<StoreResult<PlaceCache>>;
+  readOpenMerge(brand: CrmBrand, opportunityId: string): Promise<StoreResult<MergeRow | null>>;
+  readAccountMerge(brand: CrmBrand, accountId: string): Promise<StoreResult<MergeRow | null>>;
+  insertMerge(brand: CrmBrand, row: Omit<MergeRow, 'id'>): Promise<StoreResult<MergeRow>>;
+  undoMerge(brand: CrmBrand, mergeId: string, actor: string, now: string): Promise<StoreResult<MergeRow>>;
 }
 
 const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,street,state,postal_code,consent_version,consent_received_at,intake_submitted_at,ocm_status,record_marker,source_inquiry_id,latitude,longitude,geocode_source,geocode_match,geocoded_at,created_at,updated_at,created_by,updated_by';
@@ -390,6 +399,21 @@ export function getCrmStore(): CrmStore {
   const client = getSupabaseServerClient();
   if (!client) return ABSENT;
   return new SupabaseCrmStore(client);
+}
+
+function mapMerge(row: Record<string, unknown>): MergeRow | null {
+  if (typeof row.id !== 'string' || typeof row.account_id !== 'string' || typeof row.opportunity_id !== 'string') return null;
+  const ids = Array.isArray(row.contact_ids) ? row.contact_ids.filter((id): id is string => typeof id === 'string') : [];
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    opportunityId: row.opportunity_id,
+    actor: typeof row.actor === 'string' ? row.actor : '',
+    contactIds: ids,
+    createdAt: String(row.created_at || ''),
+    undoneAt: typeof row.undone_at === 'string' ? row.undone_at : null,
+    undoneBy: typeof row.undone_by === 'string' ? row.undone_by : null,
+  };
 }
 
 function mapAccount(row: Record<string, unknown>): Account | null {
@@ -943,7 +967,110 @@ class SupabaseCrmStore implements CrmStore {
     if (patch.productLine !== undefined) row.product_line = patch.productLine;
     if (patch.quantityUnits !== undefined) row.quantity_units = patch.quantityUnits;
     const { data, error } = await this.db.from('crm_opportunities').update(row).eq('id', id).eq('brand', brand).select(OPP_COLS).maybeSingle();
-    return this.one(brand, data as Record<string, unknown> | null, error, mapOpportunity);
+    const saved = this.one(brand, data as Record<string, unknown> | null, error, mapOpportunity);
+    if (saved.state === 'ok' && patch.stage === 'won' && brand === 'cedargrowth') await this.mergeWonContacts(brand, actor, saved.value);
+    return saved;
+  }
+
+  private async mergeWonContacts(brand: CrmBrand, actor: string, opportunity: Opportunity) {
+    const contacts = await this.db.from('crm_contacts').select('id').eq('brand', brand).eq('account_id', opportunity.accountId);
+    if (classify(contacts.error)) return;
+    const contactIds = ((contacts.data || []) as { id?: string }[]).map((row) => row.id).filter((id): id is string => typeof id === 'string');
+    const open = await this.readOpenMerge(brand, opportunity.id);
+    if (open.state !== 'ok') return;
+    const plan = planDistributionMerge({
+      openMerge: open.value,
+      opportunityId: opportunity.id,
+      accountId: opportunity.accountId,
+      actor,
+      contactIds,
+      now: new Date().toISOString(),
+    });
+    if (plan.action === 'skip') return;
+    await this.insertMerge(brand, plan.row);
+  }
+
+  async readAccount(brand: CrmBrand, id: string): Promise<StoreResult<Account | null>> {
+    const { data, error } = await this.db.from('crm_accounts').select(ACCOUNT_COLS).eq('id', id).eq('brand', brand).maybeSingle();
+    const failed = classify(error);
+    if (failed) return { state: failed };
+    if (!data) return { state: 'ok', value: null };
+    const account = mapAccount(data as Record<string, unknown>);
+    return { state: 'ok', value: account && account.brand === brand ? account : null };
+  }
+
+  async readPlaceCache(brand: CrmBrand, accountId: string): Promise<StoreResult<PlaceCache | null>> {
+    const { data, error } = await this.db.from('crm_google_places').select('place_id,match_status,fields,fetched_at').eq('account_id', accountId).eq('brand', brand).maybeSingle();
+    const failed = classify(error);
+    if (failed) return { state: failed };
+    if (!data) return { state: 'ok', value: null };
+    const row = data as { place_id?: string | null; match_status?: string; fields?: PlaceCard | null; fetched_at?: string };
+    if (row.match_status !== 'matched' && row.match_status !== 'none') return { state: 'ok', value: null };
+    return {
+      state: 'ok',
+      value: {
+        placeId: row.place_id ?? null,
+        matchStatus: row.match_status,
+        fields: row.match_status === 'matched' ? row.fields ?? null : null,
+        fetchedAt: String(row.fetched_at || ''),
+      },
+    };
+  }
+
+  async savePlaceCache(brand: CrmBrand, accountId: string, cache: PlaceCache): Promise<StoreResult<PlaceCache>> {
+    const { error } = await this.db.from('crm_google_places').upsert({
+      account_id: accountId,
+      brand,
+      place_id: cache.placeId,
+      match_status: cache.matchStatus,
+      fields: cache.fields ?? {},
+      fetched_at: cache.fetchedAt,
+    }, { onConflict: 'account_id' });
+    const failed = classify(error);
+    if (failed) return { state: failed };
+    if (error) return { state: 'unavailable' };
+    return { state: 'ok', value: cache };
+  }
+
+  async readOpenMerge(brand: CrmBrand, opportunityId: string): Promise<StoreResult<MergeRow | null>> {
+    const { data, error } = await this.db.from('crm_distribution_merges').select('id,account_id,opportunity_id,actor,contact_ids,created_at,undone_at,undone_by').eq('brand', brand).eq('opportunity_id', opportunityId).is('undone_at', null).maybeSingle();
+    const failed = classify(error);
+    if (failed) return { state: failed };
+    if (!data) return { state: 'ok', value: null };
+    return { state: 'ok', value: mapMerge(data as Record<string, unknown>) };
+  }
+
+  async readAccountMerge(brand: CrmBrand, accountId: string): Promise<StoreResult<MergeRow | null>> {
+    const { data, error } = await this.db.from('crm_distribution_merges').select('id,account_id,opportunity_id,actor,contact_ids,created_at,undone_at,undone_by').eq('brand', brand).eq('account_id', accountId).is('undone_at', null).order('created_at', { ascending: false }).limit(1).maybeSingle();
+    const failed = classify(error);
+    if (failed) return { state: failed };
+    if (!data) return { state: 'ok', value: null };
+    return { state: 'ok', value: mapMerge(data as Record<string, unknown>) };
+  }
+
+  async insertMerge(brand: CrmBrand, row: Omit<MergeRow, 'id'>): Promise<StoreResult<MergeRow>> {
+    const { data, error } = await this.db.from('crm_distribution_merges').insert({
+      brand,
+      account_id: row.accountId,
+      opportunity_id: row.opportunityId,
+      actor: row.actor,
+      contact_ids: row.contactIds,
+      created_at: row.createdAt,
+    }).select('id,account_id,opportunity_id,actor,contact_ids,created_at,undone_at,undone_by').maybeSingle();
+    const failed = classify(error);
+    if (failed) return { state: failed };
+    const mapped = data ? mapMerge(data as Record<string, unknown>) : null;
+    if (!mapped) return { state: 'unavailable' };
+    return { state: 'ok', value: mapped };
+  }
+
+  async undoMerge(brand: CrmBrand, mergeId: string, actor: string, now: string): Promise<StoreResult<MergeRow>> {
+    const { data, error } = await this.db.from('crm_distribution_merges').update({ undone_at: now, undone_by: actor }).eq('id', mergeId).eq('brand', brand).is('undone_at', null).select('id,account_id,opportunity_id,actor,contact_ids,created_at,undone_at,undone_by').maybeSingle();
+    const failed = classify(error);
+    if (failed) return { state: failed };
+    const mapped = data ? mapMerge(data as Record<string, unknown>) : null;
+    if (!mapped) return { state: 'rejected' };
+    return { state: 'ok', value: mapped };
   }
 
   listTasks(brand: CrmBrand, status: TaskStatus | null) {
