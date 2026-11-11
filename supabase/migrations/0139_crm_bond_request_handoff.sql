@@ -242,6 +242,11 @@ begin
   exception when others then
     return pg_catalog.jsonb_build_object('result', 'rejected:schema');
   end;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(v_id::text));
+  select status into v_existing from public.crm_bond_request_handoffs where handoff_id = v_id;
+  if found then
+    return pg_catalog.jsonb_build_object('result', 'duplicate', 'status', v_existing);
+  end if;
   if v_submitted > v_now + interval '300 seconds' or v_submitted < v_now - interval '24 hours' then
     return pg_catalog.jsonb_build_object('result', 'rejected:clock');
   end if;
@@ -277,11 +282,6 @@ begin
   end loop;
   if v_lines < 1 or v_lines > 10 or v_units > 5 then
     return pg_catalog.jsonb_build_object('result', 'rejected:items');
-  end if;
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext(v_id::text));
-  select status into v_existing from public.crm_bond_request_handoffs where handoff_id = v_id;
-  if found then
-    return pg_catalog.jsonb_build_object('result', 'duplicate', 'status', v_existing);
   end if;
   select brand, account_type, request_opt_out, bond_carried_skus
     into v_brand, v_type, v_opt, v_skus

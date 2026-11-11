@@ -194,7 +194,7 @@ export function sendingReady(gates: SendGates): boolean {
   return fromAddressOk(gates.from) && postalOk(gates.postal) && gates.purgeScheduled && gates.sendFlag;
 }
 
-export function parseHandoff(body: unknown, nowMs: number): { ok: true; value: HandoffInput } | { ok: false; result: RejectReason } {
+export function parseHandoff(body: unknown, _nowMs: number): { ok: true; value: HandoffInput } | { ok: false; result: RejectReason } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, result: 'rejected:schema' };
   const record = body as Record<string, unknown>;
   const keys = Object.keys(record);
@@ -213,7 +213,6 @@ export function parseHandoff(body: unknown, nowMs: number): { ok: true; value: H
   if (typeof record.submitted_at !== 'string' || !ISO_RE.test(record.submitted_at)) return { ok: false, result: 'rejected:schema' };
   const submittedMs = Date.parse(record.submitted_at);
   if (!Number.isFinite(submittedMs)) return { ok: false, result: 'rejected:schema' };
-  if (submittedMs > nowMs + 300_000 || submittedMs < nowMs - 24 * 60 * 60 * 1000) return { ok: false, result: 'rejected:clock' };
   if (typeof record.handoff_id !== 'string' || !parseUuid(record.handoff_id)) return { ok: false, result: 'rejected:schema' };
   if (typeof record.bond_request_id !== 'string' || record.bond_request_id.length < 1 || record.bond_request_id.length > 80) return { ok: false, result: 'rejected:schema' };
   if (typeof record.dispensary_ref !== 'string' || !parseUuid(record.dispensary_ref)) return { ok: false, result: 'rejected:schema' };
@@ -271,9 +270,15 @@ export function accountEligible(account: AccountView | null, items: HandoffItem[
   return items.some((item) => account.carriedSkus.includes(item.sku));
 }
 
+export function handoffClockOk(submittedAt: string, nowMs: number): boolean {
+  const submittedMs = Date.parse(submittedAt);
+  return Number.isFinite(submittedMs) && submittedMs <= nowMs + 300_000 && submittedMs >= nowMs - 24 * 60 * 60 * 1000;
+}
+
 export function receiveHandoff(book: HandoffBook, account: AccountView | null, input: HandoffInput, nowIso: string): { result: 'accepted'; status: 'queued' } | { result: 'duplicate'; status: HandoffStatus } | { result: RejectReason } {
   const existing = book.rows.find((row) => row.handoffId === input.handoffId);
   if (existing) return { result: 'duplicate', status: existing.status };
+  if (!handoffClockOk(input.submittedAt, Date.parse(nowIso))) return { result: 'rejected:clock' };
   if (!accountEligible(account, input.items)) return { result: 'rejected:dispensary' };
   const windowStart = Date.parse(nowIso) - 24 * 60 * 60 * 1000;
   const accepted = book.rows.filter((row) => row.dispensaryAccountId === input.dispensaryRef && Date.parse(row.receivedAt) > windowStart).length;
