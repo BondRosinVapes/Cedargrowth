@@ -11,7 +11,8 @@ import {
   framePoints,
   CITY_MENU_LABEL,
   COUNTY_MENU_LABEL,
-  markerSpan,
+  clusterMembers,
+  markerUnits,
   mergeGap,
   minZoomWidth,
   nycFrame,
@@ -20,6 +21,7 @@ import {
   wholeStateFrame,
   type MapChoice,
   type MapPin,
+  type PinCluster,
   type PlacedPin,
 } from '@/lib/crm/nyMap';
 
@@ -33,8 +35,12 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   const [outline, setOutline] = useState<string | null>(null);
   const drag = useRef<{ x: number; y: number; viewX: number; viewY: number; pointer: number } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const clusterButton = useRef<SVGRectElement | null>(null);
+  const [svgWidth, setSvgWidth] = useState(0);
+  const [openCluster, setOpenCluster] = useState<PinCluster | null>(null);
   const placed = useMemo(() => placePins(pins).placed, [pins]);
-  const mark = markerSpan(view.w);
+  const units = markerUnits(view.w, svgWidth);
   const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w)), [placed, view.w]);
   const active = placed.find((pin) => pin.id === activeId) ?? null;
   const zoomed = view.w < WHOLE.w - 0.5;
@@ -49,22 +55,44 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
     node.addEventListener('gesturestart', blockPinch);
     node.addEventListener('gesturechange', blockPinch);
     node.addEventListener('wheel', blockCtrlWheel, { passive: false });
+    const measure = () => setSvgWidth(node.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
     return () => {
+      observer.disconnect();
       node.removeEventListener('gesturestart', blockPinch);
       node.removeEventListener('gesturechange', blockPinch);
       node.removeEventListener('wheel', blockCtrlWheel);
     };
   }, []);
 
-  function frameCluster(members: PlacedPin[]) {
-    const left = Math.min(...members.map((pin) => pin.x));
-    const right = Math.max(...members.map((pin) => pin.x));
-    const top = Math.min(...members.map((pin) => pin.y));
-    const bottom = Math.max(...members.map((pin) => pin.y));
-    const span = Math.max(right - left, bottom - top);
-    const w = Math.min(WHOLE.w, Math.max(span * 1.8, minZoomWidth(WHOLE.w)));
-    const h = w * (WHOLE.h / WHOLE.w);
-    setView({ x: (left + right) / 2 - w / 2, y: (top + bottom) / 2 - h / 2, w, h });
+  useEffect(() => {
+    if (!openCluster) return;
+    listRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    function onKey(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setOpenCluster(null);
+      clusterButton.current?.focus();
+    }
+    function onDown(event: MouseEvent) {
+      const target = event.target;
+      if (listRef.current?.contains(target as Node)) return;
+      if (target instanceof Element && target.closest('[data-pin="cluster"]')) return;
+      setOpenCluster(null);
+    }
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onDown);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onDown);
+    };
+  }, [openCluster]);
+
+  function showCluster(cluster: PinCluster, button: SVGRectElement) {
+    clusterButton.current = button;
+    setOpenCluster(cluster);
   }
 
   function zoomAt(factor: number) {
@@ -80,7 +108,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
-      <div className="min-w-0 border border-hairline bg-parchment">
+      <div className="relative min-w-0 border border-hairline bg-parchment">
         <div className="flex flex-wrap gap-2 p-2">
           <button type="button" aria-label="Zoom in" onClick={() => zoomAt(1.4)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">+</button>
           <button type="button" aria-label="Zoom out" onClick={() => zoomAt(1 / 1.4)} className="min-h-[44px] min-w-[44px] border border-ink bg-clinical font-mono text-specimen text-primary">-</button>
@@ -120,6 +148,20 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
             }}
           />
         </div>
+        {openCluster ? (
+          <div ref={listRef} role="dialog" aria-label={`${openCluster.count} dispensaries`} className="absolute left-2 top-16 z-10 max-h-64 w-[min(18rem,calc(100%-1rem))] overflow-y-auto border border-ink bg-clinical">
+            <ul>
+              {clusterMembers(openCluster.pins).map((row) => (
+                <li key={row.id}>
+                  <button type="button" onClick={() => onOpenAccount(row.id)} className="flex min-h-[44px] w-full flex-col items-start justify-center px-3 py-2 text-left">
+                    <span className="text-body-m text-primary">{row.name}</span>
+                    <span className="text-caption text-secondary">{row.place}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         <svg
           ref={svgRef}
           viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
@@ -153,25 +195,28 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
           })}
           {grouped.clusters.map((cluster) => {
             const label = String(cluster.count);
-            const textSize = mark * 0.7;
-            const chipW = Math.max(mark * 1.8, label.length * textSize * 0.65 + textSize * 0.5);
-            const chipH = textSize * 1.8;
+            const textSize = units.visible * 0.5;
+            const chipW = Math.max(units.visible * 1.8, label.length * textSize * 0.65 + textSize * 0.5);
+            const chipH = Math.max(textSize * 1.8, units.visible);
+            const hitW = Math.max(chipW, units.target);
+            const hitH = Math.max(chipH, units.target);
             return (
-              <g key={`${cluster.x}-${cluster.y}`}>
+              <g key={cluster.pins.map((pin) => pin.id).join(':')}>
                 <rect
                   data-pin="cluster"
-                  x={cluster.x - chipW / 2}
-                  y={cluster.y - chipH / 2}
-                  width={chipW}
-                  height={chipH}
-                  fill="rgb(var(--surface-ink))"
+                  x={cluster.x - hitW / 2}
+                  y={cluster.y - hitH / 2}
+                  width={hitW}
+                  height={hitH}
+                  fill="transparent"
                   className="cursor-pointer"
                   tabIndex={0}
                   role="button"
                   aria-label={`${cluster.count} dispensaries`}
-                  onClick={() => frameCluster(cluster.pins)}
-                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); frameCluster(cluster.pins); } }}
+                  onClick={(event) => showCluster(cluster, event.currentTarget)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showCluster(cluster, event.currentTarget); } }}
                 />
+                <rect x={cluster.x - chipW / 2} y={cluster.y - chipH / 2} width={chipW} height={chipH} fill="rgb(var(--surface-ink))" className="pointer-events-none" />
                 <text x={cluster.x} y={cluster.y} textAnchor="middle" dominantBaseline="central" fill="rgb(var(--text-inverse))" fontSize={textSize} className="pointer-events-none font-mono">{label}</text>
               </g>
             );
@@ -179,27 +224,37 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
           {grouped.singles.map((pin) => {
             const selected = pin.id === activeId;
             const lit = litIds.has(pin.id);
-            const size = selected || lit ? mark * 1.35 : mark;
+            const size = selected || lit ? units.visible * 1.35 : units.visible;
+            const hit = Math.max(size, units.target);
             return (
-              <rect
-                key={pin.id}
-                data-pin="account"
-                x={pin.x - size / 2}
-                y={pin.y - size / 2}
-                width={size}
-                height={size}
-                fill={selected ? 'rgb(var(--accent-cedar))' : lit ? 'rgb(var(--surface-ink))' : 'rgb(var(--surface-clinical))'}
-                stroke="rgb(var(--surface-ink))"
-                strokeWidth={selected ? view.w / 280 : view.w / 500}
-                className="cursor-pointer"
-                tabIndex={0}
-                role="button"
-                aria-label={pin.displayName}
-                onMouseEnter={() => setActiveId(pin.id)}
-                onFocus={() => setActiveId(pin.id)}
-                onClick={() => onOpenAccount(pin.id)}
-                onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpenAccount(pin.id); } }}
-              />
+              <g key={pin.id}>
+                <rect
+                  data-pin="account"
+                  x={pin.x - hit / 2}
+                  y={pin.y - hit / 2}
+                  width={hit}
+                  height={hit}
+                  fill="transparent"
+                  className="cursor-pointer"
+                  tabIndex={0}
+                  role="button"
+                  aria-label={pin.displayName}
+                  onMouseEnter={() => setActiveId(pin.id)}
+                  onFocus={() => setActiveId(pin.id)}
+                  onClick={() => onOpenAccount(pin.id)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpenAccount(pin.id); } }}
+                />
+                <rect
+                  x={pin.x - size / 2}
+                  y={pin.y - size / 2}
+                  width={size}
+                  height={size}
+                  fill={selected ? 'rgb(var(--accent-cedar))' : lit ? 'rgb(var(--surface-ink))' : 'rgb(var(--surface-clinical))'}
+                  stroke="rgb(var(--surface-ink))"
+                  strokeWidth={selected ? view.w / 280 : view.w / 500}
+                  className="pointer-events-none"
+                />
+              </g>
             );
           })}
         </svg>

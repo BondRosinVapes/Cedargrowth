@@ -17,7 +17,7 @@ import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmat
 import { buildDigest, hoodieSignals, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
 import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, parseCounty, regionForCounty } from '../src/lib/crm/nyRegions.ts';
 import { coverageLabel } from '../src/lib/crm/territory.ts';
-import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, cityChoices, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, framePoints, MAP_HEIGHT, MAP_WIDTH, mergeGap, minZoomWidth, pinCard, placePins, projectNy, unmappedAccountCount, wholeStateFrame, type MapPin } from '../src/lib/crm/nyMap.ts';
+import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, cityChoices, clusterMembers, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, framePoints, MAP_HEIGHT, MAP_WIDTH, markerPixels, mergeGap, minZoomWidth, pinCard, placePins, projectNy, unmappedAccountCount, wholeStateFrame, type MapPin } from '../src/lib/crm/nyMap.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
@@ -1512,7 +1512,10 @@ const cityB = placePins([testPin('city-b', 40.751, -73.989)]).placed[0];
 const tightGap = mergeGap(minZoomWidth(opening.w));
 const tight = declutterPins([cityA, cityB], tightGap);
 const alone = declutterPins([cityA], tightGap);
-assert(tight.clusters.length === 0 && tight.singles.length === 2 && tight.singles[0].x === cityA.x && tight.singles[0].latitude === 40.75 && tight.singles[1].x === cityB.x && tight.singles[1].longitude === -73.989 && alone.clusters.length === 0 && alone.singles.length === 1 && tightGap < mergeGap(opening.w), 'TEST ONLY: two pins 0.001 degrees apart are separate markers at maximum zoom');
+const narrowMark = markerPixels(opening.w, 390);
+const wideMark = markerPixels(opening.w, 1440);
+const showCluster = mapUi.slice(mapUi.indexOf('function showCluster'), mapUi.indexOf('function zoomAt'));
+assert(tight.clusters.length === 1 && tight.singles.length === 0 && tight.clusters[0]?.pins[0]?.x === cityA.x && tight.clusters[0]?.pins[1]?.longitude === -73.989 && alone.clusters.length === 0 && alone.singles.length === 1 && tightGap === minZoomWidth(opening.w) / 90 * 2.8 && narrowMark.visible === 8 && narrowMark.target === 24 && wideMark.visible === 1440 / 90 && wideMark.target === 24 && showCluster.includes('setView') === false && showCluster.includes('setOpenCluster') && mapUi.includes('onClick={(event) => showCluster(cluster, event.currentTarget)}') && mapUi.includes("event.key !== 'Escape'"), 'TEST ONLY: close pins stay one chip, marks are at least 8px with a 24px target, and a chip does not change the view');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);
 
