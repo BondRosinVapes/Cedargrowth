@@ -621,7 +621,7 @@ end;
 $$;
 
 comment on function public.crm_mark_supplier_replied(uuid) is
-  'Records a reply or qualification time. Unqualified means replied_at is null and the inquiry is older than 12 months. A qualified supplier is a separate record outside this table. Not scheduled.';
+  'Records a reply or qualification time. The purge deletes rows 12 months after replied_at, or 12 months after submitted_at if never replied. Not scheduled.';
 
 revoke all on function public.crm_mark_supplier_replied(uuid) from public, anon, authenticated;
 grant execute on function public.crm_mark_supplier_replied(uuid) to service_role;
