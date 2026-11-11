@@ -3,7 +3,8 @@
 -- Supported upgrade after 0120 through 0135 have committed:
 --   psql --single-transaction -v ON_ERROR_STOP=1 -f scripts/crm-apply-0136.sql
 -- Do not apply this file with autocommit. This repository does not run it.
--- No seed rows. No grants beyond service_role. No rows are deleted.
+-- No CRM seed rows. The photo bucket row is configuration, not a seed account.
+-- No grants beyond service_role. No rows are deleted. No storage.objects policies.
 -- The append-only trigger is dropped and created again so a second apply succeeds.
 
 do $$
@@ -283,3 +284,20 @@ revoke all on function public.crm_merge_won_distribution(uuid, text) from public
 grant execute on function public.crm_merge_won_distribution(uuid, text) to service_role;
 revoke all on function public.crm_undo_distribution_merge(uuid, text, timestamptz) from public, anon, authenticated;
 grant execute on function public.crm_undo_distribution_merge(uuid, text, timestamptz) to service_role;
+
+-- Private photo bucket. A second apply keeps this id and resets public, size, and mime types.
+-- anon and authenticated get no storage.objects policy, so they cannot read these objects.
+-- service_role bypasses row level security and is the only client that reads and writes.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'crm-place-photos',
+  'crm-place-photos',
+  false,
+  5242880,
+  array['image/jpeg', 'image/png', 'image/webp']::text[]
+)
+on conflict (id) do update
+set name = excluded.name,
+    public = excluded.public,
+    file_size_limit = excluded.file_size_limit,
+    allowed_mime_types = excluded.allowed_mime_types;

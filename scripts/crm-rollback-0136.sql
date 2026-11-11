@@ -3,6 +3,7 @@
 --   psql --single-transaction -v ON_ERROR_STOP=1 -f scripts/crm-rollback-0136.sql
 -- crm_private.guard_contact existed before 0136. This restores the 0120 body.
 -- It does not drop that function, and it does not drop any earlier CRM table.
+-- The crm-place-photos bucket and its objects stay. This file does not remove them.
 
 drop trigger if exists crm_distribution_merges_append_only on public.crm_distribution_merges;
 drop function if exists public.crm_undo_distribution_merge(uuid, text, timestamptz);
