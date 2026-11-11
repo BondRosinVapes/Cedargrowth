@@ -137,10 +137,8 @@ export function hitTargetPx(svgClientWidth: number): number {
   return MIN_TARGET_PX;
 }
 
-export function mergeGap(viewWidth: number, svgClientWidth = 0): number {
-  const fractional = markerSpan(viewWidth) * MERGE_MULTIPLE;
-  if (svgClientWidth <= 0) return fractional;
-  return Math.max(fractional, (hitTargetPx(svgClientWidth) / svgClientWidth) * viewWidth);
+export function mergeGap(viewWidth: number): number {
+  return markerSpan(viewWidth) * MERGE_MULTIPLE;
 }
 
 // 0.0001 degrees of latitude near the city, about 11 m.
@@ -152,8 +150,8 @@ export function storefrontSeparation(): number {
 
 export function minZoomWidth(wholeWidth: number): number {
   const separation = storefrontSeparation();
-  const narrow = Math.max(MARKER_FRACTION * MERGE_MULTIPLE, TOUCH_TARGET_PX / 390);
-  return Math.min(wholeWidth, (separation * 0.8) / narrow);
+  const widthAtSplit = separation / (MARKER_FRACTION * MERGE_MULTIPLE);
+  return Math.min(wholeWidth, widthAtSplit * 0.95);
 }
 
 export function zoomInFactor(currentWidth: number, wholeWidth: number): number {
@@ -215,37 +213,46 @@ export function clusterMembers(pins: readonly MapPin[]): { id: string; name: str
   }));
 }
 
-// Chips that would draw on top of each other share one count at their centroid.
-// The pins keep the coordinates placePins stored.
+// A chip includes only pins inside the gap of its seed. Neighbors of a member that sit farther from the seed stay out.
+// The pins keep the coordinates placePins stored. The chip is drawn at their centroid.
 export function declutterPins(pins: readonly PlacedPin[], gap: number): { singles: PlacedPin[]; clusters: PinCluster[] } {
-  const span = Math.max(gap, 0.001);
+  const span = Math.max(gap, 0);
   const spanSq = span * span;
-  type Group = { pins: PlacedPin[]; x: number; y: number };
-  let groups: Group[] = pins.map((pin) => ({ pins: [pin], x: pin.x, y: pin.y }));
-  let merged = true;
-  while (merged) {
-    merged = false;
-    for (let i = 0; i < groups.length && !merged; i += 1) {
-      for (let j = i + 1; j < groups.length; j += 1) {
-        const dx = groups[i].x - groups[j].x;
-        const dy = groups[i].y - groups[j].y;
-        if (dx * dx + dy * dy >= spanSq) continue;
-        const members = groups[i].pins.concat(groups[j].pins);
-        const x = members.reduce((sum, pin) => sum + pin.x, 0) / members.length;
-        const y = members.reduce((sum, pin) => sum + pin.y, 0) / members.length;
-        groups = [...groups.slice(0, i), ...groups.slice(i + 1, j), ...groups.slice(j + 1), { pins: members, x, y }];
-        merged = true;
-        break;
-      }
-    }
-  }
+  const pending = [...pins];
   const singles: PlacedPin[] = [];
   const clusters: PinCluster[] = [];
-  for (const group of groups) {
-    if (group.pins.length === 1) singles.push(group.pins[0]);
-    else clusters.push({ x: group.x, y: group.y, count: group.pins.length, pins: group.pins });
+  while (pending.length) {
+    const seed = pending[0];
+    const members: PlacedPin[] = [];
+    const rest: PlacedPin[] = [];
+    for (const pin of pending) {
+      const dx = pin.x - seed.x;
+      const dy = pin.y - seed.y;
+      if (dx * dx + dy * dy <= spanSq) members.push(pin);
+      else rest.push(pin);
+    }
+    pending.length = 0;
+    pending.push(...rest);
+    if (members.length === 1) singles.push(members[0]);
+    else {
+      const x = members.reduce((sum, pin) => sum + pin.x, 0) / members.length;
+      const y = members.reduce((sum, pin) => sum + pin.y, 0) / members.length;
+      clusters.push({ x, y, count: members.length, pins: members });
+    }
   }
   return { singles, clusters };
+}
+
+export type HitMarker = { id: string; x: number; y: number; halfW: number; halfH: number };
+
+export function hitAt(markers: readonly HitMarker[], x: number, y: number): string | null {
+  let best: { id: string; dist: number } | null = null;
+  for (const marker of markers) {
+    if (Math.abs(x - marker.x) > marker.halfW || Math.abs(y - marker.y) > marker.halfH) continue;
+    const dist = Math.hypot(x - marker.x, y - marker.y);
+    if (!best || dist < best.dist) best = { id: marker.id, dist };
+  }
+  return best?.id ?? null;
 }
 
 export function clusterPins(pins: readonly PlacedPin[], cell: number): { singles: PlacedPin[]; clusters: PinCluster[] } {

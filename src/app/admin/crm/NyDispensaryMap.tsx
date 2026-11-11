@@ -13,6 +13,7 @@ import {
   COUNTY_MENU_LABEL,
   clusterFrame,
   clusterMembers,
+  hitAt,
   markerUnits,
   mergeGap,
   zoomStops,
@@ -42,7 +43,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
   const [openCluster, setOpenCluster] = useState<PinCluster | null>(null);
   const placed = useMemo(() => placePins(pins).placed, [pins]);
   const units = markerUnits(view.w, svgWidth);
-  const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w, svgWidth)), [placed, view.w, svgWidth]);
+  const grouped = useMemo(() => declutterPins(placed, mergeGap(view.w)), [placed, view.w]);
   const active = placed.find((pin) => pin.id === activeId) ?? null;
   const zoomed = view.w < WHOLE.w - 0.5;
 
@@ -188,6 +189,31 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
           className="block w-full min-w-0 bg-parchment"
           style={{ aspectRatio: `${WHOLE.w} / ${WHOLE.h}`, touchAction: zoomed ? 'none' : 'pan-y' }}
           onDoubleClick={(event) => event.preventDefault()}
+          onClick={(event) => {
+            const node = svgRef.current;
+            if (!node) return;
+            const rect = node.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return;
+            const x = view.x + ((event.clientX - rect.left) / rect.width) * view.w;
+            const y = view.y + ((event.clientY - rect.top) / rect.height) * view.h;
+            const markers = [
+              ...grouped.singles.map((pin) => ({ id: pin.id, x: pin.x, y: pin.y, halfW: Math.max(units.visible, units.target) / 2, halfH: Math.max(units.visible, units.target) / 2 })),
+              ...grouped.clusters.map((cluster) => {
+                const label = String(cluster.count);
+                const textSize = units.visible * 0.5;
+                const chipW = Math.max(units.visible * 1.8, label.length * textSize * 0.65 + textSize * 0.5);
+                const chipH = Math.max(textSize * 1.8, units.visible);
+                return { id: cluster.pins.map((pin) => pin.id).join(':'), x: cluster.x, y: cluster.y, halfW: Math.max(chipW, units.target) / 2, halfH: Math.max(chipH, units.target) / 2 };
+              }),
+            ];
+            const id = hitAt(markers, x, y);
+            if (!id) return;
+            const pin = grouped.singles.find((item) => item.id === id);
+            if (pin) { openDispensary(pin.id); return; }
+            const cluster = grouped.clusters.find((item) => item.pins.map((member) => member.id).join(':') === id);
+            const button = node.querySelector(`[data-hit="${CSS.escape(id)}"]`);
+            if (cluster && button instanceof SVGRectElement) showCluster(cluster, button);
+          }}
           onPointerDown={(event) => {
             if (!zoomed || (event.target as Element).closest('[data-pin]')) return;
             drag.current = { x: event.clientX, y: event.clientY, viewX: view.x, viewY: view.y, pointer: event.pointerId };
@@ -221,6 +247,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
               <g key={cluster.pins.map((pin) => pin.id).join(':')}>
                 <rect
                   data-pin="cluster"
+                  data-hit={cluster.pins.map((pin) => pin.id).join(':')}
                   x={cluster.x - hitW / 2}
                   y={cluster.y - hitH / 2}
                   width={hitW}
@@ -230,7 +257,6 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
                   tabIndex={0}
                   role="button"
                   aria-label={`${cluster.count} dispensaries`}
-                  onClick={(event) => showCluster(cluster, event.currentTarget)}
                   onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showCluster(cluster, event.currentTarget); } }}
                 />
                 <rect x={cluster.x - chipW / 2} y={cluster.y - chipH / 2} width={chipW} height={chipH} fill="rgb(var(--surface-ink))" className="pointer-events-none" />
@@ -247,6 +273,7 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
               <g key={pin.id}>
                 <rect
                   data-pin="account"
+                  data-hit={pin.id}
                   x={pin.x - hit / 2}
                   y={pin.y - hit / 2}
                   width={hit}
@@ -258,7 +285,6 @@ export function NyDispensaryMap({ pins, unmapped, onOpenAccount }: { pins: MapPi
                   aria-label={pin.displayName}
                   onMouseEnter={() => setActiveId(pin.id)}
                   onFocus={() => setActiveId(pin.id)}
-                  onClick={() => openDispensary(pin.id)}
                   onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openDispensary(pin.id); } }}
                 />
                 <rect

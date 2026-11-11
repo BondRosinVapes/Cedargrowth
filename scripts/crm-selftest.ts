@@ -17,7 +17,7 @@ import { BATCH_MISS, LINK_MISS, NABIS_CONFIRMATION, clearReorderRates, confirmat
 import { buildDigest, hoodieSignals, nyWeek, renderDigestHtml, renderDigestText } from '../src/lib/crm/digest.ts';
 import { COUNTY_REGION, NY_COUNTIES, NY_REGIONS, COVERAGE_UPLOAD, NEEDS_HOODIE, parseCounty, regionForCounty } from '../src/lib/crm/nyRegions.ts';
 import { coverageLabel } from '../src/lib/crm/territory.ts';
-import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, cityChoices, clusterFrame, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, framePoints, MAP_HEIGHT, MAP_WIDTH, markerPixels, mergeGap, minZoomWidth, pinCard, placePins, projectNy, unmappedAccountCount, wholeStateFrame, zoomPresses, type MapPin } from '../src/lib/crm/nyMap.ts';
+import { CITY_MENU_LABEL, COUNTY_MENU_LABEL, cityChoices, clusterFrame, clusterPins, countyAt, countyChoices, countyFrame, declutterPins, framePoints, hitAt, MAP_HEIGHT, MAP_WIDTH, markerPixels, markerUnits, mergeGap, minZoomWidth, pinCard, placePins, projectNy, unmappedAccountCount, wholeStateFrame, zoomPresses, type MapPin, type PlacedPin } from '../src/lib/crm/nyMap.ts';
 import { nextBestActions } from '../src/lib/crm/nextAction.ts';
 import { emailStatusLabel, clearEmailRefreshRates } from '../src/lib/crm/emailStatus.ts';
 import { clearIntakeRates, duplicateNote, emailDomain, excludeTestLeads, intakeExpired, intakeMessageText, normalizeBusinessName, parseIntake, signIntake, takeIntakeRate, INTAKE_MAX_BYTES, INTAKE_TEST_MARKER } from '../src/lib/crm/intake.ts';
@@ -1510,7 +1510,7 @@ assert(merged.clusters.length === 1 && members.length === 2 && members[0].latitu
 const cityA = placePins([testPin('city-a', 40.75, -73.99)]).placed[0];
 const cityB = placePins([testPin('city-b', 40.7501, -73.99)]).placed[0];
 const sameB = placePins([testPin('same-b', 40.75, -73.99)]).placed[0];
-const floorGap = mergeGap(minZoomWidth(opening.w), 390);
+const floorGap = mergeGap(minZoomWidth(opening.w));
 const splitStorefront = declutterPins([cityA, cityB], floorGap);
 const identical = declutterPins([cityA, sameB], floorGap);
 const framed = clusterFrame([cityA, cityB], opening);
@@ -1526,7 +1526,22 @@ assert(framed.w + 1e-9 >= minZoomWidth(opening.w) && Math.abs(framed.w - minZoom
 assert(wheelBlock.includes('setView') === false && wheelBlock.includes('preventDefault') && doubleClick.includes('setView') === false && doubleClick.includes('preventDefault') && escapeBlock.includes('setView') === false && escapeBlock.includes('setOpenCluster(null)'), 'TEST ONLY: the wheel, a double click, and Escape leave the map view unchanged');
 const phoneMark = markerPixels(opening.w, 430);
 const tabletMark = markerPixels(opening.w, 768);
-assert(narrowMark.visible === 8 && narrowMark.target === 44 && phoneMark.target === 44 && tabletMark.target === 44 && wideMark.visible === 1440 / 90 && wideMark.target === 24 && mergeGap(opening.w, 390) >= (44 * opening.w) / 390 && mergeGap(opening.w, 1440) >= (24 * opening.w) / 1440 && zoomPresses(opening.w) > 0 && zoomPresses(opening.w) <= 16 && mapUi.includes("touchAction: zoomed ? 'none' : 'pan-y'") && mapUi.includes('aria-label="Close"') && mapUi.includes('grid-cols-2'), 'TEST ONLY: touch marks are at least 8px with a 44px target, and whole-state hit targets do not overlap');
+const nycPair = placePins([testPin('nyc-a', 40.75, -73.99), testPin('nyc-b', 40.751, -73.989)]).placed;
+const nycGap = mergeGap(minZoomWidth(opening.w));
+const nycSplit = declutterPins(nycPair, nycGap);
+const chainSeed = { ...cityA, id: 'seed', x: 0, y: 0 };
+const chainMid = { ...cityA, id: 'mid', x: 1, y: 0 };
+const chainFar = { ...cityA, id: 'far', x: 2.2, y: 0 };
+const chain = declutterPins([chainSeed, chainMid, chainFar] as PlacedPin[], 1.5);
+function centerHit(svgWidth: number, pins: PlacedPin[]) {
+  const units = markerUnits(opening.w, svgWidth);
+  const half = units.target / 2;
+  const markers = pins.map((pin) => ({ id: pin.id, x: pin.x, y: pin.y, halfW: half, halfH: half }));
+  return pins.map((pin) => hitAt(markers, pin.x, pin.y));
+}
+assert(Math.abs(mergeGap(opening.w) - opening.w / 90 * 2.8) < 1e-9 && Math.abs(nycGap - minZoomWidth(opening.w) / 90 * 2.8) < 1e-9 && nycGap < Math.hypot(nycPair[0].x - nycPair[1].x, nycPair[0].y - nycPair[1].y) && nycSplit.singles.length === 2 && chain.clusters.length === 1 && chain.clusters[0]?.count === 2 && chain.singles.length === 1 && chain.singles[0]?.id === 'far', 'TEST ONLY: the merge gap is the zoom fraction, the NYC pair splits at the stop, and a chain does not become one chip');
+assert(centerHit(390, nycPair).join(',') === 'nyc-a,nyc-b' && centerHit(1440, nycPair).join(',') === 'nyc-a,nyc-b', 'TEST ONLY: a click on a pin center returns that pin at 390 and 1440');
+assert(narrowMark.visible === 8 && narrowMark.target === 44 && phoneMark.target === 44 && tabletMark.target === 44 && wideMark.visible === 1440 / 90 && wideMark.target === 24 && zoomPresses(opening.w) > 0 && zoomPresses(opening.w) <= 16 && mapUi.includes("touchAction: zoomed ? 'none' : 'pan-y'") && mapUi.includes('aria-label="Close"') && mapUi.includes('grid-cols-2') && mapUi.includes('hitAt'), 'TEST ONLY: touch marks are at least 8px with a 44px target, and a click uses the nearest center');
 const openHandler = mapUi.slice(mapUi.indexOf('function openDispensary'), mapUi.indexOf('function showCluster'));
 assert(openHandler.includes('onOpenAccount(id)') && mapUi.includes('openDispensary(pin.id)') && mapUi.includes('openDispensary(row.id)') && mapUi.includes("event.key === 'Enter'") && mapUi.includes('openDispensary(row.id)'), 'TEST ONLY: a chip list entry opens the dispensary with the same handler as its pin');
 assertDashboardTabs(assert);
