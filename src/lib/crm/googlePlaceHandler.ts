@@ -1,4 +1,4 @@
-import { authorizeCrmRequest, isDispensaryAccount } from './engine';
+import { authorizeCrmRequest, canExport, isDispensaryAccount } from './engine';
 import type { CrmContext, CrmResult } from './handlers';
 import { loadPlace, placeQuery, placeReadPlan, retainPlaceCache, type PlaceCard } from './places';
 import { browserLink, stablePhotoUrl } from './placeLinks';
@@ -95,6 +95,9 @@ export async function handleDistributionMerge(ctx: CrmContext): Promise<CrmResul
     return { status: 200, body: { ok: true, merge: merge.value } };
   }
   if (!auth.actorId) return denied(401, 'Sign in required.');
+  // Gary, 12:19 AM ET on 2026-11-11: only an owner or administrator can undo.
+  // canExport is that desk check. 0136 does not enforce it.
+  if (!canExport(auth.role)) return denied(403, 'Only an owner or administrator can undo a merge.');
   const undone = await ctx.store.undoMerge(auth.brand, String(body.mergeId || ''), auth.actorId, new Date().toISOString());
   if (undone.state !== 'ok') return denied(400, 'That merge was not undone.');
   return { status: 200, body: { ok: true, merge: undone.value.merge, refused: undone.value.refused, reassigned: undone.value.reassigned } };

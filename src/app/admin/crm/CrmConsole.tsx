@@ -112,7 +112,7 @@ async function crmFetch(path: string, init?: RequestInit): Promise<{ status: num
   return { status: res.status, body: body as Record<string, unknown> };
 }
 
-function WonMergeLine({ accountId, onChanged }: { accountId: string; onChanged: (refused: number) => void }) {
+function WonMergeLine({ accountId, canUndo, onChanged }: { accountId: string; canUndo: boolean; onChanged: (refused: number) => void }) {
   const [merge, setMerge] = useState<{ id: string; contactIds: string[] } | null>(null);
   useEffect(() => {
     let cancel = false;
@@ -128,10 +128,10 @@ function WonMergeLine({ accountId, onChanged }: { accountId: string; onChanged: 
   return (
     <div className="flex flex-col gap-2 border border-hairline bg-clinical p-3">
       <p className="text-body-m text-primary">{count === 0 ? 'Won merge. No contacts moved.' : `Won merge. ${count} contact${count === 1 ? '' : 's'} moved onto this account.`}</p>
-      <button type="button" onClick={async () => {
+      {canUndo ? <button type="button" onClick={async () => {
         const res = await crmFetch('/api/admin/crm/distribution-merge', { method: 'POST', body: JSON.stringify({ brand: 'cedargrowth', mergeId: merge.id }) });
         if (res.body.ok) onChanged(Array.isArray(res.body.refused) ? res.body.refused.length : 0);
-      }} className="min-h-[44px] self-start border border-ink px-3 py-2 font-mono text-specimen uppercase text-primary">Undo</button>
+      }} className="min-h-[44px] self-start border border-ink px-3 py-2 font-mono text-specimen uppercase text-primary">Undo</button> : null}
     </div>
   );
 }
@@ -567,7 +567,7 @@ export function CrmConsole({
                 ))}
               </ul>
               {brand === 'cedargrowth' && isDispensaryAccount(selected.accountType) ? <GooglePlaceCard accountId={selected.id} /> : null}
-              {brand === 'cedargrowth' && isDispensaryAccount(selected.accountType) ? <WonMergeLine accountId={selected.id} onChanged={(refused) => { setNotice(refused > 0 ? `Undo left ${refused} contact${refused === 1 ? '' : 's'} on this account. The previous account is gone.` : 'Undo restored the contacts to their previous accounts.'); setRefresh((value) => value + 1); }} /> : null}
+              {brand === 'cedargrowth' && isDispensaryAccount(selected.accountType) ? <WonMergeLine accountId={selected.id} canUndo={roleLabel !== 'Sales'} onChanged={(refused) => { setNotice(refused > 0 ? `Undo left ${refused} contact${refused === 1 ? '' : 's'} on this account. The previous account is gone.` : 'Undo restored the contacts to their previous accounts.'); setRefresh((value) => value + 1); }} /> : null}
               <h3 className="font-display text-body-l text-primary">Contacts</h3>
               <ul className="flex flex-col gap-2">
                 {accountContacts.length === 0 ? <li className="text-caption text-tertiary">No contacts on this account.</li> : accountContacts.map((row) => (

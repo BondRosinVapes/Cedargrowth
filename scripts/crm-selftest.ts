@@ -2087,14 +2087,30 @@ const mergeFn = mergeSql.slice(mergeSql.indexOf('function public.crm_merge_won_d
 const undoFn = mergeSql.slice(mergeSql.indexOf('function public.crm_undo_distribution_merge'), mergeSql.indexOf('comment on function public.crm_undo_distribution_merge'));
 const undoHandler = readFileSync('src/lib/crm/googlePlaceHandler.ts', 'utf8');
 const undoBody = undoHandler.slice(undoHandler.indexOf('export async function handleDistributionMerge'));
-assert(mergeFn.includes('set search_path = pg_catalog') && mergeFn.includes('set search_path = public') === false && undoFn.includes('set search_path = pg_catalog') && undoFn.includes('v_current is distinct from v_row.account_id') && undoFn.includes('reassigned_ids = v_reassigned') && mergeSql.includes('revoke delete, truncate, references, trigger on table public.crm_google_places from service_role') && mergeSql.includes('revoke update, delete, truncate, references, trigger on table public.crm_distribution_merges from service_role') && mergeSql.includes('grant select, insert on table public.crm_distribution_merges to service_role') && mergeSql.includes('grant update on table public.crm_distribution_merges') === false && mergeSql.includes('merge audit is append-only') && mergeSql.includes('grant execute on function public.crm_undo_distribution_merge(uuid, text, timestamptz) to service_role') && undoBody.includes('canExport') === false && undoBody.includes('reassigned: undone.value.reassigned') && undoFn.includes('for update') && undoFn.includes('account_id = v_row.account_id') && mergeSql.includes('add column if not exists reassigned_ids uuid[] not null default') && mergeSql.includes('pending Gary decision') && mergeSql.includes('Any desk staff may call this') === false && updateOpp.includes('clearPlaceDetailsIfNotSelling') && updateOpp.includes("if (cleared.state !== 'ok') return cleared") && updateOpp.includes('shouldPurgePlaceDetails') && storeSrc.includes("console.error('crm place detail purge failed'") === false, 'TEST ONLY: undo locks the contact, the merge audit is append-only, and a failed place purge is returned');
+assert(mergeFn.includes('set search_path = pg_catalog') && mergeFn.includes('set search_path = public') === false && undoFn.includes('set search_path = pg_catalog') && undoFn.includes('v_current is distinct from v_row.account_id') && undoFn.includes('reassigned_ids = v_reassigned') && mergeSql.includes('revoke delete, truncate, references, trigger on table public.crm_google_places from service_role') && mergeSql.includes('revoke update, delete, truncate, references, trigger on table public.crm_distribution_merges from service_role') && mergeSql.includes('grant select, insert on table public.crm_distribution_merges to service_role') && mergeSql.includes('grant update on table public.crm_distribution_merges') === false && mergeSql.includes('merge audit is append-only') && mergeSql.includes('grant execute on function public.crm_undo_distribution_merge(uuid, text, timestamptz) to service_role') && undoBody.includes('canExport') && undoBody.includes('Only an owner or administrator can undo a merge.') && undoBody.includes('reassigned: undone.value.reassigned') && undoFn.includes('for update') && undoFn.includes('account_id = v_row.account_id') && mergeSql.includes('add column if not exists reassigned_ids uuid[] not null default') && mergeSql.includes('pending Gary decision') && mergeSql.includes('Any desk staff may call this') === false && updateOpp.includes('clearPlaceDetailsIfNotSelling') && updateOpp.includes("if (cleared.state !== 'ok') return cleared") && updateOpp.includes('shouldPurgePlaceDetails') && storeSrc.includes("console.error('crm place detail purge failed'") === false, 'TEST ONLY: undo locks the contact, the merge audit is append-only, and a failed place purge is returned');
+const adminGrant = [{ brand: 'cedargrowth' as const, role: 'administrator' as const }];
+let staffUndoCalls = 0;
+const undoResult = { state: 'ok' as const, value: { merge: { id: '00000000-0000-4000-8000-000000000010', opportunityId: 'deal', accountId: 'won', actor: 'admin-1', contactIds: ['from-dup'], priors: [{ contactId: 'from-dup', priorAccountId: 'dup' }], createdAt: freshAt, undoneAt: freshAt, undoneBy: 'admin-1', reassignedIds: ['from-dup'] }, refused: [] as string[], reassigned: ['from-dup'] } };
 const salesUndo = await handleDistributionMerge({
   actorId: 'sales-1',
   grants: salesGrant,
   request: crmReq('POST', '/api/admin/crm/distribution-merge', { brand: 'cedargrowth', mergeId: '00000000-0000-4000-8000-000000000010' }),
-  store: { undoMerge: async () => ({ state: 'ok' as const, value: { merge: { id: '00000000-0000-4000-8000-000000000010', opportunityId: 'deal', accountId: 'won', actor: 'sales-1', contactIds: ['from-dup'], priors: [{ contactId: 'from-dup', priorAccountId: 'dup' }], createdAt: freshAt, undoneAt: freshAt, undoneBy: 'sales-1', reassignedIds: ['from-dup'] }, refused: [] as string[], reassigned: ['from-dup'] } }) } as unknown as CrmStore,
+  store: { undoMerge: async () => { staffUndoCalls += 1; return undoResult; } } as unknown as CrmStore,
 });
-assert(salesUndo.status === 200 && (salesUndo.body.reassigned as string[]).join(',') === 'from-dup', 'TEST ONLY: any desk staff can undo, and a reassigned contact is reported');
+const adminUndo = await handleDistributionMerge({
+  actorId: 'admin-1',
+  grants: adminGrant,
+  request: crmReq('POST', '/api/admin/crm/distribution-merge', { brand: 'cedargrowth', mergeId: '00000000-0000-4000-8000-000000000010' }),
+  store: { undoMerge: async () => undoResult } as unknown as CrmStore,
+});
+const ownerUndo = await handleDistributionMerge({
+  actorId: 'owner',
+  grants: ownerGrants,
+  request: crmReq('POST', '/api/admin/crm/distribution-merge', { brand: 'cedargrowth', mergeId: '00000000-0000-4000-8000-000000000010' }),
+  store: { undoMerge: async () => undoResult } as unknown as CrmStore,
+});
+const consoleUi = readFileSync('src/app/admin/crm/CrmConsole.tsx', 'utf8');
+assert(salesUndo.status === 403 && staffUndoCalls === 0 && adminUndo.status === 200 && (adminUndo.body.reassigned as string[]).join(',') === 'from-dup' && ownerUndo.status === 200 && consoleUi.includes("canUndo={roleLabel !== 'Sales'}") && consoleUi.includes('{canUndo ?'), 'TEST ONLY: staff cannot undo a merge, and an administrator or owner can');
 assertDashboardTabs(assert);
 await assertProductionForecast(assert);
 
