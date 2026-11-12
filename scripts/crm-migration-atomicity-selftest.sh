@@ -544,12 +544,34 @@ if [ "$ERASED" != "erased|null|null" ]; then
 fi
 echo 'ok: erase clears the template A hash with the contact on a 1 day old sent row'
 REMARK=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_mark_bond_request_handoff('a1000000-0000-4000-8000-000000000009'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'again', 'm2')->>'ok';")
-REMARK_HASH=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-000000000009' and rendered_sha256 = 'again';")
-if [ "$REMARK" != "false" ] || [ "$REMARK_HASH" != "0" ]; then
-  echo "FAIL: mark stored a template A hash after erase ok=${REMARK} rows=${REMARK_HASH}"
+REMARK_HASH=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) filter (where rendered_sha256 is null) || '|' || count(*) filter (where rendered_sha256 = 'again') from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-000000000009' and template = 'A' and provider_message_id = 'm2';")
+if [ "$REMARK" != "true" ] || [ "$REMARK_HASH" != "1|0" ]; then
+  echo "FAIL: mark did not store a null template A hash after erase ok=${REMARK} rows=${REMARK_HASH}"
   exit 1
 fi
-echo 'ok: a mark cannot store a template A hash after the contact is cleared'
+echo 'ok: a mark after erase stores a null template A hash'
+B_MARK=$(sudo -u postgres psql -d "$DB" -tA -c "select public.crm_mark_bond_request_handoff('a1000000-0000-4000-8000-000000000009'::uuid, 'sent', 'B', 'v1:56216bdd6a9c3f35', 'bee-hash', 'mb')->>'ok'; select rendered_sha256 from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-000000000009' and template = 'B';")
+if [ "$B_MARK" != "true
+bee-hash" ]; then
+  echo "FAIL: template B hash was not stored after erase ${B_MARK}"
+  exit 1
+fi
+echo 'ok: a template B hash is still stored after erase'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status, consumer_cleared_at) values ('a1000000-0000-4000-8000-00000000000a', 'cleared', now() - interval '1 day', now() - interval '1 day', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent', now()); insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, sent_at, status) values ('a1000000-0000-4000-8000-00000000000a', 'A', 'v1:6321250367f61781', 'still-there', now() - interval '1 day', 'sent');" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now());" >/dev/null
+CLEARED_HASH=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-00000000000a' and template = 'A';")
+if [ "$CLEARED_HASH" != "null" ]; then
+  echo "FAIL: consumer_cleared_at did not clear the template A hash ${CLEARED_HASH}"
+  exit 1
+fi
+echo 'ok: a template A hash is cleared when consumer_cleared_at is already set'
+RACE=$(sudo -u postgres psql -d "$DB" -tA -c "select public.crm_mark_bond_request_handoff('a1000000-0000-4000-8000-00000000000a'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'race', 'm3')->>'ok'; select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where provider_message_id = 'm3';")
+if [ "$RACE" != "true
+null" ]; then
+  echo "FAIL: mark stored a template A hash after consumer_cleared_at ${RACE}"
+  exit 1
+fi
+echo 'ok: a mark stores a null template A hash when the contact was already cleared'
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update public.crm_bond_request_handoffs set received_at = now() - interval '13 months' where handoff_id = '82828282-8282-4282-8282-828282828282'; insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, status) values ('82828282-8282-4282-8282-828282828282', 'A', 'v1:6321250367f61781', 'abc', 'sent'); insert into public.crm_bond_request_audit (handoff_id, status) values ('82828282-8282-4282-8282-828282828282', 'queued'); insert into public.crm_bond_request_alerts (dispensary_account_id, accepted_count, created_at) values ('${ACCT}'::uuid, 50, now() - interval '13 months'), ('${ACCT}'::uuid, 50, now());" >/dev/null
 PURGE_HAND=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now())->>'purged';")
 LEFT_HAND=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_bond_request_handoffs where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_send_log where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_audit where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_handoffs where handoff_id = '83838383-8383-4383-8383-838383838383');")
@@ -559,13 +581,22 @@ if [ "$PURGE_HAND" != "1" ] || [ "$LEFT_HAND" != "0,0,0,1" ] || [ "$ALERT_LEFT" 
   exit 1
 fi
 echo 'ok: the 12 month purge removes the handoff, the send log, the audit rows, and old alerts'
-sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-rollback-0140.sql" >/tmp/crm-0140-rollback.log
-RESTORED=$(sudo -u postgres psql -d "$DB" -tA -c "select position('rendered_sha256 = null' in pg_get_functiondef('public.crm_purge_bond_request_handoffs(timestamptz)'::regprocedure)) = 0;")
-if [ "$RESTORED" != "t" ]; then
-  echo "FAIL: 0140 rollback did not restore the 0139 purge function"
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-rollback-0141.sql" >/tmp/crm-0141-rollback.log
+BACK0141=$(sudo -u postgres psql -d "$DB" -tA -c "select (position('consumer_cleared_at is not null' in pg_get_functiondef('public.crm_purge_bond_request_handoffs(timestamptz)'::regprocedure)) = 0 and position('v_hash' in pg_get_functiondef('public.crm_mark_bond_request_handoff(uuid, text, text, text, text, text)'::regprocedure)) = 0);")
+if [ "$BACK0141" != "t" ]; then
+  echo "FAIL: 0141 rollback did not restore the 0140 purge and mark functions"
   exit 1
 fi
-echo 'ok: 0140 rollback restores the 0139 purge function'
+echo 'ok: 0141 rollback restores the 0140 purge and mark functions'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-rollback-0140.sql" >/tmp/crm-0140-rollback.log
+RESTORED=$(sudo -u postgres psql -d "$DB" -tA -c "select (position('rendered_sha256 = null' in pg_get_functiondef('public.crm_purge_bond_request_handoffs(timestamptz)'::regprocedure)) = 0 and position('rendered_sha256 = null' in pg_get_functiondef('public.crm_erase_bond_request_handoff(uuid)'::regprocedure)) = 0 and position('v_hash' in pg_get_functiondef('public.crm_mark_bond_request_handoff(uuid, text, text, text, text, text)'::regprocedure)) = 0);")
+A_LEFT=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_send_log where template = 'A' and rendered_sha256 is not null;")
+B_LEFT=$(sudo -u postgres psql -d "$DB" -tA -c "select rendered_sha256 from public.crm_bond_request_send_log where template = 'B' and rendered_sha256 = 'kept-b';")
+if [ "$RESTORED" != "t" ] || [ "$A_LEFT" != "0" ] || [ "$B_LEFT" != "kept-b" ]; then
+  echo "FAIL: 0140 rollback did not restore the 0139 functions or null the template A hashes restored=${RESTORED} a=${A_LEFT} b=${B_LEFT}"
+  exit 1
+fi
+echo 'ok: 0140 rollback nulls template A hashes and restores the 0139 purge, erase, and mark functions'
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-rollback-0139.sql" >/tmp/crm-0139-rollback.log
 GONE=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relname like 'crm_bond_request_%';")
 if [ "$GONE" != "0" ]; then
@@ -689,6 +720,20 @@ if [ "$PRE14_CODE" -eq 0 ] || ! grep -q '0139 is not applied' /tmp/crm-0140-prec
 fi
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${PRE14};" >/dev/null
 echo 'ok: 0140 refuses to apply until 0139 is present'
+PRE41=crm_0141_without_0140
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database if exists ${PRE41};" >/dev/null
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "create database ${PRE41};" >/dev/null
+set +e
+sudo -u postgres psql -d "$PRE41" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-apply-0141.sql" >/tmp/crm-0141-precheck.log 2>&1
+PRE41_CODE=$?
+set -e
+PRE41_LEFT=$(sudo -u postgres psql -d "$PRE41" -tA -c "select to_regprocedure('public.crm_purge_bond_request_handoffs(timestamptz)') is null;")
+if [ "$PRE41_CODE" -eq 0 ] || ! grep -q '0140 is not applied' /tmp/crm-0141-precheck.log || [ "$PRE41_LEFT" != "t" ]; then
+  echo "FAIL: 0141 applied without 0140 code=${PRE41_CODE} left=${PRE41_LEFT}"
+  exit 1
+fi
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${PRE41};" >/dev/null
+echo 'ok: 0141 refuses to apply until 0140 is present'
 
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${UP};" >/dev/null
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${BAD};" >/dev/null

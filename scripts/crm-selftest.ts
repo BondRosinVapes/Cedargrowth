@@ -2541,8 +2541,9 @@ const productionDb = {
   },
   from: (table: string) => {
     const data = table === 'crm_accounts' ? [{ id: sendShop.id, brand: 'cedargrowth', display_name: sendShop.displayName, city: 'Buffalo', latitude: 42.89, longitude: -78.87, account_type: 'adult_use_dispensary', request_contact_email: 'shop@request.test', bond_carried_skus: ['vape-1g'], request_opt_out: false }] : [];
-    const query = Promise.resolve({ data }) as Promise<{ data: unknown[] }> & { eq: (column: string, value: string) => typeof query };
+    const query = Promise.resolve({ data }) as Promise<{ data: unknown[] }> & { eq: (column: string, value: string) => typeof query; range: (from: number, to: number) => Promise<{ data: unknown[] }> };
     query.eq = () => query;
+    query.range = (from: number) => Promise.resolve({ data: from === 0 ? data : [] });
     return { select: () => ({ eq: () => query }) };
   },
 };
@@ -2604,7 +2605,58 @@ eraseBook.sends.push({ handoffId: handoffId(318), template: 'A', templateVersion
 eraseHandoff(eraseBook, handoffId(318), '2026-11-11T15:00:00Z');
 assert(eraseBook.rows[0].status === 'erased' && eraseBook.rows[0].memberContact === null && eraseBook.sends[0].renderedSha256 === null, 'erase clears the template A hash with the contact on a 1 day old sent row');
 markHandoff(eraseBook, handoffId(318), 'sent', '2026-11-11T15:00:00Z', { template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'again', providerMessageId: 'm2', sentAt: '2026-11-11T15:00:00Z', status: 'sent' });
-assert(eraseBook.sends.every((row) => row.renderedSha256 !== 'again') && eraseBook.sends[0].renderedSha256 === null, 'a mark cannot store a template A hash after the contact is cleared');
+const remarked = eraseBook.sends.find((row) => row.providerMessageId === 'm2');
+assert(remarked?.renderedSha256 === null && eraseBook.sends.every((row) => row.renderedSha256 !== 'again'), 'a mark after erase stores a null template A hash');
+const clearedHash = emptyHandoffBook();
+const clearedRow = hashRow(handoffId(319), '2026-11-10T15:00:00Z');
+clearedRow.consumerClearedAt = '2026-11-10T16:00:00Z';
+clearedHash.rows.push(clearedRow);
+clearedHash.sends.push({ handoffId: handoffId(319), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'still-there', providerMessageId: 'm', sentAt: '2026-11-10T15:00:00Z', status: 'sent' });
+purgeHandoffs(clearedHash, '2026-11-11T15:00:00Z');
+assert(clearedHash.sends[0].renderedSha256 === null, 'a template A hash is cleared when consumer_cleared_at is already set');
+markHandoff(clearedHash, handoffId(319), 'sent', '2026-11-11T15:00:00Z', { template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'race', providerMessageId: 'm3', sentAt: '2026-11-11T15:00:00Z', status: 'sent' });
+assert(clearedHash.sends.find((row) => row.providerMessageId === 'm3')?.renderedSha256 === null, 'a mark stores a null template A hash when the contact was already cleared');
+const wideAccounts = Array.from({ length: 1001 }, (_, index) => ({
+  id: `acct-${index}`,
+  brand: 'cedargrowth',
+  display_name: `Shop ${index}`,
+  city: null,
+  latitude: null,
+  longitude: null,
+  account_type: 'adult_use_dispensary',
+  request_contact_email: `shop${index}@dispensary.test`,
+  bond_carried_skus: ['vape-1g'],
+  request_opt_out: false,
+}));
+const wideContacts = wideAccounts.map((row) => ({ account_id: row.id, preference: 'do_not_contact' }));
+function pageQuery(rows: Record<string, unknown>[]) {
+  const filters: Array<[string, string]> = [];
+  const builder = {
+    eq(column: string, value: string) {
+      filters.push([column, value]);
+      return builder;
+    },
+    range(from: number, to: number) {
+      const matched = rows.filter((row) => filters.every(([column, value]) => String(row[column] ?? '') === value));
+      return Promise.resolve({ data: matched.slice(from, to + 1) });
+    },
+    then(onfulfilled?: (value: { data: unknown[] }) => unknown) {
+      const matched = rows.filter((row) => filters.every(([column, value]) => String(row[column] ?? '') === value));
+      return Promise.resolve({ data: matched.slice(0, 1000) }).then(onfulfilled);
+    },
+  };
+  return builder;
+}
+const wideDeps = handoffDeps({
+  rpc: async () => ({ data: null }),
+  from(table: string) {
+    return { select: () => pageQuery(table === 'crm_accounts' ? wideAccounts : wideContacts) };
+  },
+} as never);
+const loadedWide = await wideDeps.accounts();
+const pastCap = loadedWide.find((row) => row.id === 'acct-1000');
+const foundPastCap = await wideDeps.accountById('acct-1000');
+assert(loadedWide.length === 1001 && pastCap?.requestContactEmail === 'shop1000@dispensary.test' && pastCap.doNotContact === true && foundPastCap?.id === 'acct-1000' && alertRecipientAllowed('shop1000@dispensary.test', loadedWide.map((row) => row.requestContactEmail || '')) === false, 'account reads page past 1000 rows so a later dispensary address still blocks an alert');
 assert(retryProvider.calls.length === 0 && retryBook.rows[0].status === 'failed', 'a queued handoff older than 24 hours is marked failed without a provider call');
 assert(handoffSql.includes('revoke all on table public.crm_bond_request_handoffs from public, anon, authenticated, service_role') && handoffSql.includes('recipient') === false && handoffSql.includes('set search_path = pg_catalog') && handoffSql.includes('least(p_now, pg_catalog.now())'), 'E2 and privileges: no fee column, no recipient column, and the purge clock is capped');
 assert(/reservation|metrc|coupon|discount/i.test(handoffSrc) === false && /\u2013|\u2014/.test(handoffSrc) === false, 'handoff surfaces do not use reservation, Metrc, coupon, discount, or dash marks');

@@ -377,7 +377,7 @@ export function purgeHandoffs(book: HandoffBook, nowIso: string): { cleared: num
     const outerDue = Date.parse(row.receivedAt) <= cutoff - 14 * 24 * 60 * 60 * 1000;
     const terminal = row.status === 'no_contact' || row.status === 'failed' || row.status === 'failed:no_sender';
     const terminalDue = terminal && Date.parse(row.receivedAt) <= cutoff - 24 * 60 * 60 * 1000;
-    if (sentDue || outerDue || terminalDue) send.renderedSha256 = null;
+    if (sentDue || outerDue || terminalDue || row.consumerClearedAt) send.renderedSha256 = null;
   }
   const dueIds = new Set(book.rows.filter((row) => Date.parse(row.receivedAt) <= cutoff - 365 * 24 * 60 * 60 * 1000).map((row) => row.handoffId));
   const before = book.rows.length;
@@ -451,14 +451,18 @@ export async function deliverMessage(gates: SendGates, message: ProviderMessage 
 export function markHandoff(book: HandoffBook, handoffId: string, status: HandoffStatus, nowIso: string, send: Omit<SendLogRow, 'handoffId'> | null) {
   const row = book.rows.find((item) => item.handoffId === handoffId);
   if (!row) return;
-  if (send?.template === 'A' && send.renderedSha256 && (row.status === 'erased' || row.memberContact == null)) return;
-  if (row.status === 'erased') return;
+  const cleared = row.status === 'erased' || row.memberContact == null || row.consumerClearedAt != null;
+  const stored = send && send.template === 'A' && cleared ? { ...send, renderedSha256: null } : send;
+  if (row.status === 'erased') {
+    if (stored?.template === 'A') book.sends.push({ handoffId, ...stored });
+    return;
+  }
   row.status = status;
   if (status === 'no_contact' || status === 'failed' || status === 'failed:no_sender') {
     // Consumer fields stay until the 24 hour clear. The purge performs that clear.
   }
   book.audits.push({ handoffId, status, recordedAt: nowIso });
-  if (send) book.sends.push({ handoffId, ...send });
+  if (stored) book.sends.push({ handoffId, ...stored });
 }
 
 export function storeList(accounts: AccountView[], sku: string): Record<(typeof STORE_LIST_KEYS)[number], string | number | null>[] {
