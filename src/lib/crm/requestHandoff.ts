@@ -84,7 +84,7 @@ export type SendLogRow = {
   handoffId: string;
   template: 'A' | 'B';
   templateVersion: string;
-  renderedSha256: string;
+  renderedSha256: string | null;
   providerMessageId: string | null;
   sentAt: string | null;
   status: string;
@@ -342,6 +342,9 @@ export function eraseHandoff(book: HandoffBook, handoffId: string, nowIso: strin
   if (row.status === 'erased') return { status: 'erased', withdrawal: false };
   const sent = row.status === 'sent' || book.sends.some((item) => item.handoffId === handoffId && item.template === 'A' && item.status === 'sent');
   clearConsumer(row, nowIso);
+  for (const send of book.sends) {
+    if (send.handoffId === handoffId && send.template === 'A') send.renderedSha256 = null;
+  }
   row.status = 'erased';
   row.eraseRequestedAt = nowIso;
   row.erasedAt = nowIso;
@@ -365,6 +368,16 @@ export function purgeHandoffs(book: HandoffBook, nowIso: string): { cleared: num
       clearConsumer(row, new Date(cutoff).toISOString());
       cleared += 1;
     }
+  }
+  for (const send of book.sends) {
+    if (send.template !== 'A' || send.renderedSha256 == null) continue;
+    const row = book.rows.find((item) => item.handoffId === send.handoffId);
+    if (!row) continue;
+    const sentDue = row.status === 'sent' && send.status === 'sent' && typeof send.sentAt === 'string' && Date.parse(send.sentAt) <= cutoff - 7 * 24 * 60 * 60 * 1000;
+    const outerDue = Date.parse(row.receivedAt) <= cutoff - 14 * 24 * 60 * 60 * 1000;
+    const terminal = row.status === 'no_contact' || row.status === 'failed' || row.status === 'failed:no_sender';
+    const terminalDue = terminal && Date.parse(row.receivedAt) <= cutoff - 24 * 60 * 60 * 1000;
+    if (sentDue || outerDue || terminalDue) send.renderedSha256 = null;
   }
   const dueIds = new Set(book.rows.filter((row) => Date.parse(row.receivedAt) <= cutoff - 365 * 24 * 60 * 60 * 1000).map((row) => row.handoffId));
   const before = book.rows.length;
@@ -437,7 +450,9 @@ export async function deliverMessage(gates: SendGates, message: ProviderMessage 
 
 export function markHandoff(book: HandoffBook, handoffId: string, status: HandoffStatus, nowIso: string, send: Omit<SendLogRow, 'handoffId'> | null) {
   const row = book.rows.find((item) => item.handoffId === handoffId);
-  if (!row || row.status === 'erased') return;
+  if (!row) return;
+  if (send?.template === 'A' && send.renderedSha256 && (row.status === 'erased' || row.memberContact == null)) return;
+  if (row.status === 'erased') return;
   row.status = status;
   if (status === 'no_contact' || status === 'failed' || status === 'failed:no_sender') {
     // Consumer fields stay until the 24 hour clear. The purge performs that clear.
@@ -460,7 +475,7 @@ export function storeList(accounts: AccountView[], sku: string): Record<(typeof 
 export type AdminHandoffSend = {
   template: 'A' | 'B';
   templateVersion: string;
-  renderedSha256: string;
+  renderedSha256: string | null;
   providerMessageId: string | null;
   sentAt: string | null;
   status: string;

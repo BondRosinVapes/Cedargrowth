@@ -4,14 +4,15 @@
 import { getSupabaseServerClient } from '@/lib/supabase';
 import { emptyHandoffBook, SHARE_CONSENT_VERSION, STORE_LIST_KEYS, type AccountView, type HandoffDeps, type HandoffRow, type HandoffStatus, type SendLogRow, type VisitPreference } from './requestHandoff';
 
+type RowQuery = PromiseLike<{ data: unknown[] | null }> & {
+  eq: (column: string, value: string) => RowQuery;
+};
+
 type HandoffDb = {
   rpc: (fn: string, args?: Record<string, unknown>) => PromiseLike<{ data: unknown }>;
   from: (table: string) => {
     select: (columns: string) => {
-      eq: (column: string, value: string) => {
-        eq: (column: string, value: string) => { limit: (count: number) => PromiseLike<{ data: unknown[] | null }> };
-        limit: (count: number) => PromiseLike<{ data: unknown[] | null }>;
-      };
+      eq: (column: string, value: string) => RowQuery;
     };
   };
 };
@@ -125,8 +126,8 @@ function handoffRowFromRecord(data: unknown): HandoffRow | null {
 async function loadAccounts(db: HandoffDb | null, id: string | null): Promise<AccountView[]> {
   if (!db) return [];
   const accounts = db.from('crm_accounts').select('id,brand,display_name,city,latitude,longitude,account_type,request_contact_email,bond_carried_skus,request_opt_out').eq('brand', 'cedargrowth');
-  const { data } = id ? await accounts.eq('id', id).limit(500) : await accounts.limit(500);
-  const contacts = await db.from('crm_contacts').select('account_id,preference').eq('preference', 'do_not_contact').limit(500);
+  const { data } = id ? await accounts.eq('id', id) : await accounts;
+  const contacts = await db.from('crm_contacts').select('account_id,preference').eq('preference', 'do_not_contact');
   const blocked = new Set((contacts.data || []).map((row) => String((row as { account_id: string }).account_id)));
   return ((data || []) as Record<string, unknown>[]).map((row) => ({
     id: String(row.id),

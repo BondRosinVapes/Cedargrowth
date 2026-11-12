@@ -503,6 +503,53 @@ if [ "$CAP_ACCEPTED" != "1" ] || [ "$CAP_RATE" != "7" ] || [ "$CAP_ROWS" != "50"
   exit 1
 fi
 echo 'ok: concurrent requests hold the 50 cap and record one alert'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) values ('a1000000-0000-4000-8000-000000000001', 'aged', now() - interval '8 days', now() - interval '8 days', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent'), ('a1000000-0000-4000-8000-000000000002', 'fresh', now() - interval '1 day', now() - interval '1 day', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent'), ('a1000000-0000-4000-8000-000000000003', 'bee', now() - interval '15 days', now() - interval '15 days', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent'), ('a1000000-0000-4000-8000-000000000004', 'outer', now() - interval '15 days', now() - interval '15 days', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent'); insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, sent_at, status) values ('a1000000-0000-4000-8000-000000000001', 'A', 'v1:6321250367f61781', 'aged-a', now() - interval '8 days', 'sent'), ('a1000000-0000-4000-8000-000000000002', 'A', 'v1:6321250367f61781', 'fresh-a', now() - interval '1 day', 'sent'), ('a1000000-0000-4000-8000-000000000003', 'B', 'v1:56216bdd6a9c3f35', 'kept-b', now() - interval '15 days', 'sent'), ('a1000000-0000-4000-8000-000000000004', 'A', 'v1:6321250367f61781', 'outer-a', now() - interval '1 day', 'sent');" >/dev/null
+HASH_BEFORE=$(sudo -u postgres psql -d "$DB" -tA -c "select string_agg(coalesce(rendered_sha256, 'null'), '|' order by handoff_id::text) from public.crm_bond_request_send_log where handoff_id in ('a1000000-0000-4000-8000-000000000001', 'a1000000-0000-4000-8000-000000000002', 'a1000000-0000-4000-8000-000000000003', 'a1000000-0000-4000-8000-000000000004');")
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now());" >/dev/null
+HASH_AFTER=$(sudo -u postgres psql -d "$DB" -tA -c "select string_agg(coalesce(rendered_sha256, 'null'), '|' order by handoff_id::text) from public.crm_bond_request_send_log where handoff_id in ('a1000000-0000-4000-8000-000000000001', 'a1000000-0000-4000-8000-000000000002', 'a1000000-0000-4000-8000-000000000003', 'a1000000-0000-4000-8000-000000000004');")
+HASH_NULLABLE=$(sudo -u postgres psql -d "$DB" -tA -c "select is_nullable from information_schema.columns where table_schema = 'public' and table_name = 'crm_bond_request_send_log' and column_name = 'rendered_sha256';")
+if [ "$HASH_BEFORE" != "aged-a|fresh-a|kept-b|outer-a" ] || [ "$HASH_AFTER" != "null|fresh-a|kept-b|null" ] || [ "$HASH_NULLABLE" != "YES" ]; then
+  echo "FAIL: template A hash window before=${HASH_BEFORE} after=${HASH_AFTER} nullable=${HASH_NULLABLE}"
+  exit 1
+fi
+echo 'ok: a template A hash is cleared after the 7 day or 14 day window and a template B hash stays'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) values ('a1000000-0000-4000-8000-000000000005', 'fail2', now() - interval '2 days', now() - interval '2 days', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'failed'), ('a1000000-0000-4000-8000-000000000006', 'fail12', now() - interval '12 hours', now() - interval '12 hours', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'failed'); insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, status) values ('a1000000-0000-4000-8000-000000000005', 'A', 'v1:6321250367f61781', 'fail-2d', 'failed'), ('a1000000-0000-4000-8000-000000000006', 'A', 'v1:6321250367f61781', 'fail-12h', 'failed');" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now());" >/dev/null
+FAIL_HASH=$(sudo -u postgres psql -d "$DB" -tA -c "select (select coalesce(rendered_sha256, 'null') || '|' || coalesce(member_contact, 'null') from public.crm_bond_request_send_log s join public.crm_bond_request_handoffs h on h.handoff_id = s.handoff_id where s.handoff_id = 'a1000000-0000-4000-8000-000000000005') || '|' || (select coalesce(rendered_sha256, 'null') || '|' || coalesce(member_contact, 'null') from public.crm_bond_request_send_log s join public.crm_bond_request_handoffs h on h.handoff_id = s.handoff_id where s.handoff_id = 'a1000000-0000-4000-8000-000000000006');")
+if [ "$FAIL_HASH" != "null|null|fail-12h|ada@member.test" ]; then
+  echo "FAIL: failed request hash window ${FAIL_HASH}"
+  exit 1
+fi
+echo 'ok: a failed request at 2 days loses its hash and contact, and one at 12 hours keeps both'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) values ('a1000000-0000-4000-8000-000000000007', 'nocontact', now() - interval '2 days', now() - interval '2 days', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'no_contact'), ('a1000000-0000-4000-8000-000000000008', 'nosender', now() - interval '2 days', now() - interval '2 days', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'failed:no_sender'); insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, status) values ('a1000000-0000-4000-8000-000000000007', 'A', 'v1:6321250367f61781', 'no-contact-hash', 'no_contact'), ('a1000000-0000-4000-8000-000000000008', 'A', 'v1:6321250367f61781', 'no-sender-hash', 'failed:no_sender');" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now());" >/dev/null
+NO_CONTACT=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(s.rendered_sha256, 'null') || '|' || coalesce(h.member_contact, 'null') from public.crm_bond_request_send_log s join public.crm_bond_request_handoffs h on h.handoff_id = s.handoff_id where s.handoff_id = 'a1000000-0000-4000-8000-000000000007';")
+NO_SENDER=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(s.rendered_sha256, 'null') || '|' || coalesce(h.member_contact, 'null') from public.crm_bond_request_send_log s join public.crm_bond_request_handoffs h on h.handoff_id = s.handoff_id where s.handoff_id = 'a1000000-0000-4000-8000-000000000008';")
+if [ "$NO_CONTACT" != "null|null" ]; then
+  echo "FAIL: no_contact hash window ${NO_CONTACT}"
+  exit 1
+fi
+echo 'ok: a no_contact request older than 24 hours loses its hash and contact'
+if [ "$NO_SENDER" != "null|null" ]; then
+  echo "FAIL: failed:no_sender hash window ${NO_SENDER}"
+  exit 1
+fi
+echo 'ok: a failed:no_sender request older than 24 hours loses its hash and contact'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) values ('a1000000-0000-4000-8000-000000000009', 'erase1', now() - interval '1 day', now() - interval '1 day', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent'); insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, sent_at, status) values ('a1000000-0000-4000-8000-000000000009', 'A', 'v1:6321250367f61781', 'erase-hash', now() - interval '1 day', 'sent');" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_erase_bond_request_handoff('a1000000-0000-4000-8000-000000000009'::uuid);" >/dev/null
+ERASED=$(sudo -u postgres psql -d "$DB" -tA -c "select h.status || '|' || coalesce(h.member_contact, 'null') || '|' || coalesce(s.rendered_sha256, 'null') from public.crm_bond_request_handoffs h join public.crm_bond_request_send_log s on s.handoff_id = h.handoff_id where h.handoff_id = 'a1000000-0000-4000-8000-000000000009' and s.template = 'A';")
+if [ "$ERASED" != "erased|null|null" ]; then
+  echo "FAIL: erase kept the template A hash ${ERASED}"
+  exit 1
+fi
+echo 'ok: erase clears the template A hash with the contact on a 1 day old sent row'
+REMARK=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_mark_bond_request_handoff('a1000000-0000-4000-8000-000000000009'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'again', 'm2')->>'ok';")
+REMARK_HASH=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-000000000009' and rendered_sha256 = 'again';")
+if [ "$REMARK" != "false" ] || [ "$REMARK_HASH" != "0" ]; then
+  echo "FAIL: mark stored a template A hash after erase ok=${REMARK} rows=${REMARK_HASH}"
+  exit 1
+fi
+echo 'ok: a mark cannot store a template A hash after the contact is cleared'
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update public.crm_bond_request_handoffs set received_at = now() - interval '13 months' where handoff_id = '82828282-8282-4282-8282-828282828282'; insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, status) values ('82828282-8282-4282-8282-828282828282', 'A', 'v1:6321250367f61781', 'abc', 'sent'); insert into public.crm_bond_request_audit (handoff_id, status) values ('82828282-8282-4282-8282-828282828282', 'queued'); insert into public.crm_bond_request_alerts (dispensary_account_id, accepted_count, created_at) values ('${ACCT}'::uuid, 50, now() - interval '13 months'), ('${ACCT}'::uuid, 50, now());" >/dev/null
 PURGE_HAND=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now())->>'purged';")
 LEFT_HAND=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_bond_request_handoffs where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_send_log where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_audit where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_handoffs where handoff_id = '83838383-8383-4383-8383-838383838383');")
@@ -512,6 +559,13 @@ if [ "$PURGE_HAND" != "1" ] || [ "$LEFT_HAND" != "0,0,0,1" ] || [ "$ALERT_LEFT" 
   exit 1
 fi
 echo 'ok: the 12 month purge removes the handoff, the send log, the audit rows, and old alerts'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-rollback-0140.sql" >/tmp/crm-0140-rollback.log
+RESTORED=$(sudo -u postgres psql -d "$DB" -tA -c "select position('rendered_sha256 = null' in pg_get_functiondef('public.crm_purge_bond_request_handoffs(timestamptz)'::regprocedure)) = 0;")
+if [ "$RESTORED" != "t" ]; then
+  echo "FAIL: 0140 rollback did not restore the 0139 purge function"
+  exit 1
+fi
+echo 'ok: 0140 rollback restores the 0139 purge function'
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-rollback-0139.sql" >/tmp/crm-0139-rollback.log
 GONE=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relname like 'crm_bond_request_%';")
 if [ "$GONE" != "0" ]; then
@@ -621,6 +675,20 @@ if [ "$PRE_CODE" -eq 0 ] || ! grep -q '0138 is not applied' /tmp/crm-0139-preche
 fi
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${PRE};" >/dev/null
 echo 'ok: 0139 refuses to apply until 0138 is present'
+PRE14=crm_0140_without_0139
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database if exists ${PRE14};" >/dev/null
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "create database ${PRE14};" >/dev/null
+set +e
+sudo -u postgres psql -d "$PRE14" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-apply-0140.sql" >/tmp/crm-0140-precheck.log 2>&1
+PRE14_CODE=$?
+set -e
+PRE14_LEFT=$(sudo -u postgres psql -d "$PRE14" -tA -c "select to_regclass('public.crm_bond_request_send_log') is null;")
+if [ "$PRE14_CODE" -eq 0 ] || ! grep -q '0139 is not applied' /tmp/crm-0140-precheck.log || [ "$PRE14_LEFT" != "t" ]; then
+  echo "FAIL: 0140 applied without 0139 code=${PRE14_CODE} left=${PRE14_LEFT}"
+  exit 1
+fi
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${PRE14};" >/dev/null
+echo 'ok: 0140 refuses to apply until 0139 is present'
 
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${UP};" >/dev/null
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${BAD};" >/dev/null
