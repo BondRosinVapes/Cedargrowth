@@ -1,0 +1,24 @@
+Hello {dispensary_name} team,
+
+A Bond Haus member asked us to pass this product request to your store. It is a request only. It is not an order, nothing has been paid, and your store decides whether and how to respond.
+
+Member first name: {member_first_name}
+How to reach them: {member_contact}
+Requested: {item_lines}
+Preferred time to visit: {visit_preference}
+
+If you can help, please contact the member directly. Your store confirms availability and price, checks ID at the counter as usual, and takes payment in store. Cedargrowth LLC sets no retail price and makes no promise that the product is in stock.
+
+The member told Bond they are 21 or older. That is a self attestation, not an ID check.
+
+The member agreed only to be contacted by your store about this request. Please do not add these details to a marketing list unless the member asks you to.
+
+Cedargrowth LLC deletes the member's details from its customer system within 14 days. If the member withdraws the request, we will email you so you can delete your copy.
+
+Your store pays Cedargrowth LLC nothing for this request and owes nothing in return. To stop receiving these requests, reply to this email and we will stop.
+
+For use only by persons 21 years of age and older. Keep out of reach of children and pets. If someone accidentally consumes cannabis, contact the Poison Center. Consume responsibly.
+There may be health risks associated with consumption of this product.
+Concerned about your cannabis use? Contact the New York State HOPEline by texting HOPENY (467369), calling 1-877-8-HOPENY, or visiting oasas.ny.gov/hopeline.
+Cedargrowth LLC OCM-PROC-25-000329
+{postal_address}

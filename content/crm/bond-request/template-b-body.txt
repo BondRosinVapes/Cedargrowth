@@ -1,0 +1,6 @@
+Hello {dispensary_name} team,
+
+The Bond Haus member who sent you a product request on {request_date} has withdrawn it. Please delete the member's name and contact from your records for that request. No reply is needed.
+
+Cedargrowth LLC OCM-PROC-25-000329
+{postal_address}

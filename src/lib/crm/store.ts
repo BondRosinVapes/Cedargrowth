@@ -27,6 +27,7 @@ import { confirmationFor, currentReleased, defaultExpiry, hashReorderToken, link
 import { knownEmailEvent, type EmailEvent } from './emailStatus';
 import { intakeTestMarker, type IntakeLead } from './intake';
 import type { SupplierLead } from './supplierIntake';
+import type { FailedBondSend } from './requestHandoff';
 import { AGENT_ACTOR, AGENT_BRAND, applyAgentOps, type AgentOp, type AgentRowFailure } from './agentIntake';
 import { forecastDealFilter, readForecastInputs, type ForecastWindow } from './forecastRead';
 import { wonMergeOnSave, type ContactPrior, type MergeRow } from './distributionMerge';
@@ -74,6 +75,9 @@ export type Account = {
   geocodedAt?: string | null;
   distributor: Distributor | null;
   distributorAccountRef: string | null;
+  requestContactEmail?: string | null;
+  bondCarriedSkus?: string[];
+  requestOptOut?: boolean;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
@@ -378,6 +382,7 @@ export interface CrmStore {
   upsertDismissal(brand: CrmBrand, repActor: string, actionKey: string, until: string): Promise<StoreResult<{ id: string; brand: CrmBrand; repActor: string; actionKey: string; until: string }>>;
   receiveBondInquiry(lead: IntakeLead, receivedAt: string): Promise<StoreResult<{ duplicate: boolean }>>;
   receiveSupplierInquiry(lead: SupplierLead, receivedAt: string): Promise<StoreResult<{ duplicate: boolean }>>;
+  listFailedBondSends(): Promise<StoreResult<FailedBondSend[]>>;
   deleteBondInquiry(inquiryId: string): Promise<StoreResult<{ deleted: boolean }>>;
   purgeBondInquiries(nowIso: string): Promise<StoreResult<{ purged: number }>>;
   receiveAgentRecords(input: { requestId: string; receivedAt: string; ops: AgentOp[] }): Promise<StoreResult<{ code: 'replay' } | { code: 'rate'; retryAfter: number } | { code: 'ok'; created: { accounts: number; contacts: number; notes: number }; skipped: { index: number; reason: string }[]; failed: AgentRowFailure[] }>>;
@@ -392,7 +397,7 @@ export interface CrmStore {
   undoMerge(brand: CrmBrand, mergeId: string, actor: string, now: string): Promise<StoreResult<{ merge: MergeRow; refused: string[]; reassigned: string[] }>>;
 }
 
-const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,street,state,postal_code,consent_version,consent_received_at,intake_submitted_at,ocm_status,record_marker,source_inquiry_id,latitude,longitude,geocode_source,geocode_match,geocoded_at,created_at,updated_at,created_by,updated_by';
+const ACCOUNT_COLS = 'id,public_id,brand,display_name,status,city,county,notes,license_ref,facility_ref,license_jurisdiction,license_expiry,assigned_rep,account_type,lead_source,distributor,distributor_account_ref,street,state,postal_code,consent_version,consent_received_at,intake_submitted_at,ocm_status,record_marker,source_inquiry_id,latitude,longitude,geocode_source,geocode_match,geocoded_at,request_contact_email,bond_carried_skus,request_opt_out,created_at,updated_at,created_by,updated_by';
 const ORDER_COLS = 'id,public_id,brand,account_id,distributor,order_ref,retailer_name,ordered_on,delivered_on,order_status,invoice_cents,retailer_payment_status,retailer_paid_on,payout_status,payout_cents,payout_on,opportunity_id,source,imported_at';
 const CONTACT_COLS = 'id,public_id,brand,account_id,name,title,email,phone,notes,preference,created_at,updated_at';
 const OPP_COLS = 'id,public_id,brand,account_id,name,stage,forecast_cents,expected_close_on,notes,loss_reason,next_action,next_action_on,product_line,quantity_units,updated_at';
@@ -475,6 +480,9 @@ function mapAccount(row: Record<string, unknown>): Account | null {
     geocodedAt: row.geocoded_at ? String(row.geocoded_at) : null,
     distributor: (DISTRIBUTORS as readonly string[]).includes(String(row.distributor)) ? (row.distributor as Distributor) : null,
     distributorAccountRef: row.distributor_account_ref ? String(row.distributor_account_ref) : null,
+    requestContactEmail: row.request_contact_email ? String(row.request_contact_email) : null,
+    bondCarriedSkus: Array.isArray(row.bond_carried_skus) ? row.bond_carried_skus.map(String) : [],
+    requestOptOut: row.request_opt_out === true,
     createdAt: String(row.created_at ?? ''),
     updatedAt: String(row.updated_at ?? ''),
     createdBy: String(row.created_by ?? ''),
@@ -1816,6 +1824,28 @@ class SupabaseCrmStore implements CrmStore {
     const payload = data as { ok?: boolean; duplicate?: boolean } | null;
     if (error || !payload || payload.ok !== true) return { state: 'unavailable' as const };
     return { state: 'ok' as const, value: { duplicate: payload.duplicate === true } };
+  }
+
+  async listFailedBondSends() {
+    const { data, error } = await this.db.rpc('crm_bond_request_failed_sends');
+    if (classify(error)) return { state: classify(error) as 'absent' | 'unavailable' };
+    if (error || !Array.isArray(data)) return { state: 'unavailable' as const };
+    const value: FailedBondSend[] = data.flatMap((row) => {
+      if (!row || typeof row !== 'object') return [];
+      const record = row as Record<string, unknown>;
+      if (record.template !== 'B' || record.status !== 'failed' || typeof record.handoff_id !== 'string') return [];
+      if (typeof record.template_version !== 'string' || typeof record.rendered_sha256 !== 'string') return [];
+      return [{
+        handoffId: record.handoff_id,
+        template: 'B' as const,
+        templateVersion: record.template_version,
+        renderedSha256: record.rendered_sha256,
+        providerMessageId: record.provider_message_id == null ? null : String(record.provider_message_id),
+        sentAt: record.sent_at == null ? null : String(record.sent_at),
+        status: 'failed' as const,
+      }];
+    });
+    return { state: 'ok' as const, value };
   }
 
   async deleteBondInquiry(inquiryId: string) {

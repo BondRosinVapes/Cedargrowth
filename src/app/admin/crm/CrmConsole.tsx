@@ -452,6 +452,7 @@ export function CrmConsole({
         <div className="flex flex-wrap items-end justify-between gap-4">
           <h1 className="font-display text-heading-m-m md:text-heading-m text-primary">{WINGS.find((item) => item.id === wing)?.label}</h1>
           <p className="font-mono text-specimen text-tertiary">{roleLabel} {sessionLabel}</p>
+          {roleLabel !== 'Sales' ? <Link href="/admin/crm/failed-sends" className="font-mono text-specimen uppercase text-primary">Failed withdrawal sends</Link> : null}
         </div>
         <div className="flex flex-wrap gap-2" role="group" aria-label="Brand">
           {brands.map((item) => (
@@ -539,6 +540,12 @@ export function CrmConsole({
               <p className="text-body-m text-secondary">License reference: {selected.licenseRef || 'None stored'}. A stored reference is not a validity certification.</p>
               <p className="text-body-m text-secondary">Facility reference: {selected.facilityRef || 'None stored'}. This is not a certified facility record.</p>
               <p className="text-body-m text-secondary">Account type: {selected.accountType ? ACCOUNT_TYPE_LABELS[selected.accountType] : 'Not set'}. Lead source: {selected.leadSource ? LEAD_SOURCE_LABELS[selected.leadSource] : 'Not set'}.</p>
+              {roleLabel !== 'Sales' && selected.accountType === 'adult_use_dispensary' ? (
+                <form onSubmit={(event) => { event.preventDefault(); const form = new FormData(event.currentTarget); void crmFetch(`/api/admin/crm/accounts/${selected.id}/request-email`, { method: 'POST', body: JSON.stringify({ brand, email: String(form.get('email') || '') }) }).then((res) => setNotice(res.body.ok === true ? 'Request contact email stored.' : String(res.body.reason || 'Request contact email was not stored.'))); }} className="flex flex-col gap-2">
+                  <Field name="email" label="Request contact email" />
+                  <button type="submit" className="border border-ink px-4 py-2 font-mono text-specimen uppercase">Save request contact email</button>
+                </form>
+              ) : null}
               <p className="text-body-m text-secondary">County: {selected.county || 'Not set'}. Region: {regionForCounty(selected.county)}.</p>
               <p className="text-body-m text-secondary">Assigned rep: {selected.assignedRep || 'None'}. Assignment does not grant a login or a role.</p>
               <p className="text-body-m text-secondary">Distributor: {selected.distributor ? DISTRIBUTOR_LABELS[selected.distributor] : 'Not set'}. Distributor account ID: {selected.distributorAccountRef || 'None stored'}.</p>

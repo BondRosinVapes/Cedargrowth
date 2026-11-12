@@ -55,6 +55,7 @@ awk -v root="$ROOT" '
     sub(/^\\ir \.\.\//, "\\ir " root "/")
     if (orig ~ /0138_crm_card_and_supplier_intake\.sql$/) {
       print "alter default privileges for role postgres in schema public grant all on tables to service_role, anon, authenticated;"
+      print "alter default privileges for role postgres in schema public grant all on functions to service_role, anon, authenticated;"
     }
     print
     next
@@ -385,6 +386,140 @@ if [ "$KEPT_BUCKET" != "1,1,0" ]; then
 fi
 echo 'ok: rollback leaves the photo bucket and its objects in place'
 
+HAND_PRIV=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace cross join lateral aclexplode(c.relacl) e left join pg_roles r on r.oid = e.grantee where n.nspname = 'public' and c.relname like 'crm_bond_request_%' and (e.grantee = 0 or r.rolname in ('anon', 'authenticated', 'service_role'));")
+HAND_BITS=$(sudo -u postgres psql -d "$DB" -tA -c "select has_table_privilege('service_role', 'public.crm_bond_request_handoffs', 'select')::text || ',' || has_table_privilege('service_role', 'public.crm_bond_request_handoffs', 'insert')::text || ',' || has_table_privilege('service_role', 'public.crm_bond_request_handoffs', 'update')::text || ',' || has_table_privilege('service_role', 'public.crm_bond_request_handoffs', 'delete')::text || ',' || has_table_privilege('anon', 'public.crm_bond_request_handoffs', 'select')::text || ',' || has_function_privilege('anon', 'public.crm_receive_bond_request_handoff(jsonb)', 'execute')::text || ',' || has_function_privilege('service_role', 'public.crm_receive_bond_request_handoff(jsonb)', 'execute')::text;")
+HAND_COLS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from information_schema.columns where table_schema = 'public' and table_name in ('crm_bond_request_handoffs', 'crm_bond_request_send_log') and column_name ~* 'fee|price|commission|credit|target|recipient';")
+if [ "$HAND_PRIV" != "0" ] || [ "$HAND_BITS" != "false,false,false,false,false,false,true" ] || [ "$HAND_COLS" != "0" ]; then
+  echo "FAIL: handoff privileges priv=${HAND_PRIV} bits=${HAND_BITS} cols=${HAND_COLS}"
+  exit 1
+fi
+echo 'ok: handoff tables grant nothing direct under default privileges'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_accounts (brand, display_name, status, created_by, updated_by, account_type, bond_carried_skus, request_contact_email) values ('cedargrowth', 'TEST ONLY Request Shop', 'active', 'test-only', 'test-only', 'adult_use_dispensary', array['vape-1g'], 'shop@request.test');" >/dev/null
+ACCT=$(sudo -u postgres psql -d "$DB" -tA -c "select id from public.crm_accounts where display_name = 'TEST ONLY Request Shop';")
+expect_fail 'handoff direct update' "set role service_role; update public.crm_bond_request_handoffs set submitted_at = now();"
+BAD_CONSENT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','81818181-8181-4181-8181-818181818181','bond_request_id','b1','submitted_at','2026-11-11T14:00:00Z','dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:46652a17994f78d1','source','bond-haus'))->>'result';")
+OK_HAND=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','82828282-8282-4282-8282-828282828282','bond_request_id','b2','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+DUP_HAND=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','82828282-8282-4282-8282-828282828282','bond_request_id','b2','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+ADMIN_GONE=$(sudo -u postgres psql -d "$DB" -tA -c "select to_regprocedure('public.crm_bond_request_admin_view(text)') is null;")
+HAND_ONE=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_handoffs where handoff_id = '82828282-8282-4282-8282-828282828282';")
+if [ "$BAD_CONSENT" != "rejected:consent" ] || [ "$OK_HAND" != "accepted" ] || [ "$DUP_HAND" != "duplicate" ] || [ "$ADMIN_GONE" != "t" ] || [ "$HAND_ONE" != "1" ]; then
+  echo "FAIL: handoff sql consent=${BAD_CONSENT} ok=${OK_HAND} dup=${DUP_HAND} admin_gone=${ADMIN_GONE} rows=${HAND_ONE} acct=${ACCT}"
+  exit 1
+fi
+echo 'ok: handoff sql rejects the other consent versions, replays one row, and has no role-taking admin view'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_mark_bond_request_handoff('82828282-8282-4282-8282-828282828282'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'abc', 'm1');" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_erase_bond_request_handoff('82828282-8282-4282-8282-828282828282'::uuid);" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_mark_bond_request_handoff('82828282-8282-4282-8282-828282828282'::uuid, 'failed', 'B', 'v1:56216bdd6a9c3f35', 'def', null);" >/dev/null
+B_FAIL=$(sudo -u postgres psql -d "$DB" -tA -c "select (select status from public.crm_bond_request_handoffs where handoff_id = '82828282-8282-4282-8282-828282828282') || '|' || (select template || ':' || status || ':' || coalesce(provider_message_id, '') from public.crm_bond_request_send_log where handoff_id = '82828282-8282-4282-8282-828282828282' and template = 'B') || '|' || (select template || ':' || status from public.crm_bond_request_failed_sends() where handoff_id = '82828282-8282-4282-8282-828282828282');")
+if [ "$B_FAIL" = "${B_FAIL#erased|B:failed:|}" ] || printf '%s' "$B_FAIL" | grep -q 'ada@member.test'; then
+  echo "FAIL: withdrawal failure log ${B_FAIL}"
+  exit 1
+fi
+echo 'ok: a failed withdrawal email is in the owner view and keeps no consumer fields'
+RACE_SQL="select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','83838383-8383-4383-8383-838383838383','bond_request_id','race','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';"
+sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "$RACE_SQL" >/tmp/crm-handoff-race-a.txt &
+sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "$RACE_SQL" >/tmp/crm-handoff-race-b.txt &
+wait || true
+RACE_A=$(tr -d '[:space:]' < /tmp/crm-handoff-race-a.txt)
+RACE_B=$(tr -d '[:space:]' < /tmp/crm-handoff-race-b.txt)
+RACE_ROWS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_handoffs where handoff_id = '83838383-8383-4383-8383-838383838383';")
+RACE_SORTED=$(printf '%s\n%s\n' "$RACE_A" "$RACE_B" | sort | tr '\n' ',')
+if [ "$RACE_SORTED" != "accepted,duplicate," ] || [ "$RACE_ROWS" != "1" ]; then
+  echo "FAIL: concurrent handoff replay ${RACE_A} ${RACE_B} rows=${RACE_ROWS}"
+  exit 1
+fi
+echo 'ok: a concurrent handoff replay keeps one row and returns duplicate'
+CLOCK_OLD=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','83838383-8383-4383-8383-838383838383','bond_request_id','race','submitted_at', now() - interval '25 hours', 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+CLOCK_ALMOST=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','83838383-8383-4383-8383-838383838383','bond_request_id','race','submitted_at', now() - interval '23 hours 59 minutes', 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+CLOCK_NEW=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','84848484-8484-4484-8484-848484848484','bond_request_id','late','submitted_at', now() - interval '25 hours', 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+CLOCK_ROWS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_handoffs where handoff_id = '83838383-8383-4383-8383-838383838383';")
+if [ "$CLOCK_OLD" != "duplicate" ] || [ "$CLOCK_ALMOST" != "duplicate" ] || [ "$CLOCK_NEW" != "rejected:clock" ] || [ "$CLOCK_ROWS" != "1" ]; then
+  echo "FAIL: handoff duplicate before clock old=${CLOCK_OLD} almost=${CLOCK_ALMOST} new=${CLOCK_NEW} rows=${CLOCK_ROWS}"
+  exit 1
+fi
+echo 'ok: a known handoff id is a duplicate before the 24 hour clock check'
+ROWS_BEFORE=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_handoffs;")
+PRICE_ITEM=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','85858585-8585-4585-8585-858585858585','bond_request_id','price','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1,'price',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+NOTE_ITEM=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','86868686-8686-4686-8686-868686868686','bond_request_id','note','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1,'note','later')),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+HUGE_QTY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','87878787-8787-4787-8787-878787878787','bond_request_id','huge','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty','999999999999')),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+STR_QTY_1=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','89898989-8989-4898-8898-898989898989','bond_request_id','str1','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty','1'::text)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+STR_QTY_5=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','90909090-9090-4909-8909-909090909090','bond_request_id','str5','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty','5'::text)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+MISS_ID=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('bond_request_id','missing','submitted_at', now(), 'dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+MISS_AT=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','88888888-8888-4888-8888-888888888888','bond_request_id','missing','dispensary_ref','${ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+ROWS_AFTER=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_handoffs;")
+if [ "$PRICE_ITEM" != "rejected:items" ] || [ "$NOTE_ITEM" != "rejected:items" ] || [ "$HUGE_QTY" != "rejected:items" ] || [ "$STR_QTY_1" != "rejected:items" ] || [ "$STR_QTY_5" != "rejected:items" ] || [ "$MISS_ID" != "rejected:schema" ] || [ "$MISS_AT" != "rejected:schema" ] || [ "$ROWS_BEFORE" != "$ROWS_AFTER" ]; then
+  echo "FAIL: handoff item or schema price=${PRICE_ITEM} note=${NOTE_ITEM} huge=${HUGE_QTY} str1=${STR_QTY_1} str5=${STR_QTY_5} id=${MISS_ID} at=${MISS_AT} rows=${ROWS_BEFORE}/${ROWS_AFTER}"
+  exit 1
+fi
+echo 'ok: a price key, a note key, a string qty, an overflowing qty, or a missing id or time stores nothing'
+SKU_NULL=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','95959595-9595-4959-8959-959595959595','bond_request_id','skunull','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":null,\"qty\":1}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+SKU_NUM=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','96969696-9696-4969-8969-969696969696','bond_request_id','skunum','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":1,\"qty\":1}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+SKU_EMPTY=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','97979797-9797-4979-8979-979797979797','bond_request_id','skuempty','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":\"\",\"qty\":1}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+SKU_LEFT=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_handoffs where handoff_id in ('95959595-9595-4959-8959-959595959595', '96969696-9696-4969-8969-969696969696', '97979797-9797-4979-8979-979797979797');")
+if [ "$SKU_NULL" != "rejected:items" ] || [ "$SKU_NUM" != "rejected:items" ] || [ "$SKU_EMPTY" != "rejected:items" ] || [ "$SKU_LEFT" != "0" ]; then
+  echo "FAIL: sku shape null=${SKU_NULL} number=${SKU_NUM} empty=${SKU_EMPTY} left=${SKU_LEFT}"
+  exit 1
+fi
+echo 'ok: a null sku, a number sku, and an empty sku are rejected and store nothing'
+QTY_ONE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','91919191-9191-4919-8919-919191919191','bond_request_id','one','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":\"vape-1g\",\"qty\":1.0}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+QTY_FIVE=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','92929292-9292-4929-8929-929292929292','bond_request_id','five','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":\"vape-1g\",\"qty\":5.0}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+QTY_STORED=$(sudo -u postgres psql -d "$DB" -tA -c "select (select items::text from public.crm_bond_request_handoffs where handoff_id = '91919191-9191-4919-8919-919191919191') || '|' || (select items::text from public.crm_bond_request_handoffs where handoff_id = '92929292-9292-4929-8929-929292929292');")
+QTY_HALF=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','93939393-9393-4939-8939-939393939393','bond_request_id','half','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":\"vape-1g\",\"qty\":1.5}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+QTY_SIX=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','94949494-9494-4949-8949-949494949494','bond_request_id','six','submitted_at', now(), 'dispensary_ref','${ACCT}','items', '[{\"sku\":\"vape-1g\",\"qty\":6.0}]'::jsonb,'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';")
+QTY_LEFT=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_handoffs where handoff_id in ('93939393-9393-4939-8939-939393939393', '94949494-9494-4949-8949-949494949494');")
+if [ "$QTY_ONE" != "accepted" ] || [ "$QTY_FIVE" != "accepted" ] || [ "$QTY_STORED" != '[{"qty": 1, "sku": "vape-1g"}]|[{"qty": 5, "sku": "vape-1g"}]' ] || [ "$QTY_HALF" != "rejected:items" ] || [ "$QTY_SIX" != "rejected:items" ] || [ "$QTY_LEFT" != "0" ]; then
+  echo "FAIL: whole number qty one=${QTY_ONE} five=${QTY_FIVE} stored=${QTY_STORED} half=${QTY_HALF} six=${QTY_SIX} left=${QTY_LEFT}"
+  exit 1
+fi
+echo 'ok: 1.0 and 5.0 are stored as integers, and 1.5 and 6.0 are rejected'
+FAIL_LIST=$(sudo -u postgres psql -d "$DB" -tA -c "select handoff_id::text || '|' || template || '|' || status from public.crm_bond_request_failed_sends();")
+if [ "$FAIL_LIST" != "82828282-8282-4282-8282-828282828282|B|failed" ] || printf '%s' "$FAIL_LIST" | grep -q 'ada@member.test'; then
+  echo "FAIL: failed send list ${FAIL_LIST}"
+  exit 1
+fi
+echo 'ok: the failed send function lists the withdrawal failure and no consumer fields'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_accounts (brand, display_name, status, created_by, updated_by, account_type, bond_carried_skus, request_contact_email) select 'cedargrowth', 'TEST ONLY Picker ' || lpad(g::text, 4, '0'), 'active', 'test-only', 'test-only', 'adult_use_dispensary', array['vape-1g'], case when g = 503 then null else 'shop@request.test' end from generate_series(1, 503) g;" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_contacts (brand, account_id, name, notes, created_by, updated_by, preference) select 'cedargrowth', id, 'Buyer', '', 'test-only', 'test-only', 'do_not_contact' from public.crm_accounts where display_name = 'TEST ONLY Picker 0502';" >/dev/null
+PICKER=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*)::text || '|' || (select count(*) from public.crm_bond_request_store_list('vape-1g') where display_name in ('TEST ONLY Picker 0502', 'TEST ONLY Picker 0503'))::text from public.crm_bond_request_store_list('vape-1g') s where s.display_name like 'TEST ONLY Picker %';")
+if [ "$PICKER" != "501|0" ]; then
+  echo "FAIL: store list past 500 ${PICKER}"
+  exit 1
+fi
+echo 'ok: the store list returns more than 500 rows and leaves out a do_not_contact store and a store with no request email'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_accounts (brand, display_name, status, created_by, updated_by, account_type, bond_carried_skus, request_contact_email) values ('cedargrowth', 'TEST ONLY Cap Shop', 'active', 'test-only', 'test-only', 'adult_use_dispensary', array['vape-1g'], 'shop@request.test');" >/dev/null
+CAP_ACCT=$(sudo -u postgres psql -d "$DB" -tA -c "select id from public.crm_accounts where display_name = 'TEST ONLY Cap Shop';")
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) select ('00000000-0000-4000-8000-' || lpad(g::text, 12, '0'))::uuid, 'cap-' || g, now(), now(), '${CAP_ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'queued' from generate_series(1, 49) g;" >/dev/null
+for n in 1 2 3 4 5 6 7 8; do
+  HID=$(printf '10000000-0000-4000-8000-%012d' "$n")
+  sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_receive_bond_request_handoff(jsonb_build_object('handoff_id','${HID}','bond_request_id','cap-${n}','submitted_at', now(), 'dispensary_ref','${CAP_ACCT}','items', jsonb_build_array(jsonb_build_object('sku','vape-1g','qty',1)),'member_first_name','Ada','member_contact','ada@member.test','share_consent_version','v1:898aa08ccea983db','source','bond-haus'))->>'result';" >"/tmp/crm-cap-${n}.txt" &
+done
+wait || true
+CAP_ACCEPTED=$(cat /tmp/crm-cap-*.txt | grep -c '^accepted$' || true)
+CAP_RATE=$(cat /tmp/crm-cap-*.txt | grep -c '^rejected:rate$' || true)
+CAP_ROWS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_handoffs where dispensary_account_id = '${CAP_ACCT}';")
+CAP_ALERTS=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from public.crm_bond_request_alerts where dispensary_account_id = '${CAP_ACCT}';")
+if [ "$CAP_ACCEPTED" != "1" ] || [ "$CAP_RATE" != "7" ] || [ "$CAP_ROWS" != "50" ] || [ "$CAP_ALERTS" != "1" ]; then
+  echo "FAIL: cap race accepted=${CAP_ACCEPTED} rate=${CAP_RATE} rows=${CAP_ROWS} alerts=${CAP_ALERTS}"
+  exit 1
+fi
+echo 'ok: concurrent requests hold the 50 cap and record one alert'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "update public.crm_bond_request_handoffs set received_at = now() - interval '13 months' where handoff_id = '82828282-8282-4282-8282-828282828282'; insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, status) values ('82828282-8282-4282-8282-828282828282', 'A', 'v1:6321250367f61781', 'abc', 'sent'); insert into public.crm_bond_request_audit (handoff_id, status) values ('82828282-8282-4282-8282-828282828282', 'queued'); insert into public.crm_bond_request_alerts (dispensary_account_id, accepted_count, created_at) values ('${ACCT}'::uuid, 50, now() - interval '13 months'), ('${ACCT}'::uuid, 50, now());" >/dev/null
+PURGE_HAND=$(sudo -u postgres psql -d "$DB" -tA -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now())->>'purged';")
+LEFT_HAND=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_bond_request_handoffs where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_send_log where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_audit where handoff_id = '82828282-8282-4282-8282-828282828282') || ',' || (select count(*) from public.crm_bond_request_handoffs where handoff_id = '83838383-8383-4383-8383-838383838383');")
+ALERT_LEFT=$(sudo -u postgres psql -d "$DB" -tA -c "select (select count(*) from public.crm_bond_request_alerts where created_at <= now() - interval '12 months') || ',' || (select count(*) from public.crm_bond_request_alerts where dispensary_account_id = '${ACCT}' and created_at > now() - interval '12 months');")
+if [ "$PURGE_HAND" != "1" ] || [ "$LEFT_HAND" != "0,0,0,1" ] || [ "$ALERT_LEFT" != "0,1" ]; then
+  echo "FAIL: handoff purge ${PURGE_HAND} ${LEFT_HAND} alerts=${ALERT_LEFT}"
+  exit 1
+fi
+echo 'ok: the 12 month purge removes the handoff, the send log, the audit rows, and old alerts'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-rollback-0139.sql" >/tmp/crm-0139-rollback.log
+GONE=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relname like 'crm_bond_request_%';")
+if [ "$GONE" != "0" ]; then
+  echo "FAIL: 0139 rollback left ${GONE} relations"
+  exit 1
+fi
+echo 'ok: 0139 rollback removes the handoff tables'
+
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${DB};" >/dev/null
 
 UP=crm_suite_upgrade
@@ -471,6 +606,21 @@ if [ "$BAD_STATE" != "0,not-a-stage" ]; then
   exit 1
 fi
 echo 'ok: unsupported stage aborted the atomic upgrade and left the row unchanged'
+
+PRE=crm_0139_without_0138
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database if exists ${PRE};" >/dev/null
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "create database ${PRE};" >/dev/null
+set +e
+sudo -u postgres psql -d "$PRE" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/supabase/migrations/0139_crm_bond_request_handoff.sql" >/tmp/crm-0139-precheck.log 2>&1
+PRE_CODE=$?
+set -e
+PRE_LEFT=$(sudo -u postgres psql -d "$PRE" -tA -c "select to_regclass('public.crm_bond_request_handoffs') is null;")
+if [ "$PRE_CODE" -eq 0 ] || ! grep -q '0138 is not applied' /tmp/crm-0139-precheck.log || [ "$PRE_LEFT" != "t" ]; then
+  echo "FAIL: 0139 applied without 0138 code=${PRE_CODE} left=${PRE_LEFT}"
+  exit 1
+fi
+sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${PRE};" >/dev/null
+echo 'ok: 0139 refuses to apply until 0138 is present'
 
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${UP};" >/dev/null
 sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c "drop database ${BAD};" >/dev/null
