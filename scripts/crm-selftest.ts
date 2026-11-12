@@ -2643,6 +2643,14 @@ clearedHash.rows.push(clearedRow);
 clearedHash.sends.push({ handoffId: handoffId(319), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'still-there', providerMessageId: 'm', sentAt: '2026-11-10T15:00:00Z', status: 'sent' });
 purgeHandoffs(clearedHash, '2026-11-11T15:00:00Z');
 assert(clearedHash.sends[0].renderedSha256 === null, 'a template A hash is cleared when consumer_cleared_at is already set');
+const twoBook = emptyHandoffBook();
+twoBook.rows.push(hashRow(handoffId(323), '2026-11-03T15:00:00Z'));
+twoBook.sends.push(
+  { handoffId: handoffId(323), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'old-a', providerMessageId: 'two-old', sentAt: '2026-11-03T15:00:00Z', status: 'sent' },
+  { handoffId: handoffId(323), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'new-a', providerMessageId: 'two-new', sentAt: '2026-11-10T15:00:00Z', status: 'sent' },
+);
+purgeHandoffs(twoBook, '2026-11-11T15:00:00Z');
+assert(twoBook.sends.every((row) => row.renderedSha256 === null), 'one purge nulls both template A hashes on a handoff it clears');
 markHandoff(clearedHash, handoffId(319), 'sent', '2026-11-11T15:00:00Z', { template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'race', providerMessageId: 'm3', sentAt: '2026-11-11T15:00:00Z', status: 'sent' });
 assert(clearedHash.sends.find((row) => row.providerMessageId === 'm3')?.renderedSha256 === null, 'a mark stores a null template A hash when the contact was already cleared');
 const wideAccounts = Array.from({ length: 1001 }, (_, index) => ({

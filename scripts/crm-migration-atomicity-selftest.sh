@@ -628,6 +628,14 @@ if [ "$CLEARED_HASH" != "null" ]; then
   exit 1
 fi
 echo 'ok: a template A hash is cleared when consumer_cleared_at is already set'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) values ('a1000000-0000-4000-8000-000000000012', 'two-a', now() - interval '8 days', now() - interval '8 days', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent'); insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, sent_at, status, provider_message_id) values ('a1000000-0000-4000-8000-000000000012', 'A', 'v1:6321250367f61781', 'old-a', now() - interval '8 days', 'sent', 'two-old'), ('a1000000-0000-4000-8000-000000000012', 'A', 'v1:6321250367f61781', 'new-a', now() - interval '1 day', 'sent', 'two-new');" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now());" >/dev/null
+TWO_A=$(sudo -u postgres psql -d "$DB" -tA -c "select string_agg(coalesce(rendered_sha256, 'null'), '|' order by provider_message_id) from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-000000000012' and template = 'A';")
+if [ "$TWO_A" != "null|null" ]; then
+  echo "FAIL: one purge left a second template A hash ${TWO_A}"
+  exit 1
+fi
+echo 'ok: one purge nulls both template A hashes on a handoff it clears'
 RACE=$(sudo -u postgres psql -d "$DB" -tA -c "select public.crm_mark_bond_request_handoff('a1000000-0000-4000-8000-00000000000a'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'race', 'm3')->>'ok'; select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where provider_message_id = 'm3';")
 if [ "$RACE" != "true
 null" ]; then
