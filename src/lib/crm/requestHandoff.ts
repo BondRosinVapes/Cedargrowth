@@ -652,7 +652,14 @@ export async function handleBondRequestHttp(
       : receiveHandoff(deps.book, account, parsed.value, nowIso);
     if (saved.result === 'rejected:rate') {
       const recipient = env.CG_BOND_REQUEST_ALERT_TO;
-      const emails = (await deps.accounts()).map((item) => item.requestContactEmail || '').filter(Boolean);
+      let emails: string[] = [];
+      try {
+        emails = (await deps.accounts()).map((item) => item.requestContactEmail || '').filter(Boolean);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'account page failed';
+        console.error(`account page failed: ${message}`);
+        return { status: 400, body: { result: 'rejected:rate', accounts: 'error' } };
+      }
       if (alertRecipientAllowed(recipient, emails)) {
         // The recipient is unset until Gary names one. A dispensary address is never used.
       }

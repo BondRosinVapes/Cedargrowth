@@ -2541,8 +2541,9 @@ const productionDb = {
   },
   from: (table: string) => {
     const data = table === 'crm_accounts' ? [{ id: sendShop.id, brand: 'cedargrowth', display_name: sendShop.displayName, city: 'Buffalo', latitude: 42.89, longitude: -78.87, account_type: 'adult_use_dispensary', request_contact_email: 'shop@request.test', bond_carried_skus: ['vape-1g'], request_opt_out: false }] : [];
-    const query = Promise.resolve({ data }) as Promise<{ data: unknown[] }> & { eq: (column: string, value: string) => typeof query; range: (from: number, to: number) => Promise<{ data: unknown[] }> };
+    const query = Promise.resolve({ data }) as Promise<{ data: unknown[] }> & { eq: (column: string, value: string) => typeof query; order: (column: string) => typeof query; range: (from: number, to: number) => Promise<{ data: unknown[] }> };
     query.eq = () => query;
+    query.order = () => query;
     query.range = (from: number) => Promise.resolve({ data: from === 0 ? data : [] });
     return { select: () => ({ eq: () => query }) };
   },
@@ -2657,16 +2658,25 @@ const wideAccounts = Array.from({ length: 1001 }, (_, index) => ({
   request_opt_out: false,
 }));
 const wideContacts = wideAccounts.map((row) => ({ account_id: row.id, preference: 'do_not_contact' }));
-function pageQuery(rows: Record<string, unknown>[]) {
+function pageQuery(rows: Record<string, unknown>[], options?: { cap?: number; failFrom?: number }) {
   const filters: Array<[string, string]> = [];
+  let ordered = false;
   const builder = {
     eq(column: string, value: string) {
       filters.push([column, value]);
       return builder;
     },
+    order(column: string) {
+      if (column === 'id') ordered = true;
+      return builder;
+    },
     range(from: number, to: number) {
-      const matched = rows.filter((row) => filters.every(([column, value]) => String(row[column] ?? '') === value));
-      return Promise.resolve({ data: matched.slice(from, to + 1) });
+      if (options?.failFrom !== undefined && from >= options.failFrom) return Promise.resolve({ data: null, error: { message: 'page failed' } });
+      let matched = rows.filter((row) => filters.every(([column, value]) => String(row[column] ?? '') === value));
+      if (ordered) matched = [...matched].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+      const asked = to - from + 1;
+      const size = Math.min(asked, options?.cap ?? asked);
+      return Promise.resolve({ data: matched.slice(from, from + size) });
     },
     then(onfulfilled?: (value: { data: unknown[] }) => unknown) {
       const matched = rows.filter((row) => filters.every(([column, value]) => String(row[column] ?? '') === value));
@@ -2685,6 +2695,47 @@ const loadedWide = await wideDeps.accounts();
 const pastCap = loadedWide.find((row) => row.id === 'acct-1000');
 const foundPastCap = await wideDeps.accountById('acct-1000');
 assert(loadedWide.length === 1001 && pastCap?.requestContactEmail === 'shop1000@dispensary.test' && pastCap.doNotContact === true && foundPastCap?.id === 'acct-1000' && alertRecipientAllowed('shop1000@dispensary.test', loadedWide.map((row) => row.requestContactEmail || '')) === false, 'account reads page past 1000 rows so a later dispensary address still blocks an alert');
+const shortRows = ['c', 'a', 'e', 'b', 'd'].map((mark) => ({
+  id: `acct-${mark}`,
+  brand: 'cedargrowth',
+  display_name: `Shop ${mark}`,
+  city: null,
+  latitude: null,
+  longitude: null,
+  account_type: 'adult_use_dispensary',
+  request_contact_email: `shop${mark}@dispensary.test`,
+  bond_carried_skus: ['vape-1g'],
+  request_opt_out: false,
+}));
+const shortDeps = handoffDeps({
+  rpc: async () => ({ data: null }),
+  from(table: string) {
+    return { select: () => pageQuery(table === 'crm_accounts' ? shortRows : [], { cap: 2 }) };
+  },
+} as never);
+const loadedShort = await shortDeps.accounts();
+assert(loadedShort.map((row) => row.id).join('|') === 'acct-a|acct-b|acct-c|acct-d|acct-e' && alertRecipientAllowed('shope@dispensary.test', loadedShort.map((row) => row.requestContactEmail || '')) === false, 'account reads continue when the server returns fewer rows than the requested page');
+let pageAlertAllowed = false;
+let pageReported = '';
+try {
+  const failedDeps = handoffDeps({
+    rpc: async () => ({ data: null }),
+    from(table: string) {
+      return { select: () => pageQuery(table === 'crm_accounts' ? shortRows : [], { cap: 2, failFrom: 2 }) };
+    },
+  } as never);
+  const partial = await failedDeps.accounts();
+  pageAlertAllowed = alertRecipientAllowed('shope@dispensary.test', partial.map((row) => row.requestContactEmail || ''));
+} catch (error) {
+  pageReported = error instanceof Error ? error.message : '';
+}
+const pageLogs: string[] = [];
+const pageConsole = console.error;
+console.error = (...args: unknown[]) => { pageLogs.push(args.map((item) => String(item)).join(' ')); };
+const pageProvider = handoffProvider();
+const pageDenied = await handleBondRequestHttp(handoffRequest(handoffBody(481, quietShop.id), 'handoff-secret'), { ...handoffDepsLocal, accounts: async () => { throw new Error('page failed'); } }, { nowMs: handoffNow, env: { ...handoffEnv, CG_BOND_REQUEST_ALERT_TO: 'shope@dispensary.test' }, provider: pageProvider });
+console.error = pageConsole;
+assert(pageReported === 'page failed' && pageAlertAllowed === false && pageDenied.body?.result === 'rejected:rate' && pageDenied.body?.accounts === 'error' && pageLogs.some((line) => line.includes('page failed')) && pageProvider.calls.length === 0, 'a failed account page reports the error and does not send the alert');
 assert(retryProvider.calls.length === 0 && retryBook.rows[0].status === 'failed', 'a queued handoff older than 24 hours is marked failed without a provider call');
 assert(handoffSql.includes('revoke all on table public.crm_bond_request_handoffs from public, anon, authenticated, service_role') && handoffSql.includes('recipient') === false && handoffSql.includes('set search_path = pg_catalog') && handoffSql.includes('least(p_now, pg_catalog.now())'), 'E2 and privileges: no fee column, no recipient column, and the purge clock is capped');
 assert(/reservation|metrc|coupon|discount/i.test(handoffSrc) === false && /\u2013|\u2014/.test(handoffSrc) === false, 'handoff surfaces do not use reservation, Metrc, coupon, discount, or dash marks');

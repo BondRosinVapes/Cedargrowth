@@ -111,7 +111,8 @@ begin
     select status = 'erased' or member_contact is null or consumer_cleared_at is not null
       into v_cleared
       from public.crm_bond_request_handoffs
-      where handoff_id = p_handoff_id;
+      where handoff_id = p_handoff_id
+      for update;
     if v_cleared then
       v_hash := null;
     end if;

@@ -4,20 +4,35 @@
 import { getSupabaseServerClient } from '@/lib/supabase';
 import { emptyHandoffBook, SHARE_CONSENT_VERSION, STORE_LIST_KEYS, type AccountView, type HandoffDeps, type HandoffRow, type HandoffStatus, type SendLogRow, type VisitPreference } from './requestHandoff';
 
-type RowQuery = PromiseLike<{ data: unknown[] | null }> & {
+type PageResult = { data: unknown[] | null; error?: { message?: string } | null };
+
+type RowQuery = PromiseLike<PageResult> & {
   eq: (column: string, value: string) => RowQuery;
-  range: (from: number, to: number) => PromiseLike<{ data: unknown[] | null }>;
+  order: (column: string) => RowQuery;
+  range: (from: number, to: number) => PromiseLike<PageResult>;
 };
 
 const ACCOUNT_PAGE = 1000;
 
 async function readPages(build: () => RowQuery): Promise<unknown[]> {
   const rows: unknown[] = [];
-  for (let from = 0; ; from += ACCOUNT_PAGE) {
-    const { data } = await build().range(from, from + ACCOUNT_PAGE - 1);
+  let from = 0;
+  let pageSize = ACCOUNT_PAGE;
+  for (;;) {
+    const { data, error } = await build().order('id').range(from, from + pageSize - 1);
+    if (error) throw new Error(error.message || 'account page failed');
     const batch = data || [];
+    if (batch.length === 0) return rows;
     rows.push(...batch);
-    if (batch.length < ACCOUNT_PAGE) return rows;
+    if (batch.length < pageSize) {
+      if (pageSize === ACCOUNT_PAGE) {
+        pageSize = batch.length;
+        from += batch.length;
+        continue;
+      }
+      return rows;
+    }
+    from += batch.length;
   }
 }
 

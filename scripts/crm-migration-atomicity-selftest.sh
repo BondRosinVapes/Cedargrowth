@@ -574,6 +574,38 @@ sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bon
 mark_guard 'a1000000-0000-4000-8000-00000000000b' 'a mark stores a null template A hash when the status is erased and the contact is still present'
 mark_guard 'a1000000-0000-4000-8000-00000000000c' 'a mark stores a null template A hash when the contact is null and the status is sent'
 mark_guard 'a1000000-0000-4000-8000-00000000000d' 'a mark stores a null template A hash when only consumer_cleared_at is set'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) values ('a1000000-0000-4000-8000-00000000000e', 'race-lock', now() - interval '1 day', now() - interval '1 day', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent');" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 > /tmp/crm-mark-lock.txt <<'SQL' &
+begin;
+select handoff_id from public.crm_bond_request_handoffs where handoff_id = 'a1000000-0000-4000-8000-00000000000e' for update;
+select 'locked';
+select pg_sleep(4);
+update public.crm_bond_request_handoffs
+   set status = 'erased',
+       member_contact = null,
+       consumer_cleared_at = pg_catalog.now()
+ where handoff_id = 'a1000000-0000-4000-8000-00000000000e';
+commit;
+SQL
+LOCK_PID=$!
+LOCKED=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if grep -q locked /tmp/crm-mark-lock.txt; then LOCKED=1; break; fi
+  sleep 0.1
+done
+if [ "$LOCKED" != "1" ]; then
+  echo "FAIL: mark lock was not acquired"
+  wait "$LOCK_PID" || true
+  exit 1
+fi
+RACE_LOCK=$(sudo -u postgres psql -d "$DB" -tA -c "select public.crm_mark_bond_request_handoff('a1000000-0000-4000-8000-00000000000e'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'race-lock', 'race-lock')->>'ok'; select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where provider_message_id = 'race-lock';")
+wait "$LOCK_PID"
+if [ "$RACE_LOCK" != "true
+null" ]; then
+  echo "FAIL: a racing erase stored a template A hash ${RACE_LOCK}"
+  exit 1
+fi
+echo 'ok: a mark waits for the handoff row and stores a null template A hash after a racing erase'
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status, consumer_cleared_at) values ('a1000000-0000-4000-8000-00000000000a', 'cleared', now() - interval '1 day', now() - interval '1 day', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent', now()); insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, sent_at, status) values ('a1000000-0000-4000-8000-00000000000a', 'A', 'v1:6321250367f61781', 'still-there', now() - interval '1 day', 'sent');" >/dev/null
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now());" >/dev/null
 CLEARED_HASH=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-00000000000a' and template = 'A';")
