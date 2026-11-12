@@ -660,6 +660,24 @@ if [ "$RESTORED" != "t" ] || [ "$A_LEFT" != "0" ] || [ "$B_LEFT" != "kept-b" ]; 
   exit 1
 fi
 echo 'ok: 0140 rollback nulls template A hashes and restores the 0139 purge, erase, and mark functions'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) values ('a1000000-0000-4000-8000-000000000011', 'on0139', now(), now(), '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent');" >/dev/null
+ON0139=$(sudo -u postgres psql -d "$DB" -tA -c "select public.crm_mark_bond_request_handoff('a1000000-0000-4000-8000-000000000011'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'on-0139', 'on-0139')->>'ok'; select public.crm_erase_bond_request_handoff('a1000000-0000-4000-8000-000000000011'::uuid)->>'status'; select public.crm_purge_bond_request_handoffs(now())->>'ok';")
+if [ "$ON0139" != "true
+erased
+true" ]; then
+  echo "FAIL: 0139 mark, erase, or purge did not run ${ON0139}"
+  exit 1
+fi
+echo 'ok: mark, erase, and purge still run on 0139 alone'
+set +e
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f "${ROOT}/scripts/crm-apply-0141.sql" >/tmp/crm-0141-on-0139.log 2>&1
+ON0139_CODE=$?
+set -e
+if [ "$ON0139_CODE" -eq 0 ] || ! grep -q 'does not clear the template A hash' /tmp/crm-0141-on-0139.log; then
+  echo "FAIL: 0141 applied on the 0139 erase body code=${ON0139_CODE}"
+  exit 1
+fi
+echo 'ok: 0141 refuses to apply when erase does not clear the template A hash'
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/scripts/crm-rollback-0139.sql" >/tmp/crm-0139-rollback.log
 GONE=$(sudo -u postgres psql -d "$DB" -tA -c "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relname like 'crm_bond_request_%';")
 if [ "$GONE" != "0" ]; then

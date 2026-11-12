@@ -17,6 +17,10 @@ begin
     or to_regprocedure('public.crm_purge_bond_request_handoffs(timestamptz)') is null then
     raise exception '0140 is not applied. rendered_sha256 is still not null, or the handoff functions are missing. Apply 0140 before 0141.';
   end if;
+  if position('set rendered_sha256 = null' in pg_catalog.pg_get_functiondef('public.crm_erase_bond_request_handoff(uuid)'::regprocedure)) = 0
+     or position('and template = ''A''' in pg_catalog.pg_get_functiondef('public.crm_erase_bond_request_handoff(uuid)'::regprocedure)) = 0 then
+    raise exception '0140 is not applied. crm_erase_bond_request_handoff does not clear the template A hash. Apply 0140 before 0141.';
+  end if;
 end $$;
 
 create or replace function public.crm_purge_bond_request_handoffs(p_now timestamptz)
@@ -109,7 +113,7 @@ begin
       from public.crm_bond_request_handoffs
       where handoff_id = p_handoff_id
       for update;
-    if v_cleared then
+    if not found or v_cleared is distinct from false then
       v_hash := null;
     end if;
   end if;
