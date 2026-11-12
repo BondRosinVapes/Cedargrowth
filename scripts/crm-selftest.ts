@@ -2607,6 +2607,34 @@ assert(eraseBook.rows[0].status === 'erased' && eraseBook.rows[0].memberContact 
 markHandoff(eraseBook, handoffId(318), 'sent', '2026-11-11T15:00:00Z', { template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'again', providerMessageId: 'm2', sentAt: '2026-11-11T15:00:00Z', status: 'sent' });
 const remarked = eraseBook.sends.find((row) => row.providerMessageId === 'm2');
 assert(remarked?.renderedSha256 === null && eraseBook.sends.every((row) => row.renderedSha256 !== 'again'), 'a mark after erase stores a null template A hash');
+function remarkGuard(id: string, patch: { status?: 'sent' | 'erased'; memberContact?: string | null; consumerClearedAt?: string | null }) {
+  const book = emptyHandoffBook();
+  const row = hashRow(id, '2026-11-10T15:00:00Z', 'sent');
+  row.status = patch.status || 'sent';
+  if ('memberContact' in patch) row.memberContact = patch.memberContact ?? null;
+  if ('consumerClearedAt' in patch) row.consumerClearedAt = patch.consumerClearedAt ?? null;
+  book.rows.push(row);
+  const send = (template: 'A' | 'B', hash: string, messageId: string) => markHandoff(book, id, 'sent', '2026-11-11T15:00:00Z', {
+    template,
+    templateVersion: template === 'A' ? 'v1:6321250367f61781' : 'v1:56216bdd6a9c3f35',
+    renderedSha256: hash,
+    providerMessageId: messageId,
+    sentAt: '2026-11-11T15:00:00Z',
+    status: 'sent',
+  });
+  send('A', 'guard-a', `${id}-a`);
+  send('B', 'guard-b', `${id}-b`);
+  return {
+    a: book.sends.find((item) => item.providerMessageId === `${id}-a`)?.renderedSha256,
+    b: book.sends.find((item) => item.providerMessageId === `${id}-b`)?.renderedSha256,
+  };
+}
+const erasedOnly = remarkGuard(handoffId(320), { status: 'erased' });
+assert(erasedOnly.a === null && erasedOnly.b === 'guard-b', 'a mark stores a null template A hash when the status is erased and the contact is still present');
+const contactOnly = remarkGuard(handoffId(321), { memberContact: null });
+assert(contactOnly.a === null && contactOnly.b === 'guard-b', 'a mark stores a null template A hash when the contact is null and the status is sent');
+const clearedOnly = remarkGuard(handoffId(322), { consumerClearedAt: '2026-11-10T16:00:00Z' });
+assert(clearedOnly.a === null && clearedOnly.b === 'guard-b', 'a mark stores a null template A hash when only consumer_cleared_at is set');
 const clearedHash = emptyHandoffBook();
 const clearedRow = hashRow(handoffId(319), '2026-11-10T15:00:00Z');
 clearedRow.consumerClearedAt = '2026-11-10T16:00:00Z';

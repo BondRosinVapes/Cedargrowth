@@ -557,6 +557,23 @@ bee-hash" ]; then
   exit 1
 fi
 echo 'ok: a template B hash is still stored after erase'
+mark_guard() {
+  local id="$1" label="$2"
+  local a_id="${id}-a" b_id="${id}-b"
+  A_MARK=$(sudo -u postgres psql -d "$DB" -tA -c "select public.crm_mark_bond_request_handoff('${id}'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'guard-a', '${a_id}')->>'ok'; select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where provider_message_id = '${a_id}';")
+  B_GUARD=$(sudo -u postgres psql -d "$DB" -tA -c "select public.crm_mark_bond_request_handoff('${id}'::uuid, 'sent', 'B', 'v1:56216bdd6a9c3f35', 'guard-b', '${b_id}')->>'ok'; select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where provider_message_id = '${b_id}';")
+  if [ "$A_MARK" != "true
+null" ] || [ "$B_GUARD" != "true
+guard-b" ]; then
+    echo "FAIL: ${label} A=${A_MARK} B=${B_GUARD}"
+    exit 1
+  fi
+  echo "ok: ${label}"
+}
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) values ('a1000000-0000-4000-8000-00000000000b', 'erased-contact', now() - interval '1 day', now() - interval '1 day', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'erased'), ('a1000000-0000-4000-8000-00000000000c', 'null-contact', now() - interval '1 day', now() - interval '1 day', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', null, null, 'v1:898aa08ccea983db', 'bond-haus', 'sent'), ('a1000000-0000-4000-8000-00000000000d', 'cleared-only', now() - interval '1 day', now() - interval '1 day', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent'); update public.crm_bond_request_handoffs set consumer_cleared_at = now() where handoff_id = 'a1000000-0000-4000-8000-00000000000d';" >/dev/null
+mark_guard 'a1000000-0000-4000-8000-00000000000b' 'a mark stores a null template A hash when the status is erased and the contact is still present'
+mark_guard 'a1000000-0000-4000-8000-00000000000c' 'a mark stores a null template A hash when the contact is null and the status is sent'
+mark_guard 'a1000000-0000-4000-8000-00000000000d' 'a mark stores a null template A hash when only consumer_cleared_at is set'
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status, consumer_cleared_at) values ('a1000000-0000-4000-8000-00000000000a', 'cleared', now() - interval '1 day', now() - interval '1 day', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent', now()); insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, sent_at, status) values ('a1000000-0000-4000-8000-00000000000a', 'A', 'v1:6321250367f61781', 'still-there', now() - interval '1 day', 'sent');" >/dev/null
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now());" >/dev/null
 CLEARED_HASH=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-00000000000a' and template = 'A';")

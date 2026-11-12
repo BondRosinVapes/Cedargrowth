@@ -454,7 +454,7 @@ export function markHandoff(book: HandoffBook, handoffId: string, status: Handof
   const cleared = row.status === 'erased' || row.memberContact == null || row.consumerClearedAt != null;
   const stored = send && send.template === 'A' && cleared ? { ...send, renderedSha256: null } : send;
   if (row.status === 'erased') {
-    if (stored?.template === 'A') book.sends.push({ handoffId, ...stored });
+    if (stored) book.sends.push({ handoffId, ...stored });
     return;
   }
   row.status = status;
