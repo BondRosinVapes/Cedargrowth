@@ -6,7 +6,20 @@ import { emptyHandoffBook, SHARE_CONSENT_VERSION, STORE_LIST_KEYS, type AccountV
 
 type RowQuery = PromiseLike<{ data: unknown[] | null }> & {
   eq: (column: string, value: string) => RowQuery;
+  range: (from: number, to: number) => PromiseLike<{ data: unknown[] | null }>;
 };
+
+const ACCOUNT_PAGE = 1000;
+
+async function readPages(build: () => RowQuery): Promise<unknown[]> {
+  const rows: unknown[] = [];
+  for (let from = 0; ; from += ACCOUNT_PAGE) {
+    const { data } = await build().range(from, from + ACCOUNT_PAGE - 1);
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < ACCOUNT_PAGE) return rows;
+  }
+}
 
 type HandoffDb = {
   rpc: (fn: string, args?: Record<string, unknown>) => PromiseLike<{ data: unknown }>;
@@ -125,11 +138,13 @@ function handoffRowFromRecord(data: unknown): HandoffRow | null {
 
 async function loadAccounts(db: HandoffDb | null, id: string | null): Promise<AccountView[]> {
   if (!db) return [];
-  const accounts = db.from('crm_accounts').select('id,brand,display_name,city,latitude,longitude,account_type,request_contact_email,bond_carried_skus,request_opt_out').eq('brand', 'cedargrowth');
-  const { data } = id ? await accounts.eq('id', id) : await accounts;
-  const contacts = await db.from('crm_contacts').select('account_id,preference').eq('preference', 'do_not_contact');
-  const blocked = new Set((contacts.data || []).map((row) => String((row as { account_id: string }).account_id)));
-  return ((data || []) as Record<string, unknown>[]).map((row) => ({
+  const data = await readPages(() => {
+    const accounts = db.from('crm_accounts').select('id,brand,display_name,city,latitude,longitude,account_type,request_contact_email,bond_carried_skus,request_opt_out').eq('brand', 'cedargrowth');
+    return id ? accounts.eq('id', id) : accounts;
+  });
+  const contacts = await readPages(() => db.from('crm_contacts').select('account_id,preference').eq('preference', 'do_not_contact'));
+  const blocked = new Set(contacts.map((row) => String((row as { account_id: string }).account_id)));
+  return (data as Record<string, unknown>[]).map((row) => ({
     id: String(row.id),
     brand: 'cedargrowth',
     displayName: String(row.display_name || ''),
