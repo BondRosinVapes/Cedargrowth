@@ -606,6 +606,20 @@ null" ]; then
   exit 1
 fi
 echo 'ok: a mark waits for the handoff row and stores a null template A hash after a racing erase'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) values ('a1000000-0000-4000-8000-00000000000f', 'race-purge', now() - interval '15 days', now() - interval '15 days', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent');" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "create or replace function public.crm_test_mark_pause() returns trigger language plpgsql as \$\$ begin if new.provider_message_id = 'race-purge' then perform pg_catalog.pg_sleep(4); end if; return new; end \$\$; drop trigger if exists crm_test_mark_pause on public.crm_bond_request_send_log; create trigger crm_test_mark_pause before insert on public.crm_bond_request_send_log for each row execute function public.crm_test_mark_pause();" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_mark_bond_request_handoff('a1000000-0000-4000-8000-00000000000f'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'race-purge', 'race-purge');" >/tmp/crm-mark-purge.txt &
+MARK_PID=$!
+sleep 0.5
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now());" >/dev/null
+wait "$MARK_PID"
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "drop trigger if exists crm_test_mark_pause on public.crm_bond_request_send_log; drop function if exists public.crm_test_mark_pause();" >/dev/null
+RACE_PURGE=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where provider_message_id = 'race-purge';")
+if [ "$RACE_PURGE" != "null" ]; then
+  echo "FAIL: a racing purge left a template A hash ${RACE_PURGE}"
+  exit 1
+fi
+echo 'ok: a mark that races a purge stores a null template A hash'
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status, consumer_cleared_at) values ('a1000000-0000-4000-8000-00000000000a', 'cleared', now() - interval '1 day', now() - interval '1 day', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'sent', now()); insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, sent_at, status) values ('a1000000-0000-4000-8000-00000000000a', 'A', 'v1:6321250367f61781', 'still-there', now() - interval '1 day', 'sent');" >/dev/null
 sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs(now());" >/dev/null
 CLEARED_HASH=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-00000000000a' and template = 'A';")
