@@ -2587,6 +2587,10 @@ delete missingAtBody.submitted_at;
 const missingId = await handleBondRequestHttp(handoffRequest(missingIdBody, 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
 const missingAt = await handleBondRequestHttp(handoffRequest(missingAtBody, 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
 assert(priceItem.body?.result === 'rejected:items' && noteItem.body?.result === 'rejected:items' && hugeQty.body?.result === 'rejected:items' && stringQtyOne.body?.result === 'rejected:items' && stringQtyFive.body?.result === 'rejected:items' && handoffBook.rows.every((row) => row.handoffId !== handoffId(460) && row.handoffId !== handoffId(461) && row.handoffId !== handoffId(462) && row.handoffId !== handoffId(465) && row.handoffId !== handoffId(466)), 'K1 a price key, a note key, a string qty, or an overflowing qty is rejected and nothing is stored');
+const nullSku = await handleBondRequestHttp(handoffRequest(handoffBody(471, sendShop.id, { items: [{ sku: null, qty: 1 }] }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const numberSku = await handleBondRequestHttp(handoffRequest(handoffBody(472, sendShop.id, { items: [{ sku: 1, qty: 1 }] }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+const emptySku = await handleBondRequestHttp(handoffRequest(handoffBody(473, sendShop.id, { items: [{ sku: '', qty: 1 }] }), 'handoff-secret'), handoffDepsLocal, { nowMs: handoffNow, env: handoffEnv });
+assert(nullSku.body?.result === 'rejected:items' && numberSku.body?.result === 'rejected:items' && emptySku.body?.result === 'rejected:items' && handoffBook.rows.every((row) => row.handoffId !== handoffId(471) && row.handoffId !== handoffId(472) && row.handoffId !== handoffId(473)), 'S-1 a null sku, a number sku, and an empty sku are rejected and nothing is stored');
 function rawQty(n: number, token: string) {
   return JSON.stringify(handoffBody(n, sendShop.id)).replace('"qty":1', `"qty":${token}`);
 }

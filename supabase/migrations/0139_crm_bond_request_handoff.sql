@@ -291,6 +291,8 @@ begin
     if pg_catalog.jsonb_typeof(v_item) <> 'object'
        or exists (select 1 from pg_catalog.jsonb_object_keys(v_item) as extra(key) where extra.key not in ('sku', 'qty'))
        or not (v_item ? 'sku' and v_item ? 'qty')
+       or pg_catalog.jsonb_typeof(v_item->'sku') is distinct from 'string'
+       or pg_catalog.btrim(coalesce(v_item->>'sku', '')) = ''
        or (v_item->>'sku') not in ('vape-05g', 'vape-1g', 'preroll-1g', 'preroll-5pk', 'dog-walker-5pk', 'gummies-10ct-100', 'gummies-10ct-200', 'gummies-20ct-200')
        or pg_catalog.jsonb_typeof(v_item->'qty') is distinct from 'number'
        or (v_item->>'qty')::numeric <> trunc((v_item->>'qty')::numeric)
@@ -550,45 +552,6 @@ begin
 end;
 $$;
 
-create or replace function public.crm_bond_request_admin_view(p_role text)
-returns table (
-  handoff_id uuid,
-  dispensary_account_id uuid,
-  items jsonb,
-  visit_preference text,
-  source text,
-  source_event text,
-  status text,
-  received_at timestamptz,
-  submitted_at timestamptz,
-  sends jsonb
-)
-language plpgsql
-security definer
-set search_path = pg_catalog
-as $$
-begin
-  if p_role not in ('owner', 'administrator') then
-    return;
-  end if;
-  return query
-  select h.handoff_id, h.dispensary_account_id, h.items, h.visit_preference, h.source, h.source_event, h.status, h.received_at, h.submitted_at,
-    coalesce((
-      select pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
-        'template', s.template,
-        'template_version', s.template_version,
-        'rendered_sha256', s.rendered_sha256,
-        'provider_message_id', s.provider_message_id,
-        'sent_at', s.sent_at,
-        'status', s.status
-      ))
-      from public.crm_bond_request_send_log s
-      where s.handoff_id = h.handoff_id
-    ), '[]'::jsonb)
-  from public.crm_bond_request_handoffs h;
-end;
-$$;
-
 create or replace function public.crm_bond_request_failed_sends()
 returns table (
   handoff_id uuid,
@@ -632,7 +595,6 @@ revoke all on function public.crm_mark_bond_request_handoff(uuid, text, text, te
 revoke all on function public.crm_purge_bond_request_handoffs(timestamptz) from public, anon, authenticated;
 revoke all on function public.crm_bond_request_store_list(text) from public, anon, authenticated;
 revoke all on function public.crm_bond_request_handoff_row(uuid) from public, anon, authenticated;
-revoke all on function public.crm_bond_request_admin_view(text) from public, anon, authenticated;
 revoke all on function public.crm_bond_request_purge_scheduled() from public, anon, authenticated;
 revoke all on function public.crm_bond_request_failed_sends() from public, anon, authenticated;
 
@@ -643,6 +605,5 @@ grant execute on function public.crm_mark_bond_request_handoff(uuid, text, text,
 grant execute on function public.crm_purge_bond_request_handoffs(timestamptz) to service_role;
 grant execute on function public.crm_bond_request_store_list(text) to service_role;
 grant execute on function public.crm_bond_request_handoff_row(uuid) to service_role;
-grant execute on function public.crm_bond_request_admin_view(text) to service_role;
 grant execute on function public.crm_bond_request_purge_scheduled() to service_role;
 grant execute on function public.crm_bond_request_failed_sends() to service_role;
