@@ -636,6 +636,37 @@ if [ "$TWO_A" != "null|null" ]; then
   exit 1
 fi
 echo 'ok: one purge nulls both template A hashes on a handoff it clears'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "insert into public.crm_bond_request_handoffs (handoff_id, bond_request_id, received_at, submitted_at, dispensary_account_id, items, member_first_name, member_contact, contact_kind, share_consent_version, source, status) values ('a1000000-0000-4000-8000-000000000013', 'early-nc', '2000-01-01 00:00:00+00', '2000-01-01 00:00:00+00', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'no_contact'), ('a1000000-0000-4000-8000-000000000014', 'early-ns', '2000-01-01 00:00:00+00', '2000-01-01 00:00:00+00', '${ACCT}'::uuid, '[{\"sku\":\"vape-1g\",\"qty\":1}]'::jsonb, 'Ada', 'ada@member.test', 'email', 'v1:898aa08ccea983db', 'bond-haus', 'failed:no_sender'); insert into public.crm_bond_request_send_log (handoff_id, template, template_version, rendered_sha256, status) values ('a1000000-0000-4000-8000-000000000013', 'A', 'v1:6321250367f61781', 'nc-early', 'no_contact'), ('a1000000-0000-4000-8000-000000000014', 'A', 'v1:6321250367f61781', 'ns-early', 'failed:no_sender');" >/dev/null
+python3 - "$ROOT" << 'PY'
+import sys
+from pathlib import Path
+text = Path(sys.argv[1], "scripts/crm-rollback-0140.sql").read_text()
+start = text.index("create or replace function public.crm_purge_bond_request_handoffs")
+end = text.index("create or replace function public.crm_erase_bond_request_handoff")
+Path("/tmp/crm-0139-purge-only.sql").write_text(text[start:end])
+PY
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -f /tmp/crm-0139-purge-only.sql >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs('2000-01-03 00:00:00+00');" >/dev/null
+STAMPED=$(sudo -u postgres psql -d "$DB" -tA -c "select (select rendered_sha256 || '|' || coalesce(member_contact, 'null') || '|' || to_char(consumer_cleared_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI') from public.crm_bond_request_send_log s join public.crm_bond_request_handoffs h on h.handoff_id = s.handoff_id where s.handoff_id = 'a1000000-0000-4000-8000-000000000013') || ',' || (select rendered_sha256 from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-000000000014');")
+if [ "$STAMPED" != "nc-early|null|2000-01-03 00:00,ns-early" ]; then
+  echo "FAIL: 0139 purge did not stamp without nulling the hash ${STAMPED}"
+  exit 1
+fi
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 --single-transaction -f "${ROOT}/supabase/migrations/0141_crm_bond_request_hash_after_clear.sql" >/dev/null
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "select public.crm_purge_bond_request_handoffs('2000-01-02 12:00:00+00');" >/dev/null
+EARLY_NC=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-000000000013';")
+EARLY_NS=$(sudo -u postgres psql -d "$DB" -tA -c "select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where handoff_id = 'a1000000-0000-4000-8000-000000000014';")
+if [ "$EARLY_NC" != "null" ]; then
+  echo "FAIL: an earlier clock left the no_contact hash ${EARLY_NC}"
+  exit 1
+fi
+echo 'ok: an earlier clock nulls a no_contact hash that was stamped after that clock'
+if [ "$EARLY_NS" != "null" ]; then
+  echo "FAIL: an earlier clock left the failed:no_sender hash ${EARLY_NS}"
+  exit 1
+fi
+echo 'ok: an earlier clock nulls a failed:no_sender hash that was stamped after that clock'
+sudo -u postgres psql -d "$DB" -v ON_ERROR_STOP=1 -c "delete from public.crm_bond_request_handoffs where handoff_id in ('a1000000-0000-4000-8000-000000000013', 'a1000000-0000-4000-8000-000000000014');" >/dev/null
 RACE=$(sudo -u postgres psql -d "$DB" -tA -c "select public.crm_mark_bond_request_handoff('a1000000-0000-4000-8000-00000000000a'::uuid, 'sent', 'A', 'v1:6321250367f61781', 'race', 'm3')->>'ok'; select coalesce(rendered_sha256, 'null') from public.crm_bond_request_send_log where provider_message_id = 'm3';")
 if [ "$RACE" != "true
 null" ]; then
