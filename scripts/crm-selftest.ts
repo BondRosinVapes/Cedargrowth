@@ -2651,6 +2651,20 @@ twoBook.sends.push(
 );
 purgeHandoffs(twoBook, '2026-11-11T15:00:00Z');
 assert(twoBook.sends.every((row) => row.renderedSha256 === null), 'one purge nulls both template A hashes on a handoff it clears');
+function earlyClockHash(id: string, status: 'no_contact' | 'failed:no_sender') {
+  const book = emptyHandoffBook();
+  const row = hashRow(id, '2000-01-01T00:00:00Z', status);
+  row.memberFirstName = null;
+  row.memberContact = null;
+  row.contactKind = null;
+  row.consumerClearedAt = '2000-01-03T00:00:00Z';
+  book.rows.push(row);
+  book.sends.push({ handoffId: id, template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'early-hash', providerMessageId: null, sentAt: null, status });
+  purgeHandoffs(book, '2000-01-02T12:00:00Z');
+  return book.sends[0].renderedSha256;
+}
+assert(earlyClockHash(handoffId(324), 'no_contact') === null, 'an earlier clock nulls a no_contact hash that was stamped after that clock');
+assert(earlyClockHash(handoffId(325), 'failed:no_sender') === null, 'an earlier clock nulls a failed:no_sender hash that was stamped after that clock');
 markHandoff(clearedHash, handoffId(319), 'sent', '2026-11-11T15:00:00Z', { template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'race', providerMessageId: 'm3', sentAt: '2026-11-11T15:00:00Z', status: 'sent' });
 assert(clearedHash.sends.find((row) => row.providerMessageId === 'm3')?.renderedSha256 === null, 'a mark stores a null template A hash when the contact was already cleared');
 const wideAccounts = Array.from({ length: 1001 }, (_, index) => ({
