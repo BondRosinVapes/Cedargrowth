@@ -2563,7 +2563,7 @@ assert(stopOk.ok === true && stopOk.onTime === true && stopAccount.requestOptOut
 assert(gateCalls === 0 && gateChecks.every((gates) => sendingReady(gates) === false), 'sending refuses with no provider call while the sender, postal address, purge schedule, or send flag is missing');
 assert(handoffHuge.status === 413, 'an 8 KB body is the cap');
 assert(purgedHandoff.purged === 1 && clearedBook.rows.length === 0 && clearedBook.sends.length === 0 && clearedBook.audits.length === 0 && clearedBook.alerts.length === 1 && clearedBook.alerts[0].accountId === sendShop.id, 'S3 the 12 month purge removes the send log, the audit rows, and an old alert');
-function hashRow(id: string, receivedAt: string, status: 'sent' | 'queued' = 'sent') {
+function hashRow(id: string, receivedAt: string, status: 'sent' | 'queued' | 'failed' = 'sent') {
   return {
     handoffId: id, bondRequestId: 'hash', receivedAt, submittedAt: receivedAt, dispensaryAccountId: sendShop.id,
     items: [{ sku: 'vape-1g', qty: 1 }], memberFirstName: 'Ada', memberContact: 'ada@member.test', contactKind: 'email' as const, visitPreference: null,
@@ -2571,17 +2571,21 @@ function hashRow(id: string, receivedAt: string, status: 'sent' | 'queued' = 'se
   };
 }
 const hashBook = emptyHandoffBook();
-hashBook.rows.push(hashRow(handoffId(310), '2026-11-03T15:00:00Z'), hashRow(handoffId(311), '2026-11-10T15:00:00Z'), hashRow(handoffId(312), '2026-10-27T15:00:00Z'), hashRow(handoffId(313), '2026-10-27T15:00:00Z'));
+hashBook.rows.push(hashRow(handoffId(310), '2026-11-03T15:00:00Z'), hashRow(handoffId(311), '2026-11-10T15:00:00Z'), hashRow(handoffId(312), '2026-10-27T15:00:00Z'), hashRow(handoffId(313), '2026-10-27T15:00:00Z'), hashRow(handoffId(314), '2026-11-09T15:00:00Z', 'failed'), hashRow(handoffId(315), '2026-11-11T03:00:00Z', 'failed'));
 hashBook.sends.push(
   { handoffId: handoffId(310), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'aged-a', providerMessageId: 'm', sentAt: '2026-11-03T15:00:00Z', status: 'sent' },
   { handoffId: handoffId(311), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'fresh-a', providerMessageId: 'm', sentAt: '2026-11-10T15:00:00Z', status: 'sent' },
   { handoffId: handoffId(312), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'outer-a', providerMessageId: 'm', sentAt: '2026-11-10T15:00:00Z', status: 'sent' },
   { handoffId: handoffId(313), template: 'B', templateVersion: 'v1:56216bdd6a9c3f35', renderedSha256: 'kept-b', providerMessageId: 'm', sentAt: '2026-10-27T15:00:00Z', status: 'sent' },
+  { handoffId: handoffId(314), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'fail-2d', providerMessageId: null, sentAt: null, status: 'failed' },
+  { handoffId: handoffId(315), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'fail-12h', providerMessageId: null, sentAt: null, status: 'failed' },
 );
 assert(hashBook.sends.every((row) => row.renderedSha256 !== null), 'template hashes are present before the purge window');
 purgeHandoffs(hashBook, '2026-11-11T15:00:00Z');
 const hashOf = (id: string) => hashBook.sends.find((row) => row.handoffId === id)?.renderedSha256;
-assert(hashOf(handoffId(310)) === null && hashOf(handoffId(312)) === null && hashOf(handoffId(311)) === 'fresh-a' && hashOf(handoffId(313)) === 'kept-b' && hashBook.sends.filter((row) => row.template === 'A' && Date.parse(hashBook.rows.find((item) => item.handoffId === row.handoffId)?.receivedAt || '') <= Date.parse('2026-11-11T15:00:00Z') - 14 * 24 * 60 * 60 * 1000).every((row) => row.renderedSha256 === null), 'a template A hash is cleared after the 7 day or 14 day window and a template B hash stays');
+const failedOld = hashBook.rows.find((row) => row.handoffId === handoffId(314));
+const failedNew = hashBook.rows.find((row) => row.handoffId === handoffId(315));
+assert(hashOf(handoffId(310)) === null && hashOf(handoffId(312)) === null && hashOf(handoffId(311)) === 'fresh-a' && hashOf(handoffId(313)) === 'kept-b' && hashOf(handoffId(314)) === null && failedOld?.memberContact === null && hashOf(handoffId(315)) === 'fail-12h' && failedNew?.memberContact === 'ada@member.test', 'a template A hash is cleared on every contact clear path, including a failed request older than 24 hours');
 assert(retryProvider.calls.length === 0 && retryBook.rows[0].status === 'failed', 'a queued handoff older than 24 hours is marked failed without a provider call');
 assert(handoffSql.includes('revoke all on table public.crm_bond_request_handoffs from public, anon, authenticated, service_role') && handoffSql.includes('recipient') === false && handoffSql.includes('set search_path = pg_catalog') && handoffSql.includes('least(p_now, pg_catalog.now())'), 'E2 and privileges: no fee column, no recipient column, and the purge clock is capped');
 assert(/reservation|metrc|coupon|discount/i.test(handoffSrc) === false && /\u2013|\u2014/.test(handoffSrc) === false, 'handoff surfaces do not use reservation, Metrc, coupon, discount, or dash marks');

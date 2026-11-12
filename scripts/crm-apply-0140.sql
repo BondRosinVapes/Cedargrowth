@@ -64,6 +64,7 @@ begin
     and (
       (h.status = 'sent' and s.status = 'sent' and s.sent_at <= v_cutoff - interval '7 days')
       or h.received_at <= v_cutoff - interval '14 days'
+      or (h.status in ('no_contact', 'failed', 'failed:no_sender') and h.received_at <= v_cutoff - interval '24 hours')
     );
   delete from public.crm_bond_request_send_log
   where handoff_id in (

@@ -372,7 +372,9 @@ export function purgeHandoffs(book: HandoffBook, nowIso: string): { cleared: num
     if (!row) continue;
     const sentDue = row.status === 'sent' && send.status === 'sent' && typeof send.sentAt === 'string' && Date.parse(send.sentAt) <= cutoff - 7 * 24 * 60 * 60 * 1000;
     const outerDue = Date.parse(row.receivedAt) <= cutoff - 14 * 24 * 60 * 60 * 1000;
-    if (sentDue || outerDue) send.renderedSha256 = null;
+    const terminal = row.status === 'no_contact' || row.status === 'failed' || row.status === 'failed:no_sender';
+    const terminalDue = terminal && Date.parse(row.receivedAt) <= cutoff - 24 * 60 * 60 * 1000;
+    if (sentDue || outerDue || terminalDue) send.renderedSha256 = null;
   }
   const dueIds = new Set(book.rows.filter((row) => Date.parse(row.receivedAt) <= cutoff - 365 * 24 * 60 * 60 * 1000).map((row) => row.handoffId));
   const before = book.rows.length;
