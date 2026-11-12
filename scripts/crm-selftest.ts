@@ -2539,8 +2539,9 @@ const productionDb = {
   },
   from: (table: string) => {
     const data = table === 'crm_accounts' ? [{ id: sendShop.id, brand: 'cedargrowth', display_name: sendShop.displayName, city: 'Buffalo', latitude: 42.89, longitude: -78.87, account_type: 'adult_use_dispensary', request_contact_email: 'shop@request.test', bond_carried_skus: ['vape-1g'], request_opt_out: false }] : [];
-    const limit = async () => ({ data });
-    return { select: () => ({ eq: () => ({ eq: () => ({ limit }), limit }) }) };
+    const query = Promise.resolve({ data }) as Promise<{ data: unknown[] }> & { eq: (column: string, value: string) => typeof query };
+    query.eq = () => query;
+    return { select: () => ({ eq: () => query }) };
   },
 };
 const productionDeps = handoffDeps(productionDb);
@@ -2562,6 +2563,25 @@ assert(stopOk.ok === true && stopOk.onTime === true && stopAccount.requestOptOut
 assert(gateCalls === 0 && gateChecks.every((gates) => sendingReady(gates) === false), 'sending refuses with no provider call while the sender, postal address, purge schedule, or send flag is missing');
 assert(handoffHuge.status === 413, 'an 8 KB body is the cap');
 assert(purgedHandoff.purged === 1 && clearedBook.rows.length === 0 && clearedBook.sends.length === 0 && clearedBook.audits.length === 0 && clearedBook.alerts.length === 1 && clearedBook.alerts[0].accountId === sendShop.id, 'S3 the 12 month purge removes the send log, the audit rows, and an old alert');
+function hashRow(id: string, receivedAt: string, status: 'sent' | 'queued' = 'sent') {
+  return {
+    handoffId: id, bondRequestId: 'hash', receivedAt, submittedAt: receivedAt, dispensaryAccountId: sendShop.id,
+    items: [{ sku: 'vape-1g', qty: 1 }], memberFirstName: 'Ada', memberContact: 'ada@member.test', contactKind: 'email' as const, visitPreference: null,
+    shareConsentVersion: SHARE_CONSENT_VERSION, source: 'bond-haus' as const, sourceEvent: null, status, eraseRequestedAt: null, erasedAt: null, consumerClearedAt: null,
+  };
+}
+const hashBook = emptyHandoffBook();
+hashBook.rows.push(hashRow(handoffId(310), '2026-11-03T15:00:00Z'), hashRow(handoffId(311), '2026-11-10T15:00:00Z'), hashRow(handoffId(312), '2026-10-27T15:00:00Z'), hashRow(handoffId(313), '2026-10-27T15:00:00Z'));
+hashBook.sends.push(
+  { handoffId: handoffId(310), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'aged-a', providerMessageId: 'm', sentAt: '2026-11-03T15:00:00Z', status: 'sent' },
+  { handoffId: handoffId(311), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'fresh-a', providerMessageId: 'm', sentAt: '2026-11-10T15:00:00Z', status: 'sent' },
+  { handoffId: handoffId(312), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'outer-a', providerMessageId: 'm', sentAt: '2026-11-10T15:00:00Z', status: 'sent' },
+  { handoffId: handoffId(313), template: 'B', templateVersion: 'v1:56216bdd6a9c3f35', renderedSha256: 'kept-b', providerMessageId: 'm', sentAt: '2026-10-27T15:00:00Z', status: 'sent' },
+);
+assert(hashBook.sends.every((row) => row.renderedSha256 !== null), 'template hashes are present before the purge window');
+purgeHandoffs(hashBook, '2026-11-11T15:00:00Z');
+const hashOf = (id: string) => hashBook.sends.find((row) => row.handoffId === id)?.renderedSha256;
+assert(hashOf(handoffId(310)) === null && hashOf(handoffId(312)) === null && hashOf(handoffId(311)) === 'fresh-a' && hashOf(handoffId(313)) === 'kept-b' && hashBook.sends.filter((row) => row.template === 'A' && Date.parse(hashBook.rows.find((item) => item.handoffId === row.handoffId)?.receivedAt || '') <= Date.parse('2026-11-11T15:00:00Z') - 14 * 24 * 60 * 60 * 1000).every((row) => row.renderedSha256 === null), 'a template A hash is cleared after the 7 day or 14 day window and a template B hash stays');
 assert(retryProvider.calls.length === 0 && retryBook.rows[0].status === 'failed', 'a queued handoff older than 24 hours is marked failed without a provider call');
 assert(handoffSql.includes('revoke all on table public.crm_bond_request_handoffs from public, anon, authenticated, service_role') && handoffSql.includes('recipient') === false && handoffSql.includes('set search_path = pg_catalog') && handoffSql.includes('least(p_now, pg_catalog.now())'), 'E2 and privileges: no fee column, no recipient column, and the purge clock is capped');
 assert(/reservation|metrc|coupon|discount/i.test(handoffSrc) === false && /\u2013|\u2014/.test(handoffSrc) === false, 'handoff surfaces do not use reservation, Metrc, coupon, discount, or dash marks');

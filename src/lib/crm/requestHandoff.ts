@@ -84,7 +84,7 @@ export type SendLogRow = {
   handoffId: string;
   template: 'A' | 'B';
   templateVersion: string;
-  renderedSha256: string;
+  renderedSha256: string | null;
   providerMessageId: string | null;
   sentAt: string | null;
   status: string;
@@ -366,6 +366,14 @@ export function purgeHandoffs(book: HandoffBook, nowIso: string): { cleared: num
       cleared += 1;
     }
   }
+  for (const send of book.sends) {
+    if (send.template !== 'A' || send.renderedSha256 == null) continue;
+    const row = book.rows.find((item) => item.handoffId === send.handoffId);
+    if (!row) continue;
+    const sentDue = row.status === 'sent' && send.status === 'sent' && typeof send.sentAt === 'string' && Date.parse(send.sentAt) <= cutoff - 7 * 24 * 60 * 60 * 1000;
+    const outerDue = Date.parse(row.receivedAt) <= cutoff - 14 * 24 * 60 * 60 * 1000;
+    if (sentDue || outerDue) send.renderedSha256 = null;
+  }
   const dueIds = new Set(book.rows.filter((row) => Date.parse(row.receivedAt) <= cutoff - 365 * 24 * 60 * 60 * 1000).map((row) => row.handoffId));
   const before = book.rows.length;
   book.rows = book.rows.filter((row) => !dueIds.has(row.handoffId));
@@ -460,7 +468,7 @@ export function storeList(accounts: AccountView[], sku: string): Record<(typeof 
 export type AdminHandoffSend = {
   template: 'A' | 'B';
   templateVersion: string;
-  renderedSha256: string;
+  renderedSha256: string | null;
   providerMessageId: string | null;
   sentAt: string | null;
   status: string;
