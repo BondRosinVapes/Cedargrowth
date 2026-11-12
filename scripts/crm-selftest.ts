@@ -2541,8 +2541,10 @@ const productionDb = {
   },
   from: (table: string) => {
     const data = table === 'crm_accounts' ? [{ id: sendShop.id, brand: 'cedargrowth', display_name: sendShop.displayName, city: 'Buffalo', latitude: 42.89, longitude: -78.87, account_type: 'adult_use_dispensary', request_contact_email: 'shop@request.test', bond_carried_skus: ['vape-1g'], request_opt_out: false }] : [];
-    const query = Promise.resolve({ data }) as Promise<{ data: unknown[] }> & { eq: (column: string, value: string) => typeof query };
+    const query = Promise.resolve({ data }) as Promise<{ data: unknown[] }> & { eq: (column: string, value: string) => typeof query; order: (column: string) => typeof query; range: (from: number, to: number) => Promise<{ data: unknown[] }> };
     query.eq = () => query;
+    query.order = () => query;
+    query.range = (from: number) => Promise.resolve({ data: from === 0 ? data : [] });
     return { select: () => ({ eq: () => query }) };
   },
 };
@@ -2604,7 +2606,136 @@ eraseBook.sends.push({ handoffId: handoffId(318), template: 'A', templateVersion
 eraseHandoff(eraseBook, handoffId(318), '2026-11-11T15:00:00Z');
 assert(eraseBook.rows[0].status === 'erased' && eraseBook.rows[0].memberContact === null && eraseBook.sends[0].renderedSha256 === null, 'erase clears the template A hash with the contact on a 1 day old sent row');
 markHandoff(eraseBook, handoffId(318), 'sent', '2026-11-11T15:00:00Z', { template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'again', providerMessageId: 'm2', sentAt: '2026-11-11T15:00:00Z', status: 'sent' });
-assert(eraseBook.sends.every((row) => row.renderedSha256 !== 'again') && eraseBook.sends[0].renderedSha256 === null, 'a mark cannot store a template A hash after the contact is cleared');
+const remarked = eraseBook.sends.find((row) => row.providerMessageId === 'm2');
+assert(remarked?.renderedSha256 === null && eraseBook.sends.every((row) => row.renderedSha256 !== 'again'), 'a mark after erase stores a null template A hash');
+function remarkGuard(id: string, patch: { status?: 'sent' | 'erased'; memberContact?: string | null; consumerClearedAt?: string | null }) {
+  const book = emptyHandoffBook();
+  const row = hashRow(id, '2026-11-10T15:00:00Z', 'sent');
+  row.status = patch.status || 'sent';
+  if ('memberContact' in patch) row.memberContact = patch.memberContact ?? null;
+  if ('consumerClearedAt' in patch) row.consumerClearedAt = patch.consumerClearedAt ?? null;
+  book.rows.push(row);
+  const send = (template: 'A' | 'B', hash: string, messageId: string) => markHandoff(book, id, 'sent', '2026-11-11T15:00:00Z', {
+    template,
+    templateVersion: template === 'A' ? 'v1:6321250367f61781' : 'v1:56216bdd6a9c3f35',
+    renderedSha256: hash,
+    providerMessageId: messageId,
+    sentAt: '2026-11-11T15:00:00Z',
+    status: 'sent',
+  });
+  send('A', 'guard-a', `${id}-a`);
+  send('B', 'guard-b', `${id}-b`);
+  return {
+    a: book.sends.find((item) => item.providerMessageId === `${id}-a`)?.renderedSha256,
+    b: book.sends.find((item) => item.providerMessageId === `${id}-b`)?.renderedSha256,
+  };
+}
+const erasedOnly = remarkGuard(handoffId(320), { status: 'erased' });
+assert(erasedOnly.a === null && erasedOnly.b === 'guard-b', 'a mark stores a null template A hash when the status is erased and the contact is still present');
+const contactOnly = remarkGuard(handoffId(321), { memberContact: null });
+assert(contactOnly.a === null && contactOnly.b === 'guard-b', 'a mark stores a null template A hash when the contact is null and the status is sent');
+const clearedOnly = remarkGuard(handoffId(322), { consumerClearedAt: '2026-11-10T16:00:00Z' });
+assert(clearedOnly.a === null && clearedOnly.b === 'guard-b', 'a mark stores a null template A hash when only consumer_cleared_at is set');
+const clearedHash = emptyHandoffBook();
+const clearedRow = hashRow(handoffId(319), '2026-11-10T15:00:00Z');
+clearedRow.consumerClearedAt = '2026-11-10T16:00:00Z';
+clearedHash.rows.push(clearedRow);
+clearedHash.sends.push({ handoffId: handoffId(319), template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'still-there', providerMessageId: 'm', sentAt: '2026-11-10T15:00:00Z', status: 'sent' });
+purgeHandoffs(clearedHash, '2026-11-11T15:00:00Z');
+assert(clearedHash.sends[0].renderedSha256 === null, 'a template A hash is cleared when consumer_cleared_at is already set');
+markHandoff(clearedHash, handoffId(319), 'sent', '2026-11-11T15:00:00Z', { template: 'A', templateVersion: 'v1:6321250367f61781', renderedSha256: 'race', providerMessageId: 'm3', sentAt: '2026-11-11T15:00:00Z', status: 'sent' });
+assert(clearedHash.sends.find((row) => row.providerMessageId === 'm3')?.renderedSha256 === null, 'a mark stores a null template A hash when the contact was already cleared');
+const wideAccounts = Array.from({ length: 1001 }, (_, index) => ({
+  id: `acct-${index}`,
+  brand: 'cedargrowth',
+  display_name: `Shop ${index}`,
+  city: null,
+  latitude: null,
+  longitude: null,
+  account_type: 'adult_use_dispensary',
+  request_contact_email: `shop${index}@dispensary.test`,
+  bond_carried_skus: ['vape-1g'],
+  request_opt_out: false,
+}));
+const wideContacts = wideAccounts.map((row) => ({ account_id: row.id, preference: 'do_not_contact' }));
+function pageQuery(rows: Record<string, unknown>[], options?: { cap?: number; failFrom?: number }) {
+  const filters: Array<[string, string]> = [];
+  let ordered = false;
+  const builder = {
+    eq(column: string, value: string) {
+      filters.push([column, value]);
+      return builder;
+    },
+    order(column: string) {
+      if (column === 'id') ordered = true;
+      return builder;
+    },
+    range(from: number, to: number) {
+      if (options?.failFrom !== undefined && from >= options.failFrom) return Promise.resolve({ data: null, error: { message: 'page failed' } });
+      let matched = rows.filter((row) => filters.every(([column, value]) => String(row[column] ?? '') === value));
+      if (ordered) matched = [...matched].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+      const asked = to - from + 1;
+      const size = Math.min(asked, options?.cap ?? asked);
+      return Promise.resolve({ data: matched.slice(from, from + size) });
+    },
+    then(onfulfilled?: (value: { data: unknown[] }) => unknown) {
+      const matched = rows.filter((row) => filters.every(([column, value]) => String(row[column] ?? '') === value));
+      return Promise.resolve({ data: matched.slice(0, 1000) }).then(onfulfilled);
+    },
+  };
+  return builder;
+}
+const wideDeps = handoffDeps({
+  rpc: async () => ({ data: null }),
+  from(table: string) {
+    return { select: () => pageQuery(table === 'crm_accounts' ? wideAccounts : wideContacts) };
+  },
+} as never);
+const loadedWide = await wideDeps.accounts();
+const pastCap = loadedWide.find((row) => row.id === 'acct-1000');
+const foundPastCap = await wideDeps.accountById('acct-1000');
+assert(loadedWide.length === 1001 && pastCap?.requestContactEmail === 'shop1000@dispensary.test' && pastCap.doNotContact === true && foundPastCap?.id === 'acct-1000' && alertRecipientAllowed('shop1000@dispensary.test', loadedWide.map((row) => row.requestContactEmail || '')) === false, 'account reads page past 1000 rows so a later dispensary address still blocks an alert');
+const shortRows = ['c', 'a', 'e', 'b', 'd'].map((mark) => ({
+  id: `acct-${mark}`,
+  brand: 'cedargrowth',
+  display_name: `Shop ${mark}`,
+  city: null,
+  latitude: null,
+  longitude: null,
+  account_type: 'adult_use_dispensary',
+  request_contact_email: `shop${mark}@dispensary.test`,
+  bond_carried_skus: ['vape-1g'],
+  request_opt_out: false,
+}));
+const shortDeps = handoffDeps({
+  rpc: async () => ({ data: null }),
+  from(table: string) {
+    return { select: () => pageQuery(table === 'crm_accounts' ? shortRows : [], { cap: 2 }) };
+  },
+} as never);
+const loadedShort = await shortDeps.accounts();
+assert(loadedShort.map((row) => row.id).join('|') === 'acct-a|acct-b|acct-c|acct-d|acct-e' && alertRecipientAllowed('shope@dispensary.test', loadedShort.map((row) => row.requestContactEmail || '')) === false, 'account reads continue when the server returns fewer rows than the requested page');
+let pageAlertAllowed = false;
+let pageReported = '';
+try {
+  const failedDeps = handoffDeps({
+    rpc: async () => ({ data: null }),
+    from(table: string) {
+      return { select: () => pageQuery(table === 'crm_accounts' ? shortRows : [], { cap: 2, failFrom: 2 }) };
+    },
+  } as never);
+  const partial = await failedDeps.accounts();
+  pageAlertAllowed = alertRecipientAllowed('shope@dispensary.test', partial.map((row) => row.requestContactEmail || ''));
+} catch (error) {
+  pageReported = error instanceof Error ? error.message : '';
+}
+const pageLogs: string[] = [];
+const pageConsole = console.error;
+console.error = (...args: unknown[]) => { pageLogs.push(args.map((item) => String(item)).join(' ')); };
+const pageProvider = handoffProvider();
+const pageDenied = await handleBondRequestHttp(handoffRequest(handoffBody(481, quietShop.id), 'handoff-secret'), { ...handoffDepsLocal, accounts: async () => { throw new Error('page failed'); } }, { nowMs: handoffNow, env: { ...handoffEnv, CG_BOND_REQUEST_ALERT_TO: 'shope@dispensary.test' }, provider: pageProvider });
+console.error = pageConsole;
+assert(pageReported === 'page failed' && pageAlertAllowed === false && pageDenied.body?.result === 'rejected:rate' && pageDenied.body?.accounts === 'error' && pageLogs.some((line) => line.includes('page failed')) && pageProvider.calls.length === 0, 'a failed account page reports the error and does not send the alert');
 assert(retryProvider.calls.length === 0 && retryBook.rows[0].status === 'failed', 'a queued handoff older than 24 hours is marked failed without a provider call');
 assert(handoffSql.includes('revoke all on table public.crm_bond_request_handoffs from public, anon, authenticated, service_role') && handoffSql.includes('recipient') === false && handoffSql.includes('set search_path = pg_catalog') && handoffSql.includes('least(p_now, pg_catalog.now())'), 'E2 and privileges: no fee column, no recipient column, and the purge clock is capped');
 assert(/reservation|metrc|coupon|discount/i.test(handoffSrc) === false && /\u2013|\u2014/.test(handoffSrc) === false, 'handoff surfaces do not use reservation, Metrc, coupon, discount, or dash marks');

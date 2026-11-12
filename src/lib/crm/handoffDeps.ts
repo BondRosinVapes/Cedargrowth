@@ -4,9 +4,37 @@
 import { getSupabaseServerClient } from '@/lib/supabase';
 import { emptyHandoffBook, SHARE_CONSENT_VERSION, STORE_LIST_KEYS, type AccountView, type HandoffDeps, type HandoffRow, type HandoffStatus, type SendLogRow, type VisitPreference } from './requestHandoff';
 
-type RowQuery = PromiseLike<{ data: unknown[] | null }> & {
+type PageResult = { data: unknown[] | null; error?: { message?: string } | null };
+
+type RowQuery = PromiseLike<PageResult> & {
   eq: (column: string, value: string) => RowQuery;
+  order: (column: string) => RowQuery;
+  range: (from: number, to: number) => PromiseLike<PageResult>;
 };
+
+const ACCOUNT_PAGE = 1000;
+
+async function readPages(build: () => RowQuery): Promise<unknown[]> {
+  const rows: unknown[] = [];
+  let from = 0;
+  let pageSize = ACCOUNT_PAGE;
+  for (;;) {
+    const { data, error } = await build().order('id').range(from, from + pageSize - 1);
+    if (error) throw new Error(error.message || 'account page failed');
+    const batch = data || [];
+    if (batch.length === 0) return rows;
+    rows.push(...batch);
+    if (batch.length < pageSize) {
+      if (pageSize === ACCOUNT_PAGE) {
+        pageSize = batch.length;
+        from += batch.length;
+        continue;
+      }
+      return rows;
+    }
+    from += batch.length;
+  }
+}
 
 type HandoffDb = {
   rpc: (fn: string, args?: Record<string, unknown>) => PromiseLike<{ data: unknown }>;
@@ -125,11 +153,13 @@ function handoffRowFromRecord(data: unknown): HandoffRow | null {
 
 async function loadAccounts(db: HandoffDb | null, id: string | null): Promise<AccountView[]> {
   if (!db) return [];
-  const accounts = db.from('crm_accounts').select('id,brand,display_name,city,latitude,longitude,account_type,request_contact_email,bond_carried_skus,request_opt_out').eq('brand', 'cedargrowth');
-  const { data } = id ? await accounts.eq('id', id) : await accounts;
-  const contacts = await db.from('crm_contacts').select('account_id,preference').eq('preference', 'do_not_contact');
-  const blocked = new Set((contacts.data || []).map((row) => String((row as { account_id: string }).account_id)));
-  return ((data || []) as Record<string, unknown>[]).map((row) => ({
+  const data = await readPages(() => {
+    const accounts = db.from('crm_accounts').select('id,brand,display_name,city,latitude,longitude,account_type,request_contact_email,bond_carried_skus,request_opt_out').eq('brand', 'cedargrowth');
+    return id ? accounts.eq('id', id) : accounts;
+  });
+  const contacts = await readPages(() => db.from('crm_contacts').select('account_id,preference').eq('preference', 'do_not_contact'));
+  const blocked = new Set(contacts.map((row) => String((row as { account_id: string }).account_id)));
+  return (data as Record<string, unknown>[]).map((row) => ({
     id: String(row.id),
     brand: 'cedargrowth',
     displayName: String(row.display_name || ''),
