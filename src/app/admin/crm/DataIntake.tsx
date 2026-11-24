@@ -289,3 +289,108 @@ export function SpreadsheetUpload({ brand, onSaved }: { brand: CrmBrand; onSaved
     </div>
   );
 }
+
+type HoodieFileResult = {
+  fileName?: string;
+  sha256?: string;
+  duplicate?: boolean;
+  published?: boolean;
+  runId?: string | null;
+  status?: string;
+  errors?: string[];
+  warnings?: string[];
+  queued?: number;
+};
+
+export function HoodieMarketUpload({ brand }: { brand: CrmBrand }) {
+  const [periodMonth, setPeriodMonth] = useState('');
+  const [compareMonth, setCompareMonth] = useState('');
+  const [files, setFiles] = useState<HoodieFileResult[]>([]);
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [confirmPublish, setConfirmPublish] = useState(false);
+  const staged = files.filter((file) => file.status === 'validated' && file.runId && !file.duplicate);
+
+  async function stage(list: FileList | null) {
+    if (!list?.length || busy) return;
+    setBusy(true);
+    setMessage('');
+    setConfirmPublish(false);
+    try {
+      const body = new FormData();
+      body.set('brand', brand);
+      body.set('action', 'stage');
+      if (periodMonth) body.set('periodMonth', periodMonth);
+      if (compareMonth) body.set('compareMonth', compareMonth);
+      for (const file of Array.from(list)) body.append('file', file);
+      const headers = new Headers();
+      headers.set('x-cedargrowth-crm', '1');
+      const res = await fetch('/api/admin/crm/hoodie-import', { method: 'POST', body, headers, credentials: 'same-origin' });
+      const payload = (await res.json().catch(() => ({}))) as { reason?: string; files?: HoodieFileResult[] };
+      setFiles(payload.files || []);
+      setMessage(payload.files ? 'Staged. Nothing is published yet.' : String(payload.reason || 'The files were not staged.'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function publish() {
+    if (!confirmPublish || !staged.length || busy) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const headers = new Headers();
+      headers.set('x-cedargrowth-crm', '1');
+      headers.set('content-type', 'application/json');
+      const res = await fetch('/api/admin/crm/hoodie-import', {
+        method: 'POST',
+        headers,
+        credentials: 'same-origin',
+        body: JSON.stringify({ brand, action: 'publish', runIds: staged.map((file) => file.runId) }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as { published?: boolean; reason?: string };
+      setMessage(payload.published ? 'Published. Your name and the time are recorded.' : String(payload.reason || 'Nothing was published.'));
+      if (payload.published) setFiles((current) => current.map((file) => staged.some((row) => row.runId === file.runId) ? { ...file, status: 'published', published: true } : file));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-4 border border-hairline bg-clinical p-4">
+      <h3 className="font-display text-body-l text-primary">Hoodie market files</h3>
+      <p className="text-body-m text-primary">
+        Upload the Hoodie CSV exports. Each file is checksummed and staged. Store names that are not an exact account match go to a review queue. Unmatched stores are not added as accounts. Nothing is published until you approve it, and the approval records your staff name and the time.
+      </p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className={label}>Sales month for the volume driver files
+          <input type="month" value={periodMonth} onChange={(event) => setPeriodMonth(event.target.value)} className={input} />
+        </label>
+        <label className={label}>Compare month
+          <input type="month" value={compareMonth} onChange={(event) => setCompareMonth(event.target.value)} className={input} />
+        </label>
+      </div>
+      <label className={label}>CSV files
+        <input type="file" accept=".csv,text/csv" multiple disabled={busy} onChange={(event) => stage(event.target.files)} className="text-body-m text-primary" />
+      </label>
+      {message ? <p role="status" className="border border-hairline bg-bone px-3 py-2 text-body-m text-primary">{message}</p> : null}
+      {files.length ? (
+        <ul className="flex flex-col border border-hairline">
+          {files.map((file) => (
+            <li key={`${file.fileName}-${file.sha256}`} className="border-b border-hairline px-3 py-2 text-caption text-secondary last:border-b-0">
+              <span className="font-mono text-specimen text-tertiary">{file.fileName}</span>{' '}
+              {file.duplicate ? 'Duplicate checksum. Not loaded again.' : file.status === 'validated' ? `Staged. ${file.queued || 0} stores queued for review.` : 'Not staged.'}
+              {(file.errors || []).map((error) => <span key={error} className="block text-primary" role="alert">{error}</span>)}
+              {(file.warnings || []).slice(0, 3).map((warning) => <span key={warning} className="block">{warning}</span>)}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <label className="flex items-center gap-2 text-caption text-secondary">
+        <input type="checkbox" checked={confirmPublish} onChange={(event) => setConfirmPublish(event.target.checked)} />
+        Publish the staged files. This records me as the approver.
+      </label>
+      <button type="button" disabled={!confirmPublish || !staged.length || busy} onClick={publish} className={`${primaryButton} w-fit`}>Publish {staged.length} staged file{staged.length === 1 ? '' : 's'}</button>
+    </div>
+  );
+}
