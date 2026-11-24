@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, LEAD_SOURCE_LABELS, LEAD_SOURCES, OPPORTUNITY_STAGES, type CrmBrand, type ProductLine } from '@/lib/crm/engine';
+import { ACCOUNT_TYPE_LABELS, ACCOUNT_TYPES, LEAD_SOURCE_LABELS, LEAD_SOURCES, OPPORTUNITY_STAGES, WHOLESALE_BRAND, type CrmBrand, type ProductLine } from '@/lib/crm/engine';
 import { ORDER_STATUS_LABELS } from '@/lib/crm/distributor';
 import {
   DEAL_STATUSES,
@@ -14,7 +14,7 @@ import {
 } from '@/lib/crm/dashboard';
 import { sectionFromSearch, type DashboardSection } from '@/lib/crm/dashboardSections';
 import { WON_MERGE_FAILED } from '@/lib/crm/distributionMerge';
-import { QuickAdd, SpreadsheetUpload } from './DataIntake';
+import { HoodieMarketUpload, QuickAdd, SpreadsheetUpload } from './DataIntake';
 import { DashboardSectionHost, DashboardTabs } from './DashboardTabs';
 import { DigestPanel } from './DigestPanel';
 import { NextActions, TerritoryMap } from './TerritoryMap';
@@ -85,7 +85,7 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
   const [failed, setFailed] = useState(false);
   const [forecast, setForecast] = useState<ForecastBody | null>(null);
   const [tick, setTick] = useState(0);
-  const [panel, setPanel] = useState<'none' | 'add' | 'upload'>('none');
+  const [panel, setPanel] = useState<'none' | 'add' | 'upload' | 'hoodie'>('none');
 
   // Live refresh: every 60 seconds while the tab is visible, when the tab regains focus,
   // and right after anything is added or imported from this screen.
@@ -190,11 +190,13 @@ export function DashboardWing({ brand, brandName, canEditCapacity = false, onOpe
             <button type="button" onClick={refresh} className="border border-hairline bg-clinical px-3 py-2 font-mono text-specimen uppercase text-primary">Refresh</button>
             <button type="button" aria-expanded={panel === 'add'} onClick={() => setPanel(panel === 'add' ? 'none' : 'add')} className={`border px-3 py-2 font-mono text-specimen uppercase ${panel === 'add' ? 'border-ink bg-ink text-inverse' : 'border-ink text-primary'}`}>+ Quick add</button>
             <button type="button" aria-expanded={panel === 'upload'} onClick={() => setPanel(panel === 'upload' ? 'none' : 'upload')} className={`border px-3 py-2 font-mono text-specimen uppercase ${panel === 'upload' ? 'border-ink bg-ink text-inverse' : 'border-ink text-primary'}`}>Upload spreadsheet</button>
+            {brand === WHOLESALE_BRAND ? <button type="button" aria-expanded={panel === 'hoodie'} onClick={() => setPanel(panel === 'hoodie' ? 'none' : 'hoodie')} className={`border px-3 py-2 font-mono text-specimen uppercase ${panel === 'hoodie' ? 'border-ink bg-ink text-inverse' : 'border-ink text-primary'}`}>Hoodie market</button> : null}
           </div>
         </div>
 
         {panel === 'add' ? <QuickAdd brand={brand} onSaved={refresh} /> : null}
         {panel === 'upload' ? <SpreadsheetUpload brand={brand} onSaved={refresh} /> : null}
+        {panel === 'hoodie' && brand === WHOLESALE_BRAND ? <HoodieMarketUpload brand={brand} /> : null}
 
         <DashboardSectionHost
           section={section}
